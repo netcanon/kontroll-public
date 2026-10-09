@@ -9,7 +9,7 @@
 |---|---|---|
 | The tool — code, playbooks, registries, generators, tests, docs | **yes** (this is the source of truth for the tool) | mirrored |
 | `instance.example/` — the placeholder overlay (TEST-NET addresses, one fake age recipient, canary tokens) | yes | yes |
-| `instance/` — YOUR overlay: inventory, `.sops.yaml` recipients, encrypted secrets, fleet selection, Homepage tiles, `leak-tokens.txt` | **never** (git-ignored there; the PII-guard workflow fails if any path under it is ever tracked) | tracked |
+| `instance/` — YOUR overlay: inventory, `.sops.yaml` recipients, encrypted secrets, fleet selection, Homepage tiles, `leak-tokens.txt` | **never** (git-ignored there; the PII guard checks that it is ignored and that nothing under it is tracked) | tracked |
 | `docs/reviews/` dossiers written before the split (they quote the maintainer's real topology) | never | tracked |
 | `local/` | never (git-ignored everywhere) | never |
 | Git history | **fresh** — the public repository starts at the cut commit | the full history |
@@ -63,25 +63,94 @@ The workflows are identical files. Every job's `runs-on` is
 | `validate --strict` | every tool installed in the job (sha256-pinned sops, gitleaks, promtool, vector) | same |
 | Rulesets | `main`: require a pull request + every CI check green, no force-push, no deletion; `v*` tags immutable | not available on the plan (checks are advisory) |
 | Secret scanning + push protection, CodeQL default setup, Dependabot alerts | on | not available on the plan |
-| `publish-images.yml` | publishes `ghcr.io/<owner>/kontroll-*` on a `v*` tag — until the package names move, `docker/images.lock.yml` still pins the private org's packages | publishes the private org's packages |
+| `publish-images.yml` | publishes `ghcr.io/<owner>/kontroll-*` (the owner read from the repository, nothing hard-coded) on a `v*` tag or by `workflow_dispatch`. Until the re-pin below lands, `docker/images.lock.yml` still names the pre-split private org's `v0.1.1` images, which a public clone cannot pull — the default local build is unaffected | the same file publishes the instance's own packages, if it ever needs them |
+| `KONTROLL_CODE_SCANNING` variable | `true` after the flip → the zizmor job also uploads SARIF to code scanning (free on a public repo) | unset (code scanning is a GHAS feature on a private plan; the upload would 403) |
 
-## Day-to-day
+## Day-to-day — the weekly sync
 
-- **Develop on the public repository**: feature branch → pull request → the required checks → merge. That is
-  where the enforcement is.
-- **The private instance repository tracks it**: add the public repo as `upstream`, merge `upstream/main`
-  into the private `main` (`--allow-unrelated-histories` once, at the graft), rebase the instance branch(es)
-  on top. The private repo never pushes to the public remote
-  (`git remote set-url --push upstream DISABLED` is a cheap belt-and-braces).
-- **A private-side fix that belongs to the tool** is cherry-picked onto a public branch and goes through a
-  public pull request like everything else — the PII guard runs on it.
-- **Your instance's names change** → update `instance/leak-tokens.txt` and the `KONTROLL_LEAK_TOKENS` secret.
+- **Tool changes land on the public repository first**: feature branch → pull request → the required checks →
+  squash-merge. That is where the enforcement is. The private instance repository *receives* them by sync; it
+  never carries a tool fix of its own first (a private-first fix comes back from the public squash with review
+  edits and conflicts at the next sync — if a production emergency forces one, resolve that file to the public
+  side at the next sync). A fix cherry-picked from a pre-split private branch is scrubbed before it goes up.
+- **The private repository tracks the public one through a merge, never a rebase or a squash.** `upstream`
+  is the public repo with its push URL set to `DISABLED`; the first sync was a one-time
+  `--allow-unrelated-histories` graft, every later one is a plain merge. The private repository allows **merge
+  commits only** (squash and rebase merging are switched off in its settings): a squash would drop the graft
+  and the next sync would ask for unrelated histories again. If git ever asks for `--allow-unrelated-histories`
+  on a sync, stop — the graft was lost.
+
+```bash
+# the weekly sync, in the private instance repository
+git fetch upstream --no-tags                      # remote.upstream.tagOpt is --no-tags: public tags never land here
+git switch -c sync/upstream-$(date -u +%F) origin/main
+git merge --no-ff --no-edit upstream/main          # conflicts: see the rules below
+git diff --name-status upstream/main HEAD -- . ':!instance' ':!docs/reviews'   # must print exactly: M .gitignore
+bash tests/validate.sh --strict && python3 -m pytest -m "not e2e and not slow" -q
+git push -u origin HEAD && gh pr create --fill && gh pr merge --merge     # a MERGE commit, never squash/rebase
+git fetch origin && git merge-base --is-ancestor upstream/main origin/main && echo "graft intact"
+```
+
+Conflict rules:
+- `.gitignore` is the one tool file the instance diverges on (the public tree ignores `instance/`; the instance
+  tracks it). Resolve by taking the public side and deleting the overlay stanza again. The acceptance line above
+  catches a wrong resolution; so does the PII guard (`instance/` tracked AND ignored fails).
+- `CHANGELOG.md`: the private side never edits it (private-only notes go in `instance/`); public entries all
+  insert under `## [Unreleased]`, newest first, so a sync never conflicts there.
+- `docker/code-manifest.lock.yml`: regenerate (`python3 scripts/gen-code-manifest.py`), never hand-merge.
+
+After the sync merges: on the control node `scripts/update.sh` (origin `main`) pulls it into the local canonical,
+then `deploy-stack` (the api container runs a deploy-managed copy, so a restart alone runs stale code).
+
+Also weekly:
+- **Leak-token parity**: the public secret `KONTROLL_LEAK_TOKENS` must equal `instance/leak-tokens.txt`. The
+  PII-guard job prints the pattern count it loaded; compare it with `grep -cvE '^\s*(#|$)' instance/leak-tokens.txt`
+  and re-set the secret whenever the file changes (`gh secret set KONTROLL_LEAK_TOKENS --repo <public> < instance/leak-tokens.txt`).
+- **Dependabot opens the same bumps on both repositories** (the file is shared): merge on the public side, close
+  the private twin, receive it by sync.
+- **Tags**: the private repository's `v0.1.x` tags predate the split; the public line starts above them. Never
+  push a public tag to the private remote (its `publish-images.yml` would re-publish under the private org).
+- **The image lock**: once the re-pin below has synced, the private box deploys the public owner's packages —
+  its `docker login ghcr.io` credential must be able to read that owner's packages while they are private
+  (SECURITY.md R-IMG-1), or the next `deploy-stack` with `use_published_images=true` fails at pull.
+- The PII guard runs on GitHub-hosted runners even on the private repository (a public-repo guard must never use
+  the self-hosted ones), so it spends the private plan's hosted minutes; if that budget is exhausted the guard
+  stops running on private PRs — loudly.
+- Code scanning: the private org's code-security configuration does not reach the public repository (a different
+  owner); CodeQL default setup there is the per-repository step in the checklist.
+- The `homelab` tine is caught up with ONE merge from `main` after a sync, not a rebase of its whole history.
+
+## Publishing the images (the re-pin, once)
+
+`docker/images.lock.yml` is re-pinned from the pre-split private org's images to the public owner's in this order
+— a re-pin that lands before the packages are pullable breaks every published-image deploy that syncs it:
+
+1. `publish-images.yml` is owner-agnostic and its third-party actions SHA-pinned (public PR #9); `gen-image-digests.py
+   --refresh` fails closed.
+2. Pre-flight: `gh api 'users/<owner>/packages?package_type=container'` shows no stale `kontroll-*` package that this
+   repository is not granted to (the `GITHUB_TOKEN` push would be refused).
+3. `gh workflow run publish-images.yml --ref main -f tag=sha-<short main>` (the workflow checks the tag names the
+   commit it builds); wait for the three images.
+4. Make the three packages public — part of the operator-approved flip, because it cannot be undone (GitHub has no
+   API for package visibility; each package's settings page).
+5. The re-pin PR: `python3 scripts/gen-image-digests.py --refresh sha-<short> --owner <owner>` (one command: refs,
+   tag, digests; nothing is written if a digest does not resolve); check each image's
+   `org.opencontainers.image.revision` label names that commit (`docker buildx imagetools inspect <ref>@<digest>
+   --format '{{json .}}'`); from a **logged-out** shell, `docker buildx imagetools inspect <ref>@<digest>` succeeds
+   for all three; then merge.
+6. Instance side: confirm the control node's registry credential (above), then a dry run before the first deploy
+   that pulls the new digests. Later releases re-pin to a `v*` tag, which the public ruleset makes immutable; the
+   `sha-` tag is the one-off bridge.
 
 ## Operator checklist for the first publish
 
 1. Create the public repository **private**, push the cut, let CI run green (GitHub-hosted).
 2. Set the repository secret `KONTROLL_LEAK_TOKENS` from `instance/leak-tokens.txt`.
-3. Flip the visibility to public; immediately apply the rulesets (`main` required checks, immutable `v*`),
-   enable secret scanning + push protection, CodeQL default setup, Dependabot alerts + security updates.
+3. Flip the visibility to public; immediately apply the rulesets (`main` required checks with
+   `strict_required_status_checks_policy: true`, immutable `v*`), enable secret scanning + push protection, CodeQL
+   default setup, Dependabot alerts + security updates, and set the repository variable
+   `KONTROLL_CODE_SCANNING=true` (the zizmor SARIF seat; dispatch `zizmor.yml` once to see the first upload).
 4. Re-run the full identifier sweep (`tests/_leak_guard.py --tree` with the private list) on the pushed tree —
    the same command, the same zero.
+5. Publish the images and make the three packages public, then merge the re-pin (the order above). Until then a
+   clone that deploys with `use_published_images=true` needs a `read:packages` login (SECURITY.md R-IMG-1).

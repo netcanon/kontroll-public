@@ -2,10 +2,16 @@
 # test suite), the GitHub Actions, and the runner image's base. netcanon parity (2026-10-08): a 7-day cooldown
 # on every ecosystem (an upstream yank/hotfix window closes before we adopt — zizmor's dependabot-cooldown rule
 # has an internal minimum of 7), minor+patch grouped so a week of bumps is one reviewable PR, and PR limits.
+# The pip files are `>=` FLOORS (always test/run against the latest), so their strategy is increase-if-necessary:
+# a floor that already admits the newest release gets no version PR — for pure floors that means none; floors are
+# raised by hand when a release matters. Vulnerabilities are gated by pip-audit (security.yml) over the gui, api
+# and tests files; Dependabot security updates add to that only where a resolvable version exists. The default
+# strategy chased every release with a floor bump (five PRs the first week).
 version: 2
 updates:
   - package-ecosystem: pip
     directory: /gui                 # gui/requirements.txt (flask)
+    versioning-strategy: increase-if-necessary
     schedule:
       interval: weekly
       day: monday
@@ -18,7 +24,22 @@ updates:
     labels: [dependencies, python]
 
   - package-ecosystem: pip
+    directory: /api                 # api/requirements.txt (fastapi, uvicorn)
+    versioning-strategy: increase-if-necessary
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 3
+    groups:
+      api-minor-and-patch:
+        update-types: ["minor", "patch"]
+    labels: [dependencies, python]
+
+  - package-ecosystem: pip
     directory: /tests               # tests/requirements-dev.txt (pytest, fastapi, httpx, playwright, …)
+    versioning-strategy: increase-if-necessary
     schedule:
       interval: weekly
       day: monday

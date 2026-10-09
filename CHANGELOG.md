@@ -11,6 +11,38 @@ NetConfig project.
 
 ## [Unreleased]
 
+### chore(ci,docs): public-split follow-ups — owner-agnostic image publish, the zizmor SARIF seat, Dependabot floors, two cosmetic fixes (2026-10-09)
+
+Review of record: `docs/reviews/2026-10-09-public-split-follow-ups/` (three read-only agents over this change, the
+trailer seam and the private graft; the must-fixes are folded in here).
+- **`publish-images.yml` publishes under the repository's owner** (`ghcr.io/<owner>/kontroll-*`, lowercased from
+  `github.repository_owner`) instead of a hard-coded private org, so the same file publishes the public tool's
+  packages and any instance's own. A dispatch is honoured from `main` or a `v*` tag only, the tag must fit the
+  docker tag grammar, a `sha-<short>` tag must name the commit being built, and every image carries
+  `org.opencontainers.image.source`/`revision`. The four `docker/*` actions in that job are now SHA-pinned (the
+  repo's own `.github/zizmor.yml` policy, which the comment had claimed was moot and SECURITY.md C6 had called
+  "forced"; both corrected). `gen-image-digests.py --refresh` **fails closed** (nothing written, exit 1, when a
+  digest does not resolve — it used to keep the old digest under the new ref/tag) and takes `--owner <owner>` so the
+  re-pin is one command. The lock itself is re-pinned in a separate change once the public packages exist and are
+  pullable (`docs/public-split.md`, "Publishing the images"); until then it still names the private org's
+  `v0.1.1` images. The synthetic refs in three test fixtures no longer name an org.
+- **zizmor gains a SARIF seat** as its own job, gated on the repository variable `KONTROLL_CODE_SCANNING=true`
+  (set by the flip on the public repo, where code scanning is free; the private instance repo leaves it unset and
+  the job — and its `security-events: write` grant — never exists there). The scan is rooted at the repository so
+  every uploaded URI is real, nothing masks a tool failure, and both jobs stay advisory.
+- **Dependabot stops chasing `>=` floors**: the pip ecosystems use `versioning-strategy: increase-if-necessary`,
+  which for pure floors means no version PRs at all (five floor-bump PRs arrived the first week); floors are
+  raised by hand when a release matters. `api/requirements.txt` is now covered by Dependabot and `pip-audit`
+  audits the gui, api and tests files (the api file had been invisible to both).
+- `docs/public-split.md` gains the weekly sync recipe with its acceptance checks and conflict rules (merge commits
+  only; tool fixes land public-first; the `.gitignore` resolution; token parity; Dependabot twins; tags; the image
+  lock and the control node's registry credential), the image publish + re-pin order, and the package-visibility
+  step in the flip checklist; `THIRD-PARTY-NOTICES.md` says what the published images redistribute.
+- Four text-pin tests (`tests/unit/test_ci_workflows.py`) and two `--refresh` tests keep all of the above true.
+- Cosmetic: the generated Loki overrides header pointed at a private review-dossier path (now
+  `docs/logging-architecture.md`; `docker/loki/overrides/retention.generated.yaml` regenerated);
+  `configure-semaphore.py` dropped a defined-and-unused `REPO_GIT_URL` naming a remote the tool does not own;
+  leftover "private ghcr" wording swept.
 ### fix(gitio): one configurable attribution trailer on machine-made commits (public-split follow-up F9) (2026-10-09)
 
 Eighteen call sites — the API routes, the onboard-GUI and `galaxy.py --commit` — each carried a literal

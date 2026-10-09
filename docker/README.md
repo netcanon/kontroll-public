@@ -39,11 +39,13 @@ Re-run it to add services as later phases enable them.
 | Missing required `${VAR}` | `compose config` fails (fail-closed) — validate catches it |
 | Missing `docker/.env` | optional `env_file` (`required: false`) — service starts without live widgets |
 
-## Publishing images (C0/C1 — private ghcr, pull by digest)
+## Publishing images (C0/C1 — ghcr, pull by digest)
 
-The Semaphore runner, Vector, and installer images can be **published once** to private
-`ghcr.io/netcanon-dev/kontroll-{control,vector,installer}` and pulled BY DIGEST instead of built on every control node
-(report 22). **Opt-in** — the local `docker build` path is the default and unchanged.
+The Semaphore runner, Vector, and installer images can be **published once** to
+`ghcr.io/<owner>/kontroll-{control,vector,installer}` — the publishing repository's owner, never hard-coded — and
+pulled BY DIGEST instead of built on every control node (report 22). **Opt-in** — the local `docker build` path is
+the default and unchanged. A package inherits the repository's visibility at its first publish; the public tool's
+packages are made public once, by hand, in each package's settings (no API exists for it).
 
 - **Publish** (a release tag, or `workflow_dispatch`) → [`.github/workflows/publish-images.yml`](../.github/workflows/publish-images.yml)
   builds + pushes with the built-in `GITHUB_TOKEN`. The runner bakes the **all-modules superset**

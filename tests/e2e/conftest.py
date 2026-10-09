@@ -114,7 +114,7 @@ def _mock_service_seams():
     # C1 images sub-panel (§7.3): one canned digest-pinned image so the amber image badge renders in a real browser.
     _prov.image_provenance = lambda: {
         "available": True, "signing_configured": False,
-        "images": [{"name": "kontroll-control", "ref": "ghcr.io/netcanon-dev/kontroll-control", "tag": "v1",
+        "images": [{"name": "kontroll-control", "ref": "ghcr.io/example/kontroll-control", "tag": "v1",
                     "digest": "sha256:" + "a" * 64, "digest_short": "a" * 12, "class": "digest-pinned",
                     "note": "Docker verifies this @sha256: on every pull — not a signature (a digest-pin is not signed)"}],
         "summary": {"total": 1, "digest_pinned": 1, "local_build": 0, "signed": 0}}

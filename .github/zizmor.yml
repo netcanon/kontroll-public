@@ -6,8 +6,11 @@
 # org is a real, if low-probability, supply-chain compromise vector). Without this policy
 # the rule re-fires on every `actions/checkout@v6` call, drowning real findings in noise.
 #
-# kontroll currently uses ONLY first-party actions (actions/checkout, actions/setup-python),
-# so this keeps the scan quiet until a third-party action is added — which must then SHA-pin.
+# kontroll's third-party actions are the docker/* set in publish-images.yml (the one job that
+# can push to the package namespace); each is SHA-pinned with a version comment and Dependabot
+# keeps the pins current (tests/unit/test_ci_workflows.py pins the rule). The scan is advisory:
+# a new third-party tag-pin is FLAGGED in the log (and in the Security tab where the SARIF seat
+# is on), never blocked — SECURITY.md C6.
 rules:
   unpinned-uses:
     config:

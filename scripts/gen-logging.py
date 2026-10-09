@@ -53,7 +53,7 @@ LOKI_OVERRIDES_HEADER = (
     "# overrides file (hot-reloaded; period 10s). Keyed on tenant 'fake' (auth_enabled:false). Do NOT edit by\n"
     "# hand — set a `retention` param on a module's logs: entry and re-run (deploy-stack regenerates it before\n"
     "# bringing Loki up). Absent retention => `overrides: {}` (the bounded global LOKI_RETENTION_PERIOD applies).\n"
-    "# M-1 seam verification: docs/reviews/2026-06-16-storage-logging/40-m1-loki-retention-dogfood.md.\n")
+    "# How the retention seam is wired and was verified: docs/logging-architecture.md.\n")
 # The canonical, low-cardinality, NON-SECRET Loki label set (C12). gen-logging fail-closes on any label outside
 # it; the capability sink labels by these only. `source`/`run_id` are sink-side; a method contributes the rest.
 _CANONICAL_LABELS = {"source", "host", "service", "level", "run_id", "device"}
