@@ -13,6 +13,43 @@ import subprocess
 
 from kontroll import paths
 
+# The attribution trailer every machine-made commit carries (the API/GUI propose paths and the operator CLI's
+# `--commit`), in ONE place. It used to be eighteen string literals naming the model that wrote the code — an
+# attribution that was wrong on every commit the control plane makes on an operator's behalf (public-split
+# review 2026-10-08, F9). Configurable per deployment: KONTROLL_COMMIT_TRAILER overrides the text — the
+# containers read it from docker/.env (rendered by deploy-stack from `kontroll_commit_trailer`), the operator CLI
+# (galaxy.py --commit) from the calling shell; `none`/`off`/`disabled` turn the trailer off (the repo's off-switch
+# vocabulary, api/ratelimit.py); unset/empty keeps the default. The default names the tool (the same identity the
+# containers commit as — docker/semaphore-runner/Dockerfile), never a person.
+COMMIT_TRAILER_ENV = "KONTROLL_COMMIT_TRAILER"
+DEFAULT_COMMIT_TRAILER = "Co-Authored-By: kontroll <kontroll@localhost>"
+_TRAILER_OFF = ("none", "off", "disabled")
+
+
+def commit_trailer():
+    """The trailer line to append, or "" when disabled. Read DYNAMICALLY (not at import) so a deploy's .env and
+    the tests' monkeypatch both take effect without a reload."""
+    raw = (os.environ.get(COMMIT_TRAILER_ENV) or "").strip()
+    if not raw:
+        return DEFAULT_COMMIT_TRAILER
+    if raw.lower() in _TRAILER_OFF:
+        return ""
+    return raw
+
+
+def commit_message_args(message_lines):
+    """`git commit` -m arguments: the caller's subject/body lines plus the one trailer — appended ONCE, last,
+    and never duplicated when a caller already carries it. The single seam every commit path builds its message
+    through (commit_and_push below; galaxy.py's inline `--commit` paths), so a trailer edit is a setting change."""
+    lines = [m for m in message_lines]
+    trailer = commit_trailer()
+    if trailer and trailer not in lines:
+        lines.append(trailer)
+    args = []
+    for m in lines:
+        args += ["-m", m]
+    return args
+
 
 def _run(cmd, cwd=None, quiet_args=0):
     shown = cmd[:len(cmd) - quiet_args] + (["***"] if quiet_args else [])
@@ -290,10 +327,7 @@ def commit_and_push(paths, message_lines, push_origin=False, run_id=None):
     target = _push_target(run_id)   # resolve FIRST: a staging service without a run_id raises before any mutation
     staging = target != "main"
     _run(["git", "add"] + list(paths))
-    margs = []
-    for m in message_lines:
-        margs += ["-m", m]
-    crc = _run(["git", "commit"] + margs)
+    crc = _run(["git", "commit"] + commit_message_args(message_lines))   # + the one configurable trailer
     if crc != 0:
         if staging:                 # a failed commit left the apply's write in the tree — drop it so the next read is clean
             _reset_content_clone_to_canonical()

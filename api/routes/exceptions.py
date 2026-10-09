@@ -55,8 +55,7 @@ def add_exception(body: CaptureExceptionIn, request: Request,
     git = gitio.commit_and_push(
         [os.path.join("config", "capture-exceptions.yml")],
         ["feat(logging): capture-exception += %s" % body.match,
-         "Added via the kontroll API (run_id %s; subject %s)." % (principal.run_id, body.subject),
-         "Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"],
+         "Added via the kontroll API (run_id %s; subject %s)." % (principal.run_id, body.subject)],
         push_origin=body.push, run_id=principal.run_id)   # staging network service ⇒ proposed/<run_id> (C10)
     if not git["committed"]:           # never push a stale HEAD on a failed commit
         raise HTTPException(status_code=500, detail="commit failed; nothing pushed")

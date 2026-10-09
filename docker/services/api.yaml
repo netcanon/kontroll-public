@@ -49,6 +49,9 @@ services:
       # C10 propose-then-promote: when set (gated deploy), the canonical push targets a proposed/<run_id>
       # STAGING ref, never main. Empty ⇒ direct push (moot in read-only mode — nothing writes).
       KONTROLL_STAGE_PUSHES: ${KONTROLL_STAGE_PUSHES:-}
+      # The attribution trailer on every machine-made commit (gitio.commit_message_args — ONE seam). Empty ⇒ the
+      # default `Co-Authored-By: kontroll <kontroll@localhost>`; `none` ⇒ no trailer; any other text ⇒ that line.
+      KONTROLL_COMMIT_TRAILER: ${KONTROLL_COMMIT_TRAILER:-}
       # Persistent (NOT /tmp) so the audit trail survives a container restart AND Vector can tail it (logging
       # Layer 1). The host dir /var/lib/kontroll/api/audit is created uid-1001/0750 by deploy-stack.
       KONTROLL_API_AUDIT_LOG: /audit/api-audit.log

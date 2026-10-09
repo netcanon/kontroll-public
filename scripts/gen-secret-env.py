@@ -60,6 +60,7 @@ RESERVED_PLATFORM_CORE_ENV = frozenset({
     "KONTROLL_JOURNAL_GID",   # the host systemd-journal GID (deploy-stack getent) for non-root Vector's group_add
     "GUI_USER", "GUI_PASSWORD", "GUI_TLS_CERT", "GUI_TLS_KEY",
     "KONTROLL_API_UVICORN_EXTRA", "KONTROLL_API_TOKEN", "KONTROLL_STAGE_PUSHES", "KONTROLL_CANONICAL_MODE",
+    "KONTROLL_COMMIT_TRAILER",   # the one attribution trailer on machine-made commits (gitio.commit_message_args)
     "KONTROLL_VECTOR_IMAGE",   # the gated custom Vector image tag (file_tail_ssh); not fleet-growing -> platform-core
     "KONTROLL_CODE_ROOT", "KONTROLL_WRITE_ROOT",   # Phase-B bake-code: gated code-root + propose write-root (api flip)
 })

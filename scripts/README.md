@@ -202,7 +202,9 @@ the prior:
   and the `instance/fleet.yml` enable.
 - `--username/--password` or `--api-token` — **encrypted into the secrets domain**
   (`sops --set`, namespaced per host) at apply time; the host references them inline.
-- `--commit` — rationale-first commit (with the `Co-Authored-By` trailer), including the
+- `--commit` — rationale-first commit (plus the one configurable attribution trailer: the CLI reads
+  `KONTROLL_COMMIT_TRAILER` from the calling shell — the containers take it from `docker/.env`, see
+  [`docker/.env.example`](../docker/.env.example)), including the
   re-encrypted secrets file, then **pushes the local canonical** (`file:///srv/kontroll.git`)
   so **Semaphore sees the new host with no GitHub** (the instance is the source of truth —
   [docs/local-source-of-truth.md](../docs/local-source-of-truth.md)).

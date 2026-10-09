@@ -405,8 +405,7 @@ def api_homepage_apply():
     git = gitio.commit_and_push(out["paths"], [
         "feat(homepage): rearrange the portal via the Homepage editor",
         "Reordered/selected control-plane tiles via the kontroll GUI (run_id %s). Data-only edit of the tracked "
-        "homepage overlay; the generated fleet block is untouched." % run_id,
-        "Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"],
+        "homepage overlay; the generated fleet block is untouched." % run_id],
         run_id=run_id)               # staging GUI ⇒ proposed/<run_id> (C10), never main
     _audit("homepage-result", "committed=%s staged=%s run_id=%s" % (git["committed"], git["staged"], run_id))
     if not git["committed"]:
@@ -539,8 +538,7 @@ def api_onboard():
         applied["paths"],
         ["feat(onboard): %s -> %s via %s backend" % (d["collection"], d["key"], plan["backend"]),
          "Onboarded via the kontroll onboarding GUI (run_id %s). Host %s in group %s; staged — verify live." % (
-             run_id, plan["host_name"], d["group"]),
-         "Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"],
+             run_id, plan["host_name"], d["group"])],
         push_origin=bool(d.get("push")), run_id=run_id)   # staging GUI ⇒ proposed/<run_id> (C10)
     _audit("onboard-result", "key=%s committed=%s staged=%s run_id=%s" % (
         d["key"], git["committed"], git["staged"], run_id))
@@ -639,8 +637,7 @@ def api_capability(cap):
         out["paths"],
         ["feat(%s): enable on %s via the capability dialog" % (cap, key),
          "Promoted via the kontroll onboarding GUI (run_id %s). Data-only write; nothing actuated until "
-         "the enact commands run." % run_id,
-         "Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"],
+         "the enact commands run." % run_id],
         push_origin=bool(d.get("push")), run_id=run_id)   # staging GUI ⇒ proposed/<run_id> (C10)
     # severity is re-derived from the SERVER's recomputed plan (out["plan"]), never a client-sent field — the
     # reconfigure audit carries the change severity + paths (non-secret), correlated by run_id (M1).
@@ -744,8 +741,7 @@ def api_actuation_create():
         ["feat(actuation): create app-store unit %s via the GUI" % key,
          "Authored the actuation unit descriptor for %s via the kontroll onboarding GUI (run_id %s). Config-only "
          "write (no secret); nothing installed/actuated until the operator promotes the proposal, then "
-         "configures + runs the unit in Semaphore." % (key, run_id),
-         "Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"],
+         "configures + runs the unit in Semaphore." % (key, run_id)],
         push_origin=bool(d.get("push")), run_id=run_id)   # staging GUI ⇒ proposed/<run_id> (C10)
     _audit("unit-result", "key=%s committed=%s staged=%s run_id=%s" % (key, git["committed"], git["staged"], run_id))
     if not git["committed"]:
@@ -831,8 +827,7 @@ def api_actuation_stage(key):
         ["feat(actuation): stage configure values for %s via the GUI" % key,
          "Staged the configure values for actuation unit %s via the kontroll onboarding GUI (run_id %s). "
          "Config-only write (no secret); nothing actuated until the operator promotes the proposal + runs the "
-         "unit in Semaphore." % (key, run_id),
-         "Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"],
+         "unit in Semaphore." % (key, run_id)],
         push_origin=bool(d.get("push")), run_id=run_id)   # staging GUI ⇒ proposed/<run_id> (C10)
     _audit("unit-config-result", "key=%s committed=%s staged=%s run_id=%s" % (
         key, git["committed"], git["staged"], run_id))
@@ -885,8 +880,7 @@ def api_identity(key):
         out["paths"],
         ["feat(identity): reconfigure %s identity via the GUI" % key,
          "Re-classified module identity (run_id %s). Data-only write; the operator regenerates targets + "
-         "re-runs bootstrap/deploy-stack to make it live (the enact hints)." % run_id,
-         "Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"],
+         "re-runs bootstrap/deploy-stack to make it live (the enact hints)." % run_id],
         push_origin=bool(d.get("push")), run_id=run_id)   # staging GUI ⇒ proposed/<run_id> (C10)
     # severity re-derived from the SERVER's recomputed plan (out["plan"]), never a client field (M1).
     _audit("identity-result", "key=%s severity=%s changed=%s paths=%d committed=%s staged=%s run_id=%s" % (
@@ -938,8 +932,7 @@ def api_host(key, host):
         out["paths"],
         ["feat(inventory): reconfigure %s host %s via the GUI" % (key, host),
          "Host-var edit (run_id %s). Data-only write of the banner-owned drop-in; the operator verifies "
-         "reachability + re-runs as needed (the enact hints)." % run_id,
-         "Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"],
+         "reachability + re-runs as needed (the enact hints)." % run_id],
         push_origin=bool(d.get("push")), run_id=run_id)   # staging GUI ⇒ proposed/<run_id> (C10)
     _audit("host-result", "key=%s host=%s severity=%s changed=%s paths=%d committed=%s staged=%s run_id=%s" % (
         key, host, (out["plan"].get("severity") or "modify"), True, len(out.get("paths") or []),
@@ -977,8 +970,7 @@ def _settings_promote(build_fn, audit_label, audit_detail, run_id, *build_args):
         out["paths"],
         ["feat(settings): %s via the GUI" % audit_detail,
          "Platform-settings edit (run_id %s). Data-only stage of a tracked instance/fleet knob; the operator "
-         "promotes + re-runs deploy-stack to take effect (the enact hints)." % run_id,
-         "Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"],
+         "promotes + re-runs deploy-stack to take effect (the enact hints)." % run_id],
         push_origin=bool(body.get("push")), run_id=run_id)
     _audit("%s-result" % audit_label, "%s severity=%s changed=%s committed=%s staged=%s run_id=%s" % (
         audit_detail, (out["plan"].get("severity") or "modify"), True, git["committed"], git["staged"], run_id))
@@ -1092,8 +1084,7 @@ def api_secret_apply(domain):
         applied["paths"],
         ["feat(secrets): set %s via the secret-onboarding dialog" % domain,
          "Set %d field(s) on %s via the kontroll onboarding GUI (run_id %s). SOPS ciphertext only; values "
-         "never logged." % (len(names), domain, run_id),
-         "Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"],
+         "never logged." % (len(names), domain, run_id)],
         push_origin=bool(d.get("push")), run_id=run_id)   # staging GUI ⇒ proposed/<run_id> (C10)
     _audit("secret-result", "domain=%s committed=%s staged=%s run_id=%s" % (
         domain, git["committed"], git["staged"], run_id))
@@ -1158,8 +1149,7 @@ def api_keygen_apply(role):
              "Minted via the kontroll onboarding GUI (run_id %s). Public recipient %s added to %s; the private "
              "key is shown once and never stored. Re-wrap with `%s` after promoting." % (
                  run_id, res["public_key"], ", ".join(res["recipient_domains"]) or "the configured groups",
-                 res["sops_updatekeys"]),
-             "Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"],
+                 res["sops_updatekeys"])],
             push_origin=bool((request.get_json(silent=True) or {}).get("push")), run_id=run_id)
         _audit("keygen-result", "role=%s committed=%s staged=%s run_id=%s" % (
             role, git["committed"], git["staged"], run_id))

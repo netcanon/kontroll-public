@@ -120,8 +120,7 @@ def create(body: CreateIn, request: Request, principal: Principal = Depends(requ
         ["feat(actuation): create app-store unit %s" % key,
          "Author the actuation unit descriptor for %s via the kontroll API (run_id %s). Config-only write "
          "(no value, no secret); nothing installed/actuated until the operator promotes the proposal, then "
-         "configures + runs the unit in Semaphore." % (key, principal.run_id),
-         "Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"],
+         "configures + runs the unit in Semaphore." % (key, principal.run_id)],
         push_origin=body.push, run_id=principal.run_id)   # staging network service ⇒ proposed/<run_id> (C10)
     if not git["committed"]:
         raise HTTPException(status_code=500, detail="commit failed; nothing pushed (repo may be dirty)")
@@ -160,8 +159,7 @@ def stage(key: str, body: StageIn, request: Request,
         out["paths"],
         ["feat(actuation): stage configure values for %s via the app-store" % key,
          "Staged via the kontroll API (run_id %s). Config-only write; nothing actuated until the operator "
-         "promotes the proposal + runs the unit in Semaphore." % principal.run_id,
-         "Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"],
+         "promotes the proposal + runs the unit in Semaphore." % principal.run_id],
         push_origin=body.push, run_id=principal.run_id)   # staging network service ⇒ proposed/<run_id> (C10)
     if not git["committed"]:
         raise HTTPException(status_code=500, detail="commit failed; nothing pushed (repo may be dirty)")

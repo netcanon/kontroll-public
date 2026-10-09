@@ -307,8 +307,7 @@ def observe(body: ObserveIn, request: Request,
         ["feat(observe): %s -> %s telemetry" % (body.key, body.method),
          "Enabled %s observability via the kontroll API (run_id %s). Targets regenerated; "
          "agent/exporter bring-up is a Semaphore/deploy-stack enact step (the API runs no plays)."
-         % (body.method, principal.run_id),
-         "Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"],
+         % (body.method, principal.run_id)],
         push_origin=body.push)
     if not git["committed"]:
         raise HTTPException(status_code=500, detail="commit failed; nothing pushed")
