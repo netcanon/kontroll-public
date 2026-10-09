@@ -64,6 +64,9 @@ services:
       # proposed/<run_id> STAGING ref instead of main; `kontroll promote <run_id>` lands it. Soft-default
       # (`:-`) so an unset value can't break compose — empty ⇒ direct push (the current behaviour).
       KONTROLL_STAGE_PUSHES: ${KONTROLL_STAGE_PUSHES:-}
+      # The attribution trailer on every machine-made commit (shared with the API; gitio.commit_message_args).
+      # Empty ⇒ the default `Co-Authored-By: kontroll <kontroll@localhost>`; `none` ⇒ no trailer.
+      KONTROLL_COMMIT_TRAILER: ${KONTROLL_COMMIT_TRAILER:-}
       # Deploy identity — lets the capability dialog build a Grafana deep-link (#122) after a telemetry promote
       # (observe._grafana_base: by-IP http://<mgmt>:3002, or the reverse-proxied domain form). Soft defaults
       # (`-`) so an unset value just omits the link, never breaks compose.

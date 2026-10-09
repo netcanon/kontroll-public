@@ -11,6 +11,24 @@ NetConfig project.
 
 ## [Unreleased]
 
+### fix(gitio): one configurable attribution trailer on machine-made commits (public-split follow-up F9) (2026-10-09)
+
+Eighteen call sites — the API routes, the onboard-GUI and `galaxy.py --commit` — each carried a literal
+`Co-Authored-By: <the model that wrote the code>` trailer, stamped into every commit the control plane makes on
+an operator's behalf: the wrong attribution on every proposal, eighteen places to edit, and a model name baked
+into a public tool's runtime output (review `docs/reviews/2026-10-08-public-split-pii-sweep/`, F9). Now ONE seam:
+`gitio.commit_message_args()` builds every `git commit -m` list and appends the single trailer, last and never
+duplicated; `commit_and_push` (the API/GUI write seam) and both inline `galaxy.py` commits go through it, and no
+runtime file under `api/`, `gui/` or `scripts/` may carry the literal (grep-gate in
+`tests/unit/test_commit_trailer.py`). The trailer is a deployment setting: `KONTROLL_COMMIT_TRAILER`
+(`docker/.env.example`; passed through `api.yaml`/`onboard-gui.yaml`; rendered by `deploy-stack.yml` from
+`kontroll_commit_trailer`; registered in `gen-secret-env`'s platform-core set so no descriptor can shadow it;
+the operator CLI reads the same variable from its shell) — empty keeps the default
+`Co-Authored-By: kontroll <kontroll@localhost>` (the identity the containers commit as), `none`/`off`/`disabled`
+turn it off, any other text is used verbatim. Every commit path already carried a trailer: only its text changes
+and it becomes a setting. A second gate walks the AST so no `["git", "commit", …]` argv outside gitio can bypass
+the seam. Baked-code manifest regenerated.
+
 ### fix(repo): restore the executable bit on every shebang'd entry point, with a guard (2026-10-09)
 
 The public cut (`git archive | tar -x` on a Windows host) dropped the executable bit on all 48 shebang'd files —

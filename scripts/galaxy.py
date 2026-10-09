@@ -245,11 +245,10 @@ def cmd_onboard(args):
 
     if args.commit and changed:
         gitio._run(["git", "add"] + plan_paths)
-        crc = gitio._run(["git", "commit", "-m", "feat(onboard): %s -> %s via %s backend" % (
-            args.collection, args.key, backend),
-            "-m", "Machine-onboarded by scripts/galaxy.py onboard. Host %s in group %s; "
-            "device class staged (verify live before status: active)." % (host_name, args.group),
-            "-m", "Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"])
+        crc = gitio._run(["git", "commit"] + gitio.commit_message_args([   # + the one configurable trailer
+            "feat(onboard): %s -> %s via %s backend" % (args.collection, args.key, backend),
+            "Machine-onboarded by scripts/galaxy.py onboard. Host %s in group %s; "
+            "device class staged (verify live before status: active)." % (host_name, args.group)]))
         if crc != 0:                                # never push a stale HEAD on a failed commit
             sys.exit("  ! commit failed (rc=%d) — not pushing; nothing took effect." % crc)
         # Update the LOCAL CANONICAL (the instance source of truth) so Semaphore sees
@@ -349,11 +348,11 @@ def cmd_capture_exception_add(args):
         print("  nothing changed; nothing to commit.\n")
         return
     gitio._run(["git", "add", os.path.join("config", "capture-exceptions.yml")])
-    crc = gitio._run(["git", "commit", "-m", "feat(logging): capture-exception += %s" % args.match,
-                      "-m", "Operator-added capture-exception for %s (match %s; behavior %s; disposition %s). "
-                      "Excluded captures stay on disk but out of the git history." % (
-                          args.subject, args.match, args.behavior, args.disposition),
-                      "-m", "Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"])
+    crc = gitio._run(["git", "commit"] + gitio.commit_message_args([       # + the one configurable trailer
+        "feat(logging): capture-exception += %s" % args.match,
+        "Operator-added capture-exception for %s (match %s; behavior %s; disposition %s). "
+        "Excluded captures stay on disk but out of the git history." % (
+            args.subject, args.match, args.behavior, args.disposition)]))
     if crc != 0:                                    # never push a stale HEAD on a failed commit
         print("  ! commit failed (rc=%d) — not pushing; nothing took effect." % crc)
         return

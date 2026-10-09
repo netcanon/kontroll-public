@@ -97,8 +97,7 @@ def capability_apply(cap: str, body: CapabilityIn, request: Request,
         out["paths"],
         ["feat(%s): enable on %s via the capability dialog" % (cap, body.key),
          "Promoted via the kontroll API (run_id %s). Data-only write; nothing actuated until the enact "
-         "commands run." % principal.run_id,
-         "Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"],
+         "commands run." % principal.run_id],
         push_origin=body.push, run_id=principal.run_id)   # staging network service ⇒ proposed/<run_id> (C10)
     if not git["committed"]:
         raise HTTPException(status_code=500, detail="commit failed; nothing pushed (repo may be dirty)")

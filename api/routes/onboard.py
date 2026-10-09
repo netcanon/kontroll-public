@@ -112,8 +112,7 @@ def onboard(body: OnboardIn, request: Request,
         applied["paths"],
         ["feat(onboard): %s -> %s via %s backend" % (body.collection, body.key, plan["backend"]),
          "Onboarded via the kontroll API (run_id %s). Host %s in group %s; staged — verify live." % (
-             principal.run_id, plan["host_name"], body.group),
-         "Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"],
+             principal.run_id, plan["host_name"], body.group)],
         push_origin=body.push, run_id=principal.run_id)   # staging network service ⇒ proposed/<run_id> (C10)
     if not git["committed"]:
         raise HTTPException(status_code=500, detail="commit failed; nothing pushed (repo may be dirty)")

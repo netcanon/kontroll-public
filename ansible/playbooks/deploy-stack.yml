@@ -350,6 +350,7 @@
           PROM_RETENTION_SIZE={{ prom_retention_size | default('20GB') }}
           KONTROLL_AUDIT_MAX_MB={{ kontroll_audit_max_mb | default('5') }}
           KONTROLL_AUDIT_MAX_FILES={{ kontroll_audit_max_files | default('5') }}
+          KONTROLL_COMMIT_TRAILER={{ kontroll_commit_trailer | default('') }}
           KONTROLL_OPERATOR_HOME={{ lookup('env', 'KONTROLL_OPERATOR_HOME') or lookup('env', 'HOME') }}
           KONTROLL_STORAGE_ROOT={{ kontroll_storage_root }}
           KONTROLL_LOGS_DIR={{ kontroll_logs_dir }}

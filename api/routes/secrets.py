@@ -85,8 +85,7 @@ def secret_apply(domain: str, body: SecretIn, request: Request,
         applied["paths"],
         ["feat(secrets): set %s via the secret-onboarding dialog" % domain,
          "Set %d field(s) on %s via the kontroll API (run_id %s). SOPS ciphertext only; values never logged." % (
-             len(_set_names(plan["view"])), domain, principal.run_id),
-         "Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"],
+             len(_set_names(plan["view"])), domain, principal.run_id)],
         push_origin=body.push, run_id=principal.run_id)   # staging network service ⇒ proposed/<run_id> (C10)
     if not git["committed"]:
         raise HTTPException(status_code=500, detail="commit failed; nothing pushed (repo may be dirty)")
