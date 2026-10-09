@@ -9,7 +9,7 @@ flask>=3.0
 # fastapi + httpx: the typed API (api/) imports FastAPI; Starlette's TestClient (httpx) drives
 # tests/integration/test_api.py — the L2b route contract, offline (the service seams are mocked).
 fastapi>=0.110
-httpx>=0.27
+httpx>=0.28.1
 # GUI e2e (tests/e2e) — Playwright drives a headless browser over the real booted Flask app.
 # Installing this keeps `pytest -m "not e2e"` collectable everywhere; the browser binary is
 # installed only in the CI e2e job (python -m playwright install chromium).
