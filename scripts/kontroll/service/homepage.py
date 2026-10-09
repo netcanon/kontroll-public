@@ -40,10 +40,24 @@ def _hp_path(name):
     return os.path.join(paths.write_root(), "instance", "dashboards", "homepage", name)
 
 
+def _hp_read_path(name):
+    """The path a READ of a homepage file resolves to: the overlay file whenever the instance/ overlay exists (or
+    the file does), else the SHIPPED instance.example/ board — a public clone, a CI checkout, a node before
+    `kontroll-init --fresh`. The same narrow READ-only tier `paths.resolve()` applies to the mapped instance paths
+    (public split, 2026-10-08): the editor shows the example board instead of an empty panel, and the tier is off
+    the moment an instance/ dir exists. Writes never come here — `_hp_path()` stays the overlay path, so the shipped
+    example can never become a write target (apply_homepage_plan fails closed on an unconfigured tree)."""
+    p = _hp_path(name)
+    if os.path.exists(p) or os.path.isdir(os.path.join(paths.write_root(), paths.INSTANCE_DIR_NAME)):
+        return p
+    return os.path.join(paths.ROOT, paths.EXAMPLE_DIR_NAME, "dashboards", "homepage", name)
+
+
 def _read(name):
-    """The raw text of a homepage file, or '' if absent/unreadable (degrade, never raise)."""
+    """The raw text of a homepage file, or '' if absent/unreadable (degrade, never raise). READ seam: falls through
+    to the shipped example on an unconfigured tree (_hp_read_path)."""
     try:
-        with open(_hp_path(name), encoding="utf-8") as fh:
+        with open(_hp_read_path(name), encoding="utf-8") as fh:
             return fh.read()
     except OSError:
         return ""

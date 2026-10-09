@@ -164,3 +164,39 @@ def test_splice_fleet_block_appends_then_replaces_preserving_operator_tiles():
     assert "core_switch · sw1" not in replaced                     # the old span was replaced, not duplicated
     assert "edge_firewall · fw1" in replaced and replaced.count(homepage.FLEET_BEGIN) == 1
     assert "- Control plane:" in replaced and "- Semaphore:" in replaced   # operator tiles preserved
+
+
+# --- the shipped-example READ tier (public split, 2026-10-08) ------------------------------------------------- #
+
+def test_read_board_falls_back_to_the_shipped_example_on_an_unconfigured_tree(tmp_repo):
+    """On a tree with NO instance/ overlay at all (a public clone / CI checkout / a node before kontroll-init --fresh),
+    read_board() renders the SHIPPED instance.example/ board instead of an empty panel — the failure the first
+    GitHub-hosted e2e run of the public cut hit (the Homepage editor opened with zero sections). The tier is
+    READ-only: apply_homepage_plan on that tree fails closed (the overlay dir does not exist) and the example files
+    are byte-identical afterwards — the shipped example can never become a write target."""
+    ex = tmp_repo / "instance.example" / "dashboards" / "homepage"
+    ex.mkdir(parents=True)
+    (ex / "services.yaml").write_text(_SERVICES, encoding="utf-8")
+    (ex / "settings.yaml").write_text(_SETTINGS, encoding="utf-8")
+    assert not (tmp_repo / "instance").exists()                      # unconfigured: no overlay dir at all
+    b = homepage.read_board()
+    assert [s["name"] for s in b["sections"]] == ["Control plane", "Infrastructure"]
+    assert b["title"] == "kontroll — test"
+    plan = homepage.build_homepage_plan(b)
+    assert plan["error"] is None
+    out = homepage.apply_homepage_plan(plan)                         # a WRITE on the unconfigured tree
+    assert out["error"] is None or out["error"].startswith("write failed")
+    assert not (tmp_repo / "instance" / "dashboards" / "homepage" / "services.yaml").exists() or out["error"] is None
+    assert (ex / "services.yaml").read_text(encoding="utf-8") == _SERVICES   # the example is never written
+    assert (ex / "settings.yaml").read_text(encoding="utf-8") == _SETTINGS
+
+
+def test_read_board_prefers_the_overlay_once_an_instance_dir_exists(tmp_repo):
+    """Once an instance/ dir exists (a configured node), the example tier is OFF even for a file the overlay lacks:
+    a missing overlay board degrades to the empty board exactly as before, never to placeholder tiles."""
+    ex = tmp_repo / "instance.example" / "dashboards" / "homepage"
+    ex.mkdir(parents=True)
+    (ex / "services.yaml").write_text(_SERVICES, encoding="utf-8")
+    (ex / "settings.yaml").write_text(_SETTINGS, encoding="utf-8")
+    (tmp_repo / "instance").mkdir()                                   # configured, board files absent
+    assert homepage.read_board()["sections"] == []

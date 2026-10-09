@@ -37,7 +37,7 @@ files:
   scripts/kontroll/service/discard.py: "2c749c72c05a7c372048cd0e37debe13602dfa98ea0842ac353ccb5c42eca208"
   scripts/kontroll/service/discovery.py: "d6e7589954d3f4135f25af70088de196e0ecd4d5ad77f385c74eb061a7a0666a"
   scripts/kontroll/service/fleet.py: "36bc1a01681d6e1a6efbe9a9d432623b2e5c516be0f4057ba8246bfdd015eada"
-  scripts/kontroll/service/homepage.py: "d028c90b3b14ee007ad931809c06df2e80a50c69498127b9fcf1fd0053e04866"
+  scripts/kontroll/service/homepage.py: "fb78a4e36dbceb62868ef8518d73f8d1967680fe4cede384bfb617cd665590af"
   scripts/kontroll/service/hostvars.py: "5062c3471fcef6e703694232fad44a775dd5b6016b2fb01978d5ac5d963864e2"
   scripts/kontroll/service/identity.py: "8c358f8c8970b8664c20cce9416701e102e64817da24b04e6afd90ed3f81169f"
   scripts/kontroll/service/keygen.py: "a02fb2095b7705f8d394ec03cffd1ed4e334ba18045888c936956088b0a75323"
