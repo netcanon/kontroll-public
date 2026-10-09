@@ -11,5 +11,6 @@ topology, so those folders live only in the private development repository. Link
 them from `CHANGELOG.md` and the design docs are kept for provenance and will not resolve
 here. Dossiers written after the release are published in this directory and must pass
 the same identifier-leak gate as every other tracked file (`tests/_leak_guard.py`, run by
-`tests/validate.sh` and the PII-guard workflow) — a report may quote example data, never a
-real address or hostname.
+`tests/validate.sh` and the PII-guard workflow; on a public tree the scanner covers this
+directory, and skips it only on an instance repository, whose own dossiers quote its
+deployment) — a report may quote example data, never a real address or hostname.

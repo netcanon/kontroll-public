@@ -46,6 +46,7 @@ sops --config instance/.sops.yaml updatekeys instance/secrets/*.sops.yml
 | `inventory/hosts.yml` | your hosts, in FUNCTIONAL groups (`edge_firewall`, `core_switch`, …). |
 | `secrets/` | your encrypted `*.sops.yml` — **created on your node, never shipped** (see its README). |
 | `dashboards/homepage/` | the Homepage portal tiles/settings — edit for your services. |
+| `.gitignore` | re-includes the overlay's known entries under the root `/instance/*` rule, so your instance repository — and the control node's canonical — tracks them. Add a line when you add a new top-level entry. |
 | `leak-tokens.example.txt` → `leak-tokens.txt` | the names that identify YOUR deployment (hostnames, domain, user names), one regex per line; `tests/_leak_guard.py` fails the gate if any appears in a file that ships publicly. Ships with synthetic canaries; `--fresh` copies it under its live name for you to fill in. |
 
 A checkout with **no `instance/` at all** (a fresh clone, CI) reads this skeleton through the same

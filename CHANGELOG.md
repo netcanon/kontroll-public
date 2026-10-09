@@ -11,6 +11,31 @@ NetConfig project.
 
 ## [Unreleased]
 
+### fix(repo): the overlay is re-included by `instance/.gitignore`, and the leak guard checks the overlay invariant (2026-10-09)
+
+The public cut ignored `instance/` outright. Three consequences, found by the as-built review
+(`docs/reviews/2026-10-09-public-split-follow-ups/`, report 12): an install made from the public tree committed
+**no overlay** into the control node's canonical (`local-canonical.yml` runs `git add -A`, which skips ignored
+paths), so Semaphore's clone silently read the shipped example tier and a GUI onboard that created an overlay
+file failed at `git add`; the PII guard's "overlay never tracked" probe used `git check-ignore` without
+`--no-index`, which never reports a TRACKED path, so a `git add -f` passed exactly the case it existed for; and
+`docs/reviews/` was never scanned on any tree although its README said it was. Now:
+- the root `.gitignore` ignores the overlay's **entries** (`/instance/*`, `!/instance/.gitignore`) and the shipped
+  `instance.example/.gitignore` — scaffolded by `kontroll-init --fresh` as `instance/.gitignore` — re-includes the
+  overlay's known entries (`.sops.yaml`, `instance.yml`, `fleet.yml`, `leak-tokens.txt`, `inventory/`, `secrets/`,
+  `dashboards/`, `trust/`), while the root secret patterns (`*.agekey`, `keys.txt`, `*.dec`,
+  `trust/observed-digests.yml`, `trust/*.gpg`) still apply inside. A public tree has no such file and ignores
+  everything; an instance repository and the canonical track the overlay; the root `.gitignore` is **identical in
+  both repositories**, so it no longer conflicts on a sync;
+- `tests/_leak_guard.py --tree` (all three seats) checks the **overlay invariant** — PUBLIC (nothing tracked,
+  entries ignored) or INSTANCE (tracked, every tracked path re-included) — with `check-ignore --no-index`, and
+  reports a `git add -f`, a lost root rule or a dropped re-include file as `overlay` findings; the workflow's
+  separate probe step is gone;
+- `docs/reviews/` is stripped only on an instance tree; a public tree scans its dossiers like any other file.
+Proven with real git in `tests/unit/test_leak_guard.py` (the shipped rules on a scratch repository: what `git add -A`
+stages in each state, the three failure modes, `--tree`'s exit and summary) and `test_kontroll_init.py` (the
+scaffold writes the re-include file).
+
 ### chore(ci,docs): public-split follow-ups — owner-agnostic image publish, the zizmor SARIF seat, Dependabot floors, two cosmetic fixes (2026-10-09)
 
 Review of record: `docs/reviews/2026-10-09-public-split-follow-ups/` (three read-only agents over this change, the

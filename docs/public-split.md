@@ -9,7 +9,7 @@
 |---|---|---|
 | The tool — code, playbooks, registries, generators, tests, docs | **yes** (this is the source of truth for the tool) | mirrored |
 | `instance.example/` — the placeholder overlay (TEST-NET addresses, one fake age recipient, canary tokens) | yes | yes |
-| `instance/` — YOUR overlay: inventory, `.sops.yaml` recipients, encrypted secrets, fleet selection, Homepage tiles, `leak-tokens.txt` | **never** (git-ignored there; the PII guard checks that it is ignored and that nothing under it is tracked) | tracked |
+| `instance/` — YOUR overlay: inventory, `.sops.yaml` recipients, encrypted secrets, fleet selection, Homepage tiles, `leak-tokens.txt` | **never** — the root `.gitignore` ignores everything under it (`/instance/*`); the PII guard checks that nothing under it is tracked | tracked — `instance/.gitignore` (scaffolded by `kontroll-init --fresh` from `instance.example/.gitignore`) re-includes the overlay's known entries; the root `.gitignore` is identical in both repositories |
 | `docs/reviews/` dossiers written before the split (they quote the maintainer's real topology) | never | tracked |
 | `local/` | never (git-ignored everywhere) | never |
 | Git history | **fresh** — the public repository starts at the cut commit | the full history |
@@ -25,8 +25,8 @@ The private repository keeps that history as the archive.
 # on the private main, after the public-split prep landed
 git archive --format=tar main | tar -x -C /tmp/public-tree
 rm -rf /tmp/public-tree/instance /tmp/public-tree/docs/reviews/2026-*   # the strip set (= scripts/make-bundle.sh)
-printf '\n# --- the private instance overlay (public repo) ---\ninstance/\n' >> /tmp/public-tree/.gitignore
 cd /tmp/public-tree && git init -b main && git add -A && git commit -s   # author: the project's public identity
+# (the overlay rule lives in the tree's own .gitignore — `/instance/*` — so the cut edits nothing)
 ```
 
 The acceptance gate for the cut is `python3 tests/_leak_guard.py --tree` returning **zero findings on
@@ -50,6 +50,11 @@ unconfigured checkout).
   receives the same list as the repository secret `KONTROLL_LEAK_TOKENS` (fork PRs have no secrets and run on
   the shipped canaries). A match is reported as `token#N sha256:xxxxxxxx`, never the name.
 - A line that must carry a private address says so: `pii-guard: allow <reason>`.
+- **The overlay invariant** (`--tree`, all three seats): a tree is PUBLIC — nothing under `instance/` is tracked
+  and the root `.gitignore` ignores the directory's entries — or INSTANCE — the overlay is tracked and every
+  tracked path is re-included by `instance/.gitignore`. A `git add -f` on a public tree, a root rule that went
+  missing, or an instance repository without its re-include file fails the gate with the paths. `docs/reviews/`
+  is scanned on a public tree and skipped only on an instance tree (its dossiers quote the real deployment).
 
 ## CI in the two repositories
 
@@ -85,16 +90,17 @@ The workflows are identical files. Every job's `runs-on` is
 git fetch upstream --no-tags                      # remote.upstream.tagOpt is --no-tags: public tags never land here
 git switch -c sync/upstream-$(date -u +%F) origin/main
 git merge --no-ff --no-edit upstream/main          # conflicts: see the rules below
-git diff --name-status upstream/main HEAD -- . ':!instance' ':!docs/reviews'   # must print exactly: M .gitignore
+git diff --name-status upstream/main HEAD -- . ':!instance' ':!docs/reviews'   # must print NOTHING
 bash tests/validate.sh --strict && python3 -m pytest -m "not e2e and not slow" -q
 git push -u origin HEAD && gh pr create --fill && gh pr merge --merge     # a MERGE commit, never squash/rebase
 git fetch origin && git merge-base --is-ancestor upstream/main origin/main && echo "graft intact"
 ```
 
 Conflict rules:
-- `.gitignore` is the one tool file the instance diverges on (the public tree ignores `instance/`; the instance
-  tracks it). Resolve by taking the public side and deleting the overlay stanza again. The acceptance line above
-  catches a wrong resolution; so does the PII guard (`instance/` tracked AND ignored fails).
+- `.gitignore` is identical in both repositories (the overlay rule `/instance/*` lives in the tree; the instance
+  repository tracks `instance/.gitignore`, which re-includes its overlay). If a sync ever shows a diff there, the
+  instance side drifted — take the public side. The PII guard fails an instance tree whose `instance/.gitignore`
+  went missing (tracked AND ignored) before the next deploy can silently drop new overlay files.
 - `CHANGELOG.md`: the private side never edits it (private-only notes go in `instance/`); public entries all
   insert under `## [Unreleased]`, newest first, so a sync never conflicts there.
 - `docker/code-manifest.lock.yml`: regenerate (`python3 scripts/gen-code-manifest.py`), never hand-merge.

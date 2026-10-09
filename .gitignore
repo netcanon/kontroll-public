@@ -74,5 +74,11 @@ Thumbs.db
 ansible/backups/
 tests/e2e/_out/
 
-# --- the private instance overlay (public repository): never tracked here ---
-instance/
+# --- the instance overlay: ignored in the PUBLIC repository, tracked by an INSTANCE repository ---
+# Everything directly under instance/ is ignored by default, so a contributor's overlay never reaches a public
+# pull request. kontroll-init --fresh scaffolds instance/.gitignore from instance.example/.gitignore: it
+# re-includes the overlay's KNOWN entries, so an instance repository — and the control node's canonical
+# (local-canonical.yml's `git add -A`) — tracks them, while the secret patterns above still apply inside.
+# The PII guard checks the invariant in both states (tests/_leak_guard.py, SECURITY.md C21).
+/instance/*
+!/instance/.gitignore
