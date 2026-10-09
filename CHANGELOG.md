@@ -11,6 +11,18 @@ NetConfig project.
 
 ## [Unreleased]
 
+### chore(docker): `images.lock.yml` re-pinned to the public owner's packages (follow-up F10) (2026-10-09)
+
+The lock pinned `ghcr.io/netcanon-dev/kontroll-*` at `v0.1.1` — private packages whose baked tree predates the
+identifier scrub. The three images were re-published from the public `main` (`97fb671`) by `publish-images.yml`
+under the repository's owner with the tag `sha-97fb671`, and the lock now names
+`ghcr.io/netcanon/kontroll-{control,vector,installer}` at that tag by digest (one command:
+`gen-image-digests.py --refresh sha-97fb671 --owner netcanon`, fail-closed). Each image's
+`org.opencontainers.image.revision` label names that commit and its `source` label this repository. The packages
+stay private until the owner makes them public by hand (a package setting the flip does not touch); the default local build
+is unaffected. The lock writer now writes
+LF on every platform.
+
 ### fix(repo): the overlay is re-included by `instance/.gitignore`, and the leak guard checks the overlay invariant (2026-10-09)
 
 The public cut ignored `instance/` outright. Three consequences, found by the as-built review

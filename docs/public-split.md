@@ -68,7 +68,7 @@ The workflows are identical files. Every job's `runs-on` is
 | `validate --strict` | every tool installed in the job (sha256-pinned sops, gitleaks, promtool, vector) | same |
 | Rulesets | `main`: require a pull request + every CI check green, no force-push, no deletion; `v*` tags immutable | not available on the plan (checks are advisory) |
 | Secret scanning + push protection, CodeQL default setup, Dependabot alerts | on | not available on the plan |
-| `publish-images.yml` | publishes `ghcr.io/<owner>/kontroll-*` (the owner read from the repository, nothing hard-coded) on a `v*` tag or by `workflow_dispatch`. Until the re-pin below lands, `docker/images.lock.yml` still names the pre-split private org's `v0.1.1` images, which a public clone cannot pull — the default local build is unaffected | the same file publishes the instance's own packages, if it ever needs them |
+| `publish-images.yml` | publishes `ghcr.io/<owner>/kontroll-*` (the owner read from the repository, nothing hard-coded) on a `v*` tag or by `workflow_dispatch`. `docker/images.lock.yml` names the public owner's packages at `sha-97fb671`, pullable once the owner makes them public (a manual package setting, not part of the flip; until then a `read:packages` login — SECURITY.md R-IMG-1); the default local build is unaffected | the same file publishes the instance's own packages, if it ever needs them |
 | `KONTROLL_CODE_SCANNING` variable | `true` after the flip → the zizmor job also uploads SARIF to code scanning (free on a public repo) | unset (code scanning is a GHAS feature on a private plan; the upload would 403) |
 
 ## Day-to-day — the weekly sync

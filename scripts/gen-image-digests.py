@@ -114,7 +114,7 @@ def refresh(lock, tag_override=None, owner=None):
     if unresolved:
         sys.stderr.write("refresh: unresolved %s — the lock was NOT written (fail closed)\n" % ", ".join(unresolved))
         return 1
-    with open(LOCK, "w", encoding="utf-8") as fh:
+    with open(LOCK, "w", encoding="utf-8", newline="\n") as fh:   # LF on every platform (the lock is text=auto eol=lf)
         fh.write(render(lock))
     return 0
 

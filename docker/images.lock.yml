@@ -7,14 +7,14 @@
 schema: 1
 images:
   kontroll-control:
-    ref: ghcr.io/netcanon-dev/kontroll-control
-    tag: "v0.1.1"
-    digest: "sha256:fb6e21079208801e2d1f0a47f1044c852d410681625b7f9485925c08da67a287"
+    ref: ghcr.io/netcanon/kontroll-control
+    tag: "sha-97fb671"
+    digest: "sha256:ce7320731bce71b753d062e8dd1f4373693b81403b343489ec549d342cdd6515"
   kontroll-installer:
-    ref: ghcr.io/netcanon-dev/kontroll-installer
-    tag: "v0.1.1"
-    digest: "sha256:784d43c5f353afeae43be4b3fdf92ae971b61508b0965c8b86a29d5ae00d0faf"
+    ref: ghcr.io/netcanon/kontroll-installer
+    tag: "sha-97fb671"
+    digest: "sha256:39f9c01f0343d46d7397825e4ebdb30672afa59e6a784d671ba76dc19f94d3f1"
   kontroll-vector:
-    ref: ghcr.io/netcanon-dev/kontroll-vector
-    tag: "v0.1.1"
-    digest: "sha256:59516ae7d71c2963f0dbca82072decd9f5479528a625ca95ec424615a54c2cb0"
+    ref: ghcr.io/netcanon/kontroll-vector
+    tag: "sha-97fb671"
+    digest: "sha256:f437f14cc0c726a999d018e7e1a6a369f5d9fcb3cc7fdb217faf3307649017e5"
