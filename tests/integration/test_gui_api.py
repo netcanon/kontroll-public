@@ -1295,7 +1295,7 @@ def test_image_provenance_lists_classes_and_audits(client, monkeypatch, tmp_path
     a digest-pin is never mistaken for a verified signature (cosign deferred)."""
     monkeypatch.setattr(provenance_service, "image_provenance", lambda: {
         "available": True, "signing_configured": False,
-        "images": [{"name": "kontroll-control", "ref": "ghcr.io/netcanon-dev/kontroll-control", "tag": "v1",
+        "images": [{"name": "kontroll-control", "ref": "ghcr.io/example/kontroll-control", "tag": "v1",
                     "digest": "sha256:" + "a" * 64, "digest_short": "a" * 12, "class": "digest-pinned",
                     "note": "Docker verifies this @sha256: on every pull — not a signature"}],
         "summary": {"total": 1, "digest_pinned": 1, "local_build": 0, "signed": 0}})

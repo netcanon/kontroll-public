@@ -12,10 +12,13 @@ Three modes, with a clean offline/network split (the BRICK-1 parallel — no net
   * --refresh (DEV/CI, NETWORK): resolve each entry's `ref:tag` → manifest digest (`docker buildx imagetools
     inspect`) and write it back into the lock. Run AFTER a tagged CI publish (or to bump a pin); the resulting lock
     is committed. This is the authoring-time pre-fetch — NEVER the deploy path (a validate test pins that).
+    FAILS CLOSED: if any kontroll image's digest cannot be resolved, nothing is written and the exit is 1 — a lock
+    must never carry a new ref/tag over an old digest. `--owner <owner>` re-points every kontroll image's ref at
+    `ghcr.io/<owner>/<image>` first (the public-split re-pin), so the move is one command, not a hand edit.
   * --check (VALIDATE): schema/format gate — schema:1, each entry has a string ref + tag-or-null + digest that is
     null or a well-formed sha256. Makes NO network call.
 
-Usage:  python3 scripts/gen-image-digests.py [--env | --refresh [tag] | --check]
+Usage:  python3 scripts/gen-image-digests.py [--env | --refresh [tag] [--owner <owner>] | --check]
 """
 import os
 import re
@@ -85,22 +88,35 @@ def _resolve_digest(ref, tag):
     return m.group(1) if m else None
 
 
-def refresh(lock, tag_override=None):
+def refresh(lock, tag_override=None, owner=None):
     """NETWORK: resolve each entry's ref:tag -> digest and write the lock back. tag_override sets every kontroll
-    image's tag first (the post-publish flow: `--refresh v1.2.0`)."""
+    image's tag first (the post-publish flow: `--refresh v1.2.0`); owner re-points every kontroll image's ref at
+    ghcr.io/<owner>/<image> (lowercased) first. FAIL CLOSED: an entry whose digest cannot be resolved (no tag, no
+    such image, no registry access) leaves the lock UNWRITTEN and returns 1 — the old digest must never be
+    committed under a new ref/tag (review 2026-10-09 M4). Returns 0 when every entry was refreshed and written."""
     images = lock.get("images") or {}
+    unresolved = []
     for key, e in images.items():
+        if owner and key in KONTROLL_IMAGES:
+            e["ref"] = "ghcr.io/%s/%s" % (owner.lower(), key)
         if tag_override and key in KONTROLL_IMAGES:
             e["tag"] = tag_override
         if not e.get("tag"):
-            sys.stderr.write("refresh: %s has no tag — skipping (set one or pass a tag)\n" % key)
+            sys.stderr.write("refresh: %s has no tag (set one or pass a tag)\n" % key)
+            unresolved.append(key)
             continue
         d = _resolve_digest(e["ref"], e["tag"])
-        if d:
-            e["digest"] = d
-            print("refreshed %s -> %s:%s @ %s" % (key, e["ref"], e["tag"], d))
+        if not d:
+            unresolved.append(key)
+            continue
+        e["digest"] = d
+        print("refreshed %s -> %s:%s @ %s" % (key, e["ref"], e["tag"], d))
+    if unresolved:
+        sys.stderr.write("refresh: unresolved %s — the lock was NOT written (fail closed)\n" % ", ".join(unresolved))
+        return 1
     with open(LOCK, "w", encoding="utf-8") as fh:
         fh.write(render(lock))
+    return 0
 
 
 def check(lock):
@@ -134,9 +150,15 @@ def main():
         print("gen-image-digests: images.lock.yml well-formed (--check)")
         return
     if "--refresh" in args:
+        owner = None
+        if "--owner" in args:
+            i = args.index("--owner")
+            owner = args[i + 1] if i + 1 < len(args) else None
+            if not owner or owner.startswith("--"):
+                sys.exit("gen-image-digests: --owner needs a value")
+            args = args[:i] + args[i + 2:]
         rest = [a for a in args if not a.startswith("--")]
-        refresh(load(), rest[0] if rest else None)
-        return
+        sys.exit(refresh(load(), rest[0] if rest else None, owner))
     print(emit_env(load()))   # default: --env (offline)
 
 

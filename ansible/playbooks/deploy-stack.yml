@@ -128,7 +128,7 @@
     # mode, and a drop-in written to the container's /etc never reaches the host's logrotate. It moves to
     # scripts/host-systemd.sh. (Dogfood-caught 2026-06-29.)
     in_container: "{{ (lookup('env', 'KONTROLL_IN_CONTAINER') | default('', true)) | length > 0 }}"
-    # C0 (report 22): pull the kontroll-control (runner) + kontroll-vector images BY DIGEST from private ghcr instead
+    # C0 (report 22): pull the kontroll-control (runner) + kontroll-vector images BY DIGEST from ghcr instead
     # of building them on the control node. Default OFF ⇒ the local docker_image_build path runs, byte-identical to
     # before. When ON, the two build tasks skip and docker/.env pins KONTROLL_{CONTROL,VECTOR}_IMAGE from
     # docker/images.lock.yml (requires `docker login ghcr.io` + a recorded digest — `gen-image-digests.py --refresh`).

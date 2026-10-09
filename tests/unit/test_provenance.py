@@ -100,7 +100,7 @@ def _write_images_lock(tmp, entries):
     p.parent.mkdir(parents=True, exist_ok=True)
     body = "---\nschema: 1\nimages:\n"
     for key, digest in entries.items():
-        body += "  %s:\n    ref: ghcr.io/netcanon-dev/%s\n" % (key, key)
+        body += "  %s:\n    ref: ghcr.io/example/%s\n" % (key, key)
         body += "    tag: %s\n" % ('"v1"' if digest else "null")
         body += "    digest: %s\n" % (('"%s"' % digest) if digest else "null")
     p.write_text(body, encoding="utf-8")

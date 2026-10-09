@@ -30,7 +30,7 @@ step in [SETUP.md](../docs/SETUP.md) §2; the operator needs no git/GitHub accou
 ## `kontroll.sh` / `make-launch-kit.sh` — bundle-as-compose (C1, published images)
 
 The published-image install path: instead of BUILDING the installer locally, pull it (and the runner/vector) BY DIGEST
-from private ghcr. `bash scripts/make-launch-kit.sh` (run AFTER a tagged publish + `gen-image-digests.py --refresh
+from ghcr. `bash scripts/make-launch-kit.sh` (run AFTER a tagged publish + `gen-image-digests.py --refresh
 <tag>` + commit) assembles `dist/kontroll-launch-<ver>.tar.gz` — the same instance-stripped tree as `make-bundle.sh`
 **plus** `images.env` (the rendered `@sha256:` digest pins) and the `kontroll` launcher (`--allow-unpinned` builds an
 unrunnable skeleton for assembly testing). On a fresh node (host floor = **Docker + git only**), `./kontroll <verb>` is

@@ -14,7 +14,14 @@ MIT licence above does not re-license it.
 
 Container images the stack pulls (Semaphore, Homepage, Prometheus, Grafana, Loki, Vector,
 the exporters) are not vendored here; each is pulled by digest from its publisher under its
-own licence — see `docker/images.lock.yml` and the compose fragments.
+own licence — see the compose fragments.
+
+The images kontroll publishes itself (`kontroll-{control,vector,installer}`, pinned in
+`docker/images.lock.yml`) redistribute their base images and the tools baked into them — the
+Semaphore and Vector images, ansible-core and the all-modules Ansible Galaxy collection superset,
+sops, age, net-snmp and the base distribution's userland — under those projects' own licences.
+The source of kontroll's own layers is this repository at the commit the image's
+`org.opencontainers.image.revision` label names.
 
 If you add a vendored file, add a row here in the same commit (CLAUDE.md, Documentation Sync
 Checklist) and confirm its licence permits redistribution under these terms.

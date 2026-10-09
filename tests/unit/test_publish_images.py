@@ -1,6 +1,6 @@
 """C0 publish-images guards (report 22 — docs/reviews/2026-06-29-compose-native-install/22-distribution-images.md).
 
-WHY — C0 publishes the runner + vector images to private ghcr and lets the control node pull them BY DIGEST instead
+WHY — C0 publishes the runner + vector images to ghcr and lets the control node pull them BY DIGEST instead
 of building locally. Three things must stay true or the supply-chain/deploy posture breaks: (1) the PUBLISHED runner
 bakes the all-modules SUPERSET (a prebuilt image can't know a node's fleet), derived offline from the public
 catalog; (2) the image digest-lock is well-formed, byte-stable (no hand-edit), and its read path is OFFLINE (the
@@ -214,3 +214,43 @@ def test_publish_is_gated_on_the_readonly_pin():
     assert "\n  gate:\n" in wf, "publish-images must carry a `gate` job that runs the read-only pin before any build"
     assert "needs: gate" in wf, "the publish job must depend on the gate (block the code-baked publish on a pin failure)"
     assert "test_readonly_completeness.py" in wf, "the gate must run the read-only-by-construction completeness pin"
+
+
+def _lock_copy(tmp_path, g):
+    """A working copy of the committed lock under tmp, with the module pointed at it (LOCK is read at call time)."""
+    p = tmp_path / "images.lock.yml"
+    p.write_text(_read("docker/images.lock.yml"), encoding="utf-8")
+    return p
+
+
+def test_refresh_fails_closed_and_writes_nothing_when_a_digest_is_unresolved(tmp_path, monkeypatch):
+    """`--refresh` must NOT write the lock when any kontroll image's digest cannot be resolved (no such tag, no
+    registry access): the old digest would otherwise be committed under the new ref/tag, `--check` and the
+    round-trip test would still pass, and a deploy would pull the wrong bytes or fail at pull. Fail closed:
+    exit 1, file byte-identical (review 2026-10-09 M4)."""
+    g = _load_script("scripts/gen-image-digests.py", "gid_refresh_closed")
+    p = _lock_copy(tmp_path, g)
+    before = p.read_text(encoding="utf-8")
+    monkeypatch.setattr(g, "LOCK", str(p))
+    monkeypatch.setattr(g, "_resolve_digest", lambda ref, tag: None)   # the registry answers nothing
+    assert g.refresh(g.load(str(p)), "sha-abc1234", owner="example") == 1
+    assert p.read_text(encoding="utf-8") == before, "an unresolved refresh must leave the lock untouched"
+
+
+def test_refresh_owner_moves_every_kontroll_ref_and_records_the_new_digests(tmp_path, monkeypatch):
+    """`--refresh <tag> --owner <owner>` re-points every kontroll image at ghcr.io/<owner-lowercased>/<image>,
+    sets the tag, records the resolved digest for each, and writes a lock that round-trips through render() —
+    the public-split re-pin as ONE command instead of a hand edit of three refs (M4)."""
+    g = _load_script("scripts/gen-image-digests.py", "gid_refresh_owner")
+    p = _lock_copy(tmp_path, g)
+    monkeypatch.setattr(g, "LOCK", str(p))
+    seen = []
+    monkeypatch.setattr(g, "_resolve_digest", lambda ref, tag: seen.append((ref, tag)) or ("sha256:" + "c" * 64))
+    assert g.refresh(g.load(str(p)), "sha-abc1234", owner="Example") == 0
+    lock = g.load(str(p))
+    for key in g.KONTROLL_IMAGES:
+        e = lock["images"][key]
+        assert e["ref"] == "ghcr.io/example/%s" % key, "the owner must be lowercased into every kontroll ref"
+        assert e["tag"] == "sha-abc1234" and e["digest"] == "sha256:" + "c" * 64
+    assert sorted(seen) == sorted(("ghcr.io/example/%s" % k, "sha-abc1234") for k in g.KONTROLL_IMAGES)
+    assert g.check(lock) == [] and g.render(lock) == p.read_text(encoding="utf-8")

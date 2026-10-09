@@ -1,14 +1,20 @@
 name: publish-images
 
-# Publish the kontroll-owned images to PRIVATE ghcr.io on a release tag — NEVER on every push (publishing is a
-# deliberate, tagged event, mirroring make-bundle.sh's git-describe versioning). workflow_dispatch lets a maintainer
-# publish a test tag (e.g. an `edge` build) without cutting a release. C0 = kontroll-control (the Semaphore runner,
+# Publish the kontroll-owned images to ghcr.io under the REPOSITORY'S OWNER (`ghcr.io/<owner>/kontroll-*`, nothing
+# hard-coded — the same file publishes the public tool's packages and a private instance's) on a release tag — NEVER
+# on every push (publishing is a deliberate, tagged event, mirroring make-bundle.sh's git-describe versioning).
+# workflow_dispatch lets a maintainer publish a test tag (e.g. an `edge` or `sha-<short>` build) without cutting
+# a release; a dispatch is honoured from `main` or a `v*` tag only, the tag must fit the docker tag grammar, and
+# a `sha-<short>` tag must name the commit being built. Every image carries org.opencontainers.image.source and
+# org.opencontainers.image.revision. C0 = kontroll-control (the Semaphore runner,
 # baking the all-modules SUPERSET — report 22 §2.3) + kontroll-vector. C1 adds kontroll-installer (the compose-native
 # installer glue — report 22 §2.1 Image C): so a fresh node pulls the installer by digest instead of building it.
 #
 # AFTER a publish: `python3 scripts/gen-image-digests.py --refresh <tag>` (needs `docker login ghcr.io`) records the
 # digests into docker/images.lock.yml; commit that, then deploy with `-e use_published_images=true` to pull by digest.
-# Packages inherit the repo's PRIVATE visibility; the control node pulls with a read:packages `docker login`.
+# A package inherits the repo's visibility at its FIRST publish; a public repo's packages are made public once, by hand,
+# in each package's settings (there is no API for it — docs/public-split.md). Private packages need a read:packages
+# `docker login` on the control node (SECURITY.md R-IMG-1).
 
 on:
   push:
@@ -33,6 +39,11 @@ jobs:
   # "proven on the running clone (== the tested source)" to "proven on the tested source, then baked" — so the
   # publish MUST be gated on the pin + the WRITE_ROOT seam, on the same commit (review 21 §3.3 / phase-b synthesis M5).
   gate:
+    # A publish is a release-grade event: a dispatch is honoured from `main` or a `v*` tag only (the publish job
+    # `needs` this one, so it is skipped too). Only users with write access can dispatch; this is about traceability.
+    if: >-
+      ${{ github.event_name != 'workflow_dispatch'
+          || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ${{ fromJSON(vars.KONTROLL_RUNS_ON || '"ubuntu-latest"') }}   # see ci.yml "RUNNERS"
     steps:
       - uses: actions/checkout@v7
@@ -55,7 +66,7 @@ jobs:
     runs-on: ${{ fromJSON(vars.KONTROLL_RUNS_ON || '"ubuntu-latest"') }}   # see ci.yml "RUNNERS"
     permissions:
       contents: read
-      packages: write            # push to ghcr.io/netcanon-dev/kontroll-*
+      packages: write            # push to ghcr.io/<owner>/kontroll-*
     strategy:
       fail-fast: false
       matrix:
@@ -93,10 +104,26 @@ jobs:
           EVENT: ${{ github.event_name }}
           DISPATCH_TAG: ${{ inputs.tag }}
           REF_NAME: ${{ github.ref_name }}
+          OWNER: ${{ github.repository_owner }}
+          SHA: ${{ github.sha }}
         run: |
           TAG="$REF_NAME"
           [ "$EVENT" = "workflow_dispatch" ] && TAG="$DISPATCH_TAG"
+          # The docker tag grammar ([A-Za-z0-9_][A-Za-z0-9_.-]{0,127}); rejects a comma/newline that could add refs.
+          case "$TAG" in ''|[.-]*|*[!A-Za-z0-9_.-]*) echo "::error::invalid image tag '$TAG'"; exit 1 ;; esac
+          [ "${#TAG}" -le 128 ] || { echo "::error::image tag longer than 128 characters"; exit 1; }
+          # A sha-<short> tag is a claim about the commit; make it true or fail.
+          case "$TAG" in
+            sha-*) short="${TAG#sha-}"
+                   [ "${#short}" -ge 7 ] || { echo "::error::a sha- tag needs at least 7 hex digits"; exit 1; }
+                   case "$SHA" in
+                     "$short"*) ;;
+                     *) echo "::error::$TAG does not name the commit being built ($SHA)"; exit 1 ;;
+                   esac ;;
+          esac
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          # ghcr.io namespaces are lowercase; the repository owner is whatever case GitHub shows.
+          echo "owner=$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
       - name: Build platforms
         id: plat
@@ -109,23 +136,28 @@ jobs:
           echo "platforms=$PLATFORMS" >> "$GITHUB_OUTPUT"
 
       # QEMU only matters for cross-arch (linux/arm64). Harmless for amd64-only.
-      - uses: docker/setup-qemu-action@v4
-      - uses: docker/setup-buildx-action@v4
+      # Third-party actions are SHA-pinned (the .github/zizmor.yml policy; Dependabot keeps the pins current).
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1   # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069   # v4.4.1
 
-      - uses: docker/login-action@v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f   # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - id: build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc   # v7.4.0
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           platforms: ${{ steps.plat.outputs.platforms }}
           push: true
-          tags: ghcr.io/netcanon-dev/kontroll-${{ matrix.image }}:${{ steps.meta.outputs.tag }}
+          tags: ghcr.io/${{ steps.meta.outputs.owner }}/kontroll-${{ matrix.image }}:${{ steps.meta.outputs.tag }}
+          # Provenance a re-pin reviewer can check: which repository and commit these bytes were built from.
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
           # NO secrets, NO instance/ in the context — the repo-root .dockerignore strips instance/ and a clean CI
           # checkout has none (report 22 §3.3 build-context hygiene).
 
@@ -134,5 +166,6 @@ jobs:
           IMG: kontroll-${{ matrix.image }}
           TAG: ${{ steps.meta.outputs.tag }}
           DIGEST: ${{ steps.build.outputs.digest }}
+          OWNER: ${{ steps.meta.outputs.owner }}
         run: |
-          { echo "### $IMG"; echo "\`ghcr.io/netcanon-dev/$IMG:$TAG@$DIGEST\`"; } >> "$GITHUB_STEP_SUMMARY"
+          { echo "### $IMG"; echo "\`ghcr.io/$OWNER/$IMG:$TAG@$DIGEST\`"; } >> "$GITHUB_STEP_SUMMARY"

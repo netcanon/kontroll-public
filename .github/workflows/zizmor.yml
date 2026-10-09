@@ -6,12 +6,18 @@ name: zizmor — GHA workflow security scan
 # secrets leaking to forks via `pull_request_target`, unpinned third-party actions).
 # The action-pinning policy lives in .github/zizmor.yml.
 #
-# kontroll is a PRIVATE repo WITHOUT GitHub Advanced Security / code scanning (confirmed
-# 2026-06-15: the code-scanning API 403s), so findings go to the JOB LOG, not the Security
-# tab — netcanon uploads SARIF only because it has GHAS. This job is ADVISORY
-# (continue-on-error): a finding is visible in the log but never blocks the rest of CI.
-# Adopt the SARIF-upload form (a `security-events: write` + codeql-action/upload-sarif step)
-# if GHAS is ever enabled on this repo.
+# Two jobs, one tool, both ADVISORY (continue-on-error — a finding is visible, never blocking):
+#   * `zizmor scan` runs everywhere; findings print to the job log.
+#   * `zizmor sarif` is the SARIF seat: the same scan uploaded to code scanning, so findings
+#     also land in the Security tab (netcanon parity). Code scanning is free on a PUBLIC repo
+#     and a GHAS feature on a private Free-plan one (the upload API 403s there — confirmed
+#     2026-06-15), so the job is gated on the repository variable KONTROLL_CODE_SCANNING=true,
+#     which the flip sets on the public repo (docs/public-split.md). The private instance repo
+#     leaves it unset: the job is skipped and its `security-events: write` grant is never minted.
+#     The scan is rooted at the repository (`.`), so every SARIF URI is repository-relative —
+#     rooted at `.github/` the alerts would point at paths that do not exist.
+# zizmor is installed from PyPI as a 1.x range on purpose: Dependabot cannot bump an inline
+# `pip install`, so an exact pin here would rot; the range tracks the 1.x rule releases weekly.
 
 on:
   pull_request:
@@ -55,4 +61,39 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}   # zizmor's online audits resolve action refs via the API (read-only)
-        run: zizmor .github/
+        run: zizmor .
+
+  zizmor-sarif:
+    name: zizmor sarif
+    # The SARIF seat — only where code scanning exists (see the header). Skipped entirely elsewhere.
+    if: ${{ vars.KONTROLL_CODE_SCANNING == 'true' }}
+    runs-on: ${{ fromJSON(vars.KONTROLL_RUNS_ON || '"ubuntu-latest"') }}   # see ci.yml "RUNNERS"
+    permissions:
+      contents: read
+      security-events: write       # the upload below; this job does not run where the variable is unset
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install zizmor
+        run: pip install --quiet "zizmor>=1,<2"
+
+      # SARIF mode exits 0 even with findings (the findings are the payload); a non-zero exit is a real failure
+      # (tool/args), which must stay visible — nothing masks the exit code; continue-on-error keeps the job advisory.
+      - name: zizmor → SARIF (rooted at the repository so every URI is repository-relative)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor --format sarif . > zizmor.sarif
+
+      - name: Upload the SARIF to code scanning (advisory — the findings land in the Security tab)
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: zizmor.sarif
+          category: zizmor

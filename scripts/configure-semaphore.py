@@ -41,7 +41,6 @@ BASE = os.environ.get("SEMAPHORE_URL", "http://localhost:3001").rstrip("/")
 ADMIN = os.environ.get("SEMAPHORE_ADMIN", "admin")
 HOME = os.path.expanduser("~")
 
-REPO_GIT_URL = "git@github.com:netcanon/kontroll.git"   # optional offsite backup remote
 LOCAL_GIT_URL = "file:///srv/kontroll.git"              # instance source of truth (mounted bare repo)
 REPO_BRANCH = "main"
 

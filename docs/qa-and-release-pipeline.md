@@ -160,13 +160,13 @@ on it), the org's self-hosted runners where the private instance repo sets the v
   assertion. Always GitHub-hosted. The required check *No leaked personal identifiers* (SECURITY.md C21).
 
 ### `security.yml` — on `[pull_request, push, schedule: weekly]`
-- gitleaks (full history, 8.30.x) · pip-audit (gui deps). ⬜ bandit · trivy (images).
+- gitleaks (full history, 8.30.x) · pip-audit (gui · api · tests deps). ⬜ bandit · trivy (images).
 
-### `zizmor.yml` — workflow-security lint, advisory (log-only until GHAS SARIF upload is wired).
+### `zizmor.yml` — workflow-security lint, advisory (log-only; plus a SARIF upload to code scanning where the repository variable `KONTROLL_CODE_SCANNING=true`).
 
 ### `publish-images.yml` — on `[push: tags 'v*']` + `workflow_dispatch` (see §6)
 
-### `.github/dependabot.yml` — pip (gui + tests), github-actions, docker; weekly, 7-day cooldown,
+### `.github/dependabot.yml` — pip (gui + api + tests; the `>=` floors use `increase-if-necessary`, so pure floors get no version PRs), github-actions, docker; weekly, 7-day cooldown,
 minor+patch grouped, PR limits (netcanon parity).
 
 > **Enforcement.** On the public repository `main` is governed by a ruleset: pull request required,

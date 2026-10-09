@@ -2,5 +2,5 @@
 # overrides file (hot-reloaded; period 10s). Keyed on tenant 'fake' (auth_enabled:false). Do NOT edit by
 # hand — set a `retention` param on a module's logs: entry and re-run (deploy-stack regenerates it before
 # bringing Loki up). Absent retention => `overrides: {}` (the bounded global LOKI_RETENTION_PERIOD applies).
-# M-1 seam verification: docs/reviews/2026-06-16-storage-logging/40-m1-loki-retention-dogfood.md.
+# How the retention seam is wired and was verified: docs/logging-architecture.md.
 overrides: {}
