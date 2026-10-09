@@ -22,6 +22,15 @@ Two layers, one loader (design: docs/reviews/2026-10-08-public-split-pii-sweep/9
 
 Escape hatch: a same-line `pii-guard: allow <reason>` marker exempts that line (review-visible in the diff).
 
+The OVERLAY INVARIANT (--tree, review 2026-10-09 M1/M2): a tree is in exactly one of two states — PUBLIC (nothing
+under instance/ is tracked and the root .gitignore ignores the directory's entries via `/instance/*`) or INSTANCE
+(the overlay is tracked and every tracked path under it is re-included by instance/.gitignore, scaffolded from
+instance.example/.gitignore, so none of it is ignored). Anything else is a leak path or a broken install: a
+`git add -f` on a public tree, a root .gitignore that lost the rule, or an instance repository without its
+re-include file (new overlay files would silently never reach the control node's canonical). docs/reviews/ is
+skipped only on an INSTANCE tree (its dossiers quote the real deployment); on a public tree a dossier is scanned
+like any other file.
+
 Usage (the SAME scan runs locally, on the VM, in the private CI and in the public CI — tests/validate.sh step
 `pii-guard`, .github/workflows/pii-guard.yml, and the pytest twin tests/unit/test_leak_guard.py):
     python3 tests/_leak_guard.py --tree [ROOT]              # every git-tracked file minus the private strip set
@@ -39,7 +48,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # The private strip set — exactly what scripts/make-bundle.sh removes from the public bundle and what the public
 # split cut (docs/public-split.md) leaves out; plus the git-ignored local/ in case it is ever force-added.
+# docs/reviews/ is stripped only on an INSTANCE tree (one that tracks instance/): see shippable_files().
 STRIP_DIRS = ("instance/", "docs/reviews/", "local/")
+INSTANCE_ONLY_STRIP = ("docs/reviews/",)
+# A path that no instance/.gitignore re-includes: on a PUBLIC tree it must be ignored (the root rule exists).
+OVERLAY_PROBE = "instance/zz-never-tracked-probe"
 # The guard's own unit test holds identifier-SHAPED samples (private-range addresses, MAC forms, a user-profile
 # path) by necessity; it is the one tracked file the tree scan skips. It uses no real deployment's values and is
 # reviewed as the guard's specification.
@@ -179,11 +192,52 @@ def token_findings(text, patterns):
 
 
 # --- the tree scan -----------------------------------------------------------------------------------------------
-def shippable_files(root=ROOT):
-    """Every git-tracked file under `root` minus the private strip set. Fails closed (raises) if git cannot list."""
+def tracked_files(root=ROOT):
+    """Every git-tracked path under `root` (forward slashes). Fails closed (raises) if git cannot list."""
     r = subprocess.run(["git", "-C", root, "ls-files", "-z"], capture_output=True, check=True)
-    files = [f for f in r.stdout.decode("utf-8", errors="replace").split("\0") if f]
-    return [f for f in files if not f.startswith(STRIP_DIRS) and f != SELF_TEST]
+    return [f for f in r.stdout.decode("utf-8", errors="replace").split("\0") if f]
+
+
+def is_instance_tree(root=ROOT, files=None):
+    """True iff the tree tracks its overlay (an instance repository); False on a public checkout."""
+    files = tracked_files(root) if files is None else files
+    return any(f.startswith("instance/") for f in files)
+
+
+def shippable_files(root=ROOT):
+    """Every git-tracked file under `root` minus the private strip set. instance/ and local/ are always out;
+    docs/reviews/ is skipped only on an INSTANCE tree (its dossiers quote the real deployment), so on a public
+    tree a dossier is scanned like any other file (review 2026-10-09 M3). Fails closed (raises) if git cannot list."""
+    files = tracked_files(root)
+    strip = STRIP_DIRS if is_instance_tree(root, files) else tuple(d for d in STRIP_DIRS if d not in INSTANCE_ONLY_STRIP)
+    return [f for f in files if not f.startswith(strip) and f != SELF_TEST]
+
+
+def overlay_findings(root=ROOT):
+    """The overlay invariant as findings: [] iff the tree is PUBLIC (nothing under instance/ tracked AND the root
+    rule ignores a probe path) or INSTANCE (overlay tracked AND no tracked path under it is ignored). A tracked
+    path that is also ignored is a `git add -f` on a public tree or an instance repository that lost
+    instance/.gitignore; nothing tracked with no rule is a public tree whose protection is gone. Uses
+    `git check-ignore --no-index` because check-ignore never reports a TRACKED path as ignored by default —
+    the hole the old probe had (review 2026-10-09 M2). Raises on a git error (the caller fails closed)."""
+    tracked = [f for f in tracked_files(root) if f.startswith("instance/")]
+    if not tracked:
+        probe = subprocess.run(["git", "-C", root, "check-ignore", "-q", "--no-index", "--", OVERLAY_PROBE],
+                               capture_output=True)
+        if probe.returncode == 0:
+            return []
+        if probe.returncode == 1:
+            return [("instance/", 0, "overlay", "nothing under instance/ is tracked, yet a path under it is not "
+                     "git-ignored — the root .gitignore lost its `/instance/*` rule")]
+        raise subprocess.CalledProcessError(probe.returncode, "git check-ignore", probe.stdout, probe.stderr)
+    chk = subprocess.run(["git", "-C", root, "check-ignore", "--no-index", "-z", "--stdin"],
+                         input="\0".join(tracked).encode("utf-8"), capture_output=True)
+    if chk.returncode not in (0, 1):
+        raise subprocess.CalledProcessError(chk.returncode, "git check-ignore", chk.stdout, chk.stderr)
+    ignored = [f for f in chk.stdout.decode("utf-8", errors="replace").split("\0") if f]
+    return [(f, 0, "overlay", "tracked AND git-ignored — a `git add -f` on a public tree, or an instance "
+             "repository without instance/.gitignore (new overlay files would never reach the canonical)")
+            for f in sorted(ignored)]
 
 
 def scan_paths(paths, root=ROOT, patterns=None):
@@ -213,10 +267,13 @@ def scan_paths(paths, root=ROOT, patterns=None):
 
 
 def main(argv):
+    overlay, state = [], ""
     if argv[:1] == ["--tree"]:
         root = os.path.abspath(argv[1]) if len(argv) > 1 else ROOT
         try:
             paths = shippable_files(root)
+            overlay = overlay_findings(root)
+            state = "instance" if is_instance_tree(root) else "public"
         except (subprocess.CalledProcessError, OSError) as exc:
             print("pii-guard: cannot enumerate tracked files (%s) — failing closed" % exc, file=sys.stderr)
             return 2
@@ -226,13 +283,14 @@ def main(argv):
         print(__doc__, file=sys.stderr)
         return 2
     src = tokens_source(root)
-    findings = scan_paths(paths, root)
+    findings = overlay + scan_paths(paths, root)
     for rel, ln, cat, tok in findings:
         print("%s:%d  %s  %s" % (rel, ln, cat, tok))
     layer2 = "none" if src is None else ("env" if src == os.environ.get("KONTROLL_LEAK_TOKENS_FILE")
                                          else "instance/" if "instance" + os.sep + "leak-tokens" in src or "instance/leak-tokens" in src
                                          else "canaries")
-    print("pii-guard: %d finding(s) in %d file(s); instance-token layer = %s" % (len(findings), len(paths), layer2))
+    print("pii-guard: %d finding(s) in %d file(s); instance-token layer = %s%s"
+          % (len(findings), len(paths), layer2, ("; overlay = " + state) if state else ""))
     return 1 if findings else 0
 
 

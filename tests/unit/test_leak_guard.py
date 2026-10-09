@@ -11,9 +11,17 @@ WHY (the failures these guard, found by the 2026-10-08 public-split sweep):
 - Python's `ipaddress.is_private` is true for the RFC-5737 documentation nets — the sanctioned example space — so a
   naive private-range check would flag every TEST-NET example; the RFC-1918 ranges are named explicitly.
 - A failure report must never itself be the leak: a matched instance token is reported by index + digest only.
+- (2026-10-09 review) The public cut ignored `instance/` outright, so an install made from the public tree committed
+  NO overlay into the control node's canonical (`git add -A` skips ignored paths) and Semaphore silently read the
+  example tier; the old "overlay never tracked" probe used `git check-ignore` without `--no-index`, which never
+  reports a tracked path, so a `git add -f` passed it; and `docs/reviews/` was never scanned on any tree. The
+  overlay invariant + the instance-only strip of docs/reviews/ fix all three; the scratch-repo tests below prove
+  the shipped .gitignore rules with real git.
 """
 import hashlib
 import os
+import shutil
+import subprocess
 import sys
 
 import pytest
@@ -115,12 +123,144 @@ def test_private_token_file_takes_precedence_via_env(tmp_path, monkeypatch):
 
 
 def test_shippable_tree_is_free_of_identifiers():
-    """The standing gate over the WHOLE shippable tree (every tracked file minus instance/, docs/reviews/, local/ —
-    the make-bundle strip set): zero structural findings and zero instance-token findings. This is the pytest twin
-    of `tests/validate.sh` step `pii-guard` and the public CI's PII-guard workflow; it runs with whatever token
-    layer is present (the private list on the instance repo / CI secret, the canaries on a public checkout)."""
+    """The standing gate over the WHOLE shippable tree (every tracked file minus instance/ and local/, and minus
+    docs/reviews/ only on an instance tree — the make-bundle strip set): zero structural findings and zero
+    instance-token findings. This is the pytest twin of `tests/validate.sh` step `pii-guard` and the public CI's
+    PII-guard workflow; it runs with whatever token layer is present (the private list on the instance repo / CI
+    secret, the canaries on a public checkout)."""
     files = guard.shippable_files(guard.ROOT)
     assert files, "git ls-files returned nothing — the scan would be vacuous"
     findings = guard.scan_paths(files, guard.ROOT)
     assert findings == [], "identifier leak(s) in the shippable tree:\n  " + "\n  ".join(
         "%s:%d %s %s" % f for f in findings[:40])
+
+
+def test_this_tree_satisfies_the_overlay_invariant():
+    """The tree under test is in one of the two valid overlay states — PUBLIC (nothing under instance/ tracked,
+    the directory ignored) or INSTANCE (tracked, every tracked path re-included by instance/.gitignore). The pytest
+    seat of the invariant the other two seats check through `--tree`; a `git add -f`, a lost root rule or a
+    missing instance/.gitignore fails here with the offending paths."""
+    assert guard.overlay_findings(guard.ROOT) == []
+
+
+def _git(cwd, *args):
+    return subprocess.run(["git", "-C", str(cwd)] + list(args), capture_output=True, text=True, check=True).stdout
+
+
+def _scratch_tree(where, with_reinclude, with_root_rule=True):
+    """A throwaway git repo carrying the REAL root .gitignore (so the tests prove the shipped rules), a planted
+    docs/reviews/ dossier quoting a private-range address, and an overlay with every entry class: allow-listed
+    config, a key file inside an allow-listed dir, an ignored trust artifact, a stray top-level file."""
+    repo = where / "repo"
+    repo.mkdir(parents=True)
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    root_ignore = open(os.path.join(guard.ROOT, ".gitignore"), encoding="utf-8").read()
+    assert "/instance/*\n" in root_ignore and "!/instance/.gitignore\n" in root_ignore, "the shipped root rule"
+    if not with_root_rule:
+        root_ignore = root_ignore.replace("/instance/*\n", "").replace("!/instance/.gitignore\n", "")
+    (repo / ".gitignore").write_text(root_ignore, encoding="utf-8")
+    (repo / "README.md").write_text("the tool\n", encoding="utf-8")
+    dossier = repo / "docs" / "reviews" / "2026-10-09-x"
+    dossier.mkdir(parents=True)
+    dossier.joinpath("10-report.md").write_text("a dossier quoting 192.168.77.252 by mistake\n", encoding="utf-8")
+    inst = repo / "instance"
+    files = {
+        ".sops.yaml": "creation_rules: []\n", "fleet.yml": "enabled_modules: []\n", "instance.yml": "x: 1\n",
+        "leak-tokens.txt": "# none\n", "inventory/hosts.yml": "all: {}\n", "secrets/d.sops.yml": "a: ENC[x]\n",
+        "secrets/keys.txt": "a key file, by name\n", "trust/keys/.gitkeep": "",
+        "trust/observed-digests.yml": "x: 1\n", "control.agekey": "a key file, by suffix\n", "stray.txt": "stray\n",
+    }
+    for rel, body in files.items():
+        p = inst / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body, encoding="utf-8")
+    if with_reinclude:
+        shutil.copy(os.path.join(guard.ROOT, "instance.example", ".gitignore"), inst / ".gitignore")
+    return repo
+
+
+def _tracked_overlay(repo):
+    return sorted(f for f in _git(repo, "ls-files").split("\n") if f.startswith("instance/"))
+
+
+def test_public_tree_ignores_the_whole_overlay_and_scans_its_dossiers(tmp_path):
+    """PUBLIC state (no instance/.gitignore): `git add -A` stages NOTHING under instance/ (the root `/instance/*`
+    rule), the overlay invariant holds, and docs/reviews/ IS scanned — the planted private-range address in a
+    dossier is a finding. Guards the strip set hiding a dossier leak on the public repository (M3) and the root
+    rule going missing."""
+    repo = _scratch_tree(tmp_path, with_reinclude=False)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "public")
+    assert _tracked_overlay(repo) == []
+    assert guard.overlay_findings(str(repo)) == []
+    files = guard.shippable_files(str(repo))
+    assert "docs/reviews/2026-10-09-x/10-report.md" in files, "a public tree scans its dossiers"
+    findings = guard.scan_paths(files, str(repo), patterns=[])
+    assert findings and {f[0] for f in findings} == {"docs/reviews/2026-10-09-x/10-report.md"}
+
+
+def test_instance_tree_tracks_exactly_the_reincluded_overlay_entries(tmp_path):
+    """INSTANCE state (instance/.gitignore scaffolded from instance.example/.gitignore): `git add -A` — the control
+    node's canonical commit in local-canonical.yml — stages every known overlay entry and NOTHING the root secret
+    patterns cover: `keys.txt` and `*.agekey` inside the overlay, `trust/observed-digests.yml` and a stray top-level
+    file all stay untracked. The invariant holds and docs/reviews/ is stripped (an instance's dossiers quote its
+    deployment). This is the install path the public cut had broken: a public install committed no overlay at all,
+    so Semaphore read the example tier (M1)."""
+    repo = _scratch_tree(tmp_path, with_reinclude=True)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "instance")
+    assert _tracked_overlay(repo) == sorted([
+        "instance/.gitignore", "instance/.sops.yaml", "instance/fleet.yml", "instance/instance.yml",
+        "instance/leak-tokens.txt", "instance/inventory/hosts.yml", "instance/secrets/d.sops.yml",
+        "instance/trust/keys/.gitkeep"])
+    assert guard.overlay_findings(str(repo)) == []
+    files = guard.shippable_files(str(repo))
+    assert not any(f.startswith(("instance/", "docs/reviews/")) for f in files)
+    assert guard.scan_paths(files, str(repo), patterns=[]) == []
+
+
+def test_overlay_invariant_catches_a_force_add_a_lost_rule_and_a_dropped_reinclude(tmp_path):
+    """The leak paths the old probe passed (M2): (a) `git add -f` of overlay files on a PUBLIC tree — tracked AND
+    ignored — is a finding naming each path; (b) a root .gitignore without the `/instance/*` rule on a tree that
+    tracks nothing under instance/ is a finding (the public repository's protection is gone); (c) an instance
+    repository whose instance/.gitignore was deleted: every tracked overlay path becomes ignored and is reported
+    (new overlay files would never reach the canonical)."""
+    a = _scratch_tree(tmp_path / "a", with_reinclude=False)
+    _git(a, "add", "-A")
+    _git(a, "add", "-f", "instance/stray.txt", "instance/fleet.yml")
+    _git(a, "commit", "-q", "-m", "force-added")
+    bad = guard.overlay_findings(str(a))
+    assert sorted(f[0] for f in bad) == ["instance/fleet.yml", "instance/stray.txt"]
+    assert all(f[2] == "overlay" and "tracked AND git-ignored" in f[3] for f in bad)
+
+    b = _scratch_tree(tmp_path / "b", with_reinclude=False, with_root_rule=False)
+    _git(b, "add", ".gitignore", "README.md")
+    _git(b, "commit", "-q", "-m", "no rule")
+    lost = guard.overlay_findings(str(b))
+    assert len(lost) == 1 and lost[0][0] == "instance/" and "lost its" in lost[0][3]
+
+    c = _scratch_tree(tmp_path / "c", with_reinclude=True)
+    _git(c, "add", "-A")
+    _git(c, "commit", "-q", "-m", "instance")
+    _git(c, "rm", "-q", "instance/.gitignore")
+    _git(c, "commit", "-q", "-m", "dropped the re-include")
+    dropped = guard.overlay_findings(str(c))
+    assert sorted(f[0] for f in dropped) == [f for f in _tracked_overlay(c)], "every tracked overlay path is reported"
+
+
+def test_tree_mode_folds_the_overlay_invariant_into_the_scan(tmp_path, capsys):
+    """`--tree` — the entry point all three seats share — reports the overlay state in its summary line and turns an
+    invariant violation into an `overlay` finding with exit 1, so validate, the workflow and this suite cannot
+    disagree about it."""
+    repo = _scratch_tree(tmp_path, with_reinclude=True)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "instance")
+    assert guard.main(["--tree", str(repo)]) == 0
+    assert "overlay = instance" in capsys.readouterr().out
+    _git(repo, "rm", "-q", "instance/.gitignore")
+    _git(repo, "commit", "-q", "-m", "dropped")
+    assert guard.main(["--tree", str(repo)]) == 1
+    out = capsys.readouterr().out
+    assert "  overlay  " in out and "instance/fleet.yml:0" in out

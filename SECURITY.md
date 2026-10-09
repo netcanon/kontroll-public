@@ -1198,8 +1198,14 @@ Layer 2 is the **instance-token list** — this deployment's hostnames/domain/us
 regexes in `instance/leak-tokens.txt` (private overlay; the public CI gets the same list as the
 repository secret `KONTROLL_LEAK_TOKENS`; a public checkout runs the shipped canaries in
 `instance.example/leak-tokens.example.txt`), reported by index + digest only. The scope is every
-git-tracked file minus the private strip set (`instance/`, `docs/reviews/`, `local/`); a line that
-must hold a private address carries `pii-guard: allow <reason>`. `kontroll.paths.resolve()` reads
+git-tracked file minus the private strip set (`instance/`, `local/`, and `docs/reviews/` only on an
+instance tree — a public tree scans its dossiers); a line that must hold a private address carries
+`pii-guard: allow <reason>`. The same `--tree` run checks the **overlay invariant**: a PUBLIC tree
+tracks nothing under `instance/` and ignores its entries (`/instance/*` in the root `.gitignore`); an
+INSTANCE tree tracks its overlay and every tracked path is re-included by `instance/.gitignore`
+(scaffolded from `instance.example/.gitignore`), so a `git add -f`, a lost rule or a missing re-include
+file fails with the paths — checked with `check-ignore --no-index`, since a tracked path is never
+reported as ignored otherwise. `kontroll.paths.resolve()` reads
 the shipped `instance.example/` on a checkout with no `instance/`, so the public tree passes its own
 gates with no overlay present; writers (`keygen`, `enable_in_fleet`, `kontroll-init`) pass
 `write=True` and can never target the example.

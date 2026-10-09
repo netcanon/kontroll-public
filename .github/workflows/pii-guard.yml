@@ -44,23 +44,9 @@ jobs:
             echo "instance-token layer: no KONTROLL_LEAK_TOKENS secret (fork PR or unset) — shipped canaries only"
           fi
 
-      - name: Scan every shippable tracked file (structural + instance-token layers)
+      - name: Scan every shippable tracked file (structural + instance-token layers) and check the overlay invariant
+        # --tree also checks the overlay-tracking invariant: a PUBLIC tree tracks nothing under instance/ and ignores
+        # it (`/instance/*`); an INSTANCE tree tracks its overlay and every tracked path is re-included by
+        # instance/.gitignore. A `git add -f`, a bad merge or a lost rule is a finding — the earlier path probe used
+        # `git check-ignore` without --no-index, which never reports a TRACKED path, so it passed exactly that case.
         run: python3 -I tests/_leak_guard.py --tree
-
-      - name: The private overlay is never tracked in a public tree
-        # Path-based companion to the content scan. When the checkout's .gitignore ignores instance/ (the public
-        # cut does; the private instance repo tracks its overlay and does not), no instance/ path may be tracked —
-        # a `git add -f`, a bad merge or a stale pre-cut commit would slip past the ignore rule. Fails closed.
-        run: |
-          # probe a FILE path under the dir: `instance/` is a directory pattern, and a bare `instance` probe does
-          # not match it when the directory does not exist (exactly the public case) — the check would be vacuous
-          if git check-ignore -q -- instance/leak-tokens.txt; then
-            tracked=$(git ls-files -- instance)
-            if [ -n "$tracked" ]; then
-              echo "::error::instance/ paths are tracked in a tree whose .gitignore excludes the overlay:"
-              echo "$tracked"; exit 1
-            fi
-            echo "instance/ guard: clean — the overlay is ignored and nothing under it is tracked."
-          else
-            echo "instance/ guard: this checkout tracks its overlay (private instance repo) — not applicable."
-          fi
