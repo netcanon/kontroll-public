@@ -54,6 +54,11 @@ instance repository. What this change makes true:
   file's layout); `test_leak_guard.py` (8 tests), `test_paths_overlay.py` (+4), `test_kontroll_init` pins the
   token-list scaffold; the 10.x / `Vlan11` fixtures moved to TEST-NET / `Vlan100` with one `pii-guard: allow`
   (the private-unicast acceptance case). `docker/code-manifest.lock.yml` regenerated (paths/keygen/onboard).
+- **Homepage editor on an unconfigured tree (found by the public cut's first GitHub-hosted e2e run):** the board
+  files are a literal `instance/dashboards/homepage/` path (not `_OVERLAY_MAP`), so with no `instance/` the editor
+  opened with zero sections. `service/homepage._read` gains the same narrow READ-only tier: the shipped
+  `instance.example/` board when no `instance/` dir exists; writes stay on the overlay path and fail closed there,
+  so the example is never a write target (two new tests in `test_homepage.py`).
 - **Test-isolation fix:** `test_onboard_ssh_key::test_apply_routes_creds_through_stdin_never_argv` stubbed every
   writer except `gitio.write_inventory_host`, so every suite run wrote a real `instance/inventory/onboarded-cisco_ios.yml`
   (host `sw1`, TEST-NET) into the checkout — the untracked "fossil" the 2026-10-08 review took for an operator
