@@ -3,7 +3,7 @@
 # (galaxy.py) and the GUI's in-process service seams (search/classify/onboard), so it needs
 # NEITHER ansible nor the lab. PyYAML + flask are import-time deps of the modules under test.
 pytest>=8
-pytest-cov>=5
+pytest-cov>=7.1.0
 PyYAML>=6
 flask>=3.0
 # fastapi + httpx: the typed API (api/) imports FastAPI; Starlette's TestClient (httpx) drives
