@@ -74,6 +74,9 @@ Thumbs.db
 ansible/backups/
 tests/e2e/_out/
 
+# MCP client config (can carry a bearer token for an MCP server) — never commit
+.mcp.json
+
 # --- the instance overlay: ignored in the PUBLIC repository, tracked by an INSTANCE repository ---
 # Everything directly under instance/ is ignored by default, so a contributor's overlay never reaches a public
 # pull request. kontroll-init --fresh scaffolds instance/.gitignore from instance.example/.gitignore: it
