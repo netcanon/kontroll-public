@@ -11,6 +11,15 @@ NetConfig project.
 
 ## [Unreleased]
 
+### fix(repo): restore the executable bit on every shebang'd entry point, with a guard (2026-10-09)
+
+The public cut (`git archive | tar -x` on a Windows host) dropped the executable bit on all 48 shebang'd files —
+`./bootstrap.sh`, `scripts/kontroll.sh`, the installer entrypoint, the bundle/launch-kit scripts — so a Linux
+clone failed `docs/SETUP.md`'s first command with "Permission denied" while every CI gate stayed green (CI runs
+them via `bash`/`python3`); the private tree had been inconsistent too (11 of 48). Every tracked file outside
+`docs/` whose first line is a shebang is now mode 100755 and nothing else is, pinned by
+`tests/unit/test_executable_bits.py` (reads the git index mode, so it holds on a Windows checkout).
+
 ### feat(repo): the public split — identifier-free shippable tree, a standing leak guard, GitHub-hosted-or-self-hosted CI (genericization Phase 5) (2026-10-08)
 
 Design-of-record: `docs/reviews/2026-10-08-public-split-pii-sweep/` (a 5-agent read-only sweep + a mechanical
