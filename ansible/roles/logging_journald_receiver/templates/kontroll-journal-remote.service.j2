@@ -1,0 +1,28 @@
+# Managed by roles/logging_journald_receiver -- receives remote systemd-journal-upload streams on the MANAGEMENT
+# IP only ({{ logging_collector_host }}:{{ logging_journald_upload_port | default(19532) }}). The IP in
+# --listen-http binds that interface alone (never 0.0.0.0 on a multi-homed node -- SECURITY.md C3/C12).
+[Unit]
+Description=kontroll journald-upload receiver (systemd-journal-remote, mgmt-bound)
+Documentation=man:systemd-journal-remote(8)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# NON-ROOT (C12): the receiver runs as the package's own systemd-journal-remote user, Group=systemd-journal so its
+# .journal output is group-readable by the gid Vector reads journald by. A network-facing unauthenticated listener
+# must not run root.
+User=systemd-journal-remote
+Group=systemd-journal
+ExecStart=/lib/systemd/systemd-journal-remote --listen-http={{ logging_collector_host }}:{{ logging_journald_upload_port | default(19532) }} --output=/var/log/journal-remote/ --split-mode=host
+Restart=on-failure
+RestartSec=5
+# Cheap systemd hardening (drops nothing the receiver needs): no privilege gain, read-only system except the
+# output dir, no home access, private /tmp.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/log/journal-remote
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

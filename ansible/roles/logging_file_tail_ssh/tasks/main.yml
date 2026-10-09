@@ -1,0 +1,38 @@
+---
+# Authorize the collector's READ-ONLY key to tail a REMOTE host's logs (the remote case of file_tail_ssh). The
+# control-VM-LOCAL file tail needs NO wiring (Vector's file source bind-mounts /var/log directly). This drops a
+# restricted, forced-command public key into the target's authorized_keys so a future Vector `exec` source can
+# `ssh … <forced command>` with NO interactive shell. (The collector-side exec source is a tracked follow-up —
+# docs/logging-architecture.md; this role provisions only the host-side key grant.) Uses ansible.builtin
+# lineinfile, NOT ansible.posix.authorized_key — that collection is not a dependency and requirements are
+# GENERATED, never hand-edited (CLAUDE.md).
+#
+# Access chain used:   control VM (mgmt VLAN) -> target host (SSH) authorizes a read-only forced-command key
+# May break:           none — adds ONE authorized_keys line scoped to a forced command (no shell, no sudo)
+# Fallback required:   no
+# Blast radius:        this host (a restricted read-only key; reversible — remove the line)
+# Idempotence:         lineinfile keys off the pubkey body — the same key = 0 changed on a 2nd run
+# no_log:              true (keeps the audit clean; the public key is not secret but the line is noise)
+# --check-safe:        lineinfile renders the diff in check_mode, applies nothing (run --check --diff first)
+- name: Authorize the collector's read-only tail key on the remote host (gated on a pubkey being supplied)
+  when: logging_tail_pubkey | default('') | length > 0
+  become: true
+  block:
+    - name: Ensure the user's .ssh dir exists
+      ansible.builtin.file:
+        path: "{{ logging_tail_home }}/.ssh"
+        state: directory
+        mode: "0700"
+        owner: "{{ logging_tail_user }}"
+
+    - name: Authorize the read-only, forced-command tail key (no shell)
+      ansible.builtin.lineinfile:
+        path: "{{ logging_tail_home }}/.ssh/authorized_keys"
+        line: >-
+          command="{{ logging_tail_command }}",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty
+          {{ logging_tail_pubkey }}
+        create: true
+        mode: "0600"
+        owner: "{{ logging_tail_user }}"
+        regexp: "{{ logging_tail_pubkey | regex_escape }}$"
+      no_log: true

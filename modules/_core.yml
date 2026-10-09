@@ -1,0 +1,9 @@
+# Core collections — always installed, independent of which device modules are
+# enabled. Not tied to any device class. The bootstrap merges these with the
+# collections of every enabled module (instance/fleet.yml) to produce the final
+# install set. See modules/README.md.
+collections:
+  - name: community.sops        # SOPS+age runtime secret decryption
+    version: ">=1.6.0"
+  - name: community.general     # broadly-used utility modules
+    version: ">=9.0.0"

@@ -1,0 +1,9 @@
+# config.d/sources/internal_api_audit.yaml  → source id "internal_api_audit", type file.
+# TSV `ts<TAB>user<TAB>ip<TAB>action<TAB>run_id<TAB>detail` (api/audit.py) — run_id-correlated. Depends on the
+# fix that moves the API audit log off ephemeral /tmp to the persistent /host/api-audit mount.
+type: file
+include:
+  - /host/api-audit/api-audit.log
+  - /host/api-audit/api-audit.log.[0-9]
+read_from: beginning
+data_dir: /var/lib/vector

@@ -1,0 +1,39 @@
+---
+# TEMPLATE — copy roles/.role-template to roles/<new-class> to add a device class.
+# Every device-class `backup` entrypoint follows this contract:
+#   1. record a skip if the class is not backup-capable (defaults/main.yml),
+#   2. skip device I/O under Molecule,
+#   3. capture read-only into {{ config_backup_dir }},
+#   4. record `kontroll_backup_result` for the backup-configs.yml summary,
+#   5. carry an access-chain header; set no_log:true on any secret-bearing task.
+# See roles/cisco_ios/tasks/backup.yml for a worked example and
+# docs/engineering-standards.md §2b for the header contract.
+#
+# A new class ships with backup_capable=false (defaults/main.yml). Implement the
+# capture below, then flip it to true.
+#
+# Access chain used:   <how the control node reaches this device>
+# May break:           none (backup is read-only)
+# Fallback required:   no
+# Blast radius:        none — pure read
+# Idempotence:         capture file overwritten; no device state changes
+
+- name: Record skip when this class is not backup-capable
+  ansible.builtin.set_fact:
+    kontroll_backup_result: "skipped — class not backup-capable"
+  when: not (backup_capable | default(false) | bool)
+
+- name: Capture config for this device class
+  when:
+    - backup_capable | default(false) | bool
+    - not (molecule_test | default(false) | bool)
+  block:
+    # TODO: replace this debug with a real read-only capture that writes to
+    # {{ config_backup_dir }}, then set backup_capable: true in defaults/main.yml.
+    - name: TODO implement capture
+      ansible.builtin.debug:
+        msg: "Implement backup for {{ inventory_hostname }} ({{ device_role | default('?') }})"
+
+    - name: Record successful capture
+      ansible.builtin.set_fact:
+        kontroll_backup_result: "captured (TODO — template not yet implemented)"

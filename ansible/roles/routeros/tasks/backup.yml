@@ -1,0 +1,51 @@
+---
+# Backup entrypoint for the RouterOS device class (STAGED — post-cutover core).
+# Captures a full `/export` (text config) via the community.routeros command
+# module. Follows the backup contract — see roles/cisco_ios/tasks/backup.yml.
+#
+# STAGED: logic written from RouterOS conventions but NOT yet verified against a
+# live device — there is no RouterOS switch in the active fleet. Verify at
+# cutover before trusting the output.
+#
+# Access chain used:   control VM (mgmt VLAN) -> CRS310 mgmt (API/SSH)
+# May break:           none (read-only `/export`)
+# Fallback required:   no — but CRS310 has NO serial console; recovery is
+#                      MAC-Winbox / reset+import only. Keep this read-only.
+# Blast radius:        none — pure read
+# Idempotence:         capture file overwritten each run; no device state changes
+#
+# no_log: `/export show-sensitive` includes passwords/keys for a full restore.
+
+- name: Record skip when this class is not backup-capable
+  ansible.builtin.set_fact:
+    kontroll_backup_result: "skipped — class not backup-capable"
+  when: not (backup_capable | default(true) | bool)
+
+- name: Capture RouterOS export
+  when:
+    - backup_capable | default(true) | bool
+    - not (molecule_test | default(false) | bool)
+  block:
+    - name: Resolve capture filename
+      ansible.builtin.set_fact:
+        _backup_file: "RouterOS_{{ ansible_host | replace('.', '-') }}_export.rsc"
+
+    - name: Run /export (full, sensitive included)
+      community.routeros.command:
+        commands:
+          - /export show-sensitive
+      register: ros_export
+      changed_when: false
+      no_log: true                       # export carries passwords/keys
+
+    - name: Write capture
+      ansible.builtin.copy:
+        content: "{{ ros_export.stdout[0] }}\n"
+        dest: "{{ config_backup_dir }}/{{ _backup_file }}"
+        mode: "0640"
+      delegate_to: localhost
+      no_log: true                       # content is the secret-bearing config
+
+    - name: Record successful capture
+      ansible.builtin.set_fact:
+        kontroll_backup_result: "captured -> {{ _backup_file }} (staged/unverified)"

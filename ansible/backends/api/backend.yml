@@ -1,0 +1,35 @@
+# Backend: api — REST/httpapi devices AND services (FortiGate, Servarr, …).
+# Executed generically by roles/backend_api via plain `uri` (no vendor module, no
+# httpapi plugin) driven by a per-API RECIPE (ansible/backends/api/recipes/<name>.yml:
+# auth + endpoints). Actuation + backup are BOTH recipe-driven — but a recipe must
+# exist, so backup is not auto-conferred from structural probing (each REST API
+# differs); the recipe (derivable from OpenAPI, see docs/capability-matrix.md §5.2)
+# or an override supplies it. Matched when a collection is httpapi-only (no cliconf);
+# also the home for collection-less, purely recipe-driven APIs.
+name: api
+label: REST/httpapi (recipe-driven; backup via per-API recipe)
+order: 5
+classify:
+  all_of:
+    - {plugin: httpapi}
+    - {none_of: [{plugin: cliconf}]}
+# F2 confers: a REST/httpapi device is ICMP/TCP-probable with ZERO creds (blackbox); snmp/syslog need a CLI plane
+# (not an httpapi shape) so they stay operator-DECLARED — fortigate declares snmp on its httpapi device (the honest
+# gap). backup also omitted — it needs a per-API recipe.
+confers: {actuate: true, telemetry: [blackbox], logs: []}
+requires: []
+role: backend_api
+# Onboarded api hosts are reached by localhost-delegated `uri`, not SSH/httpapi —
+# so the host connection is local. The recipe (backend_api_recipe) + its token var
+# carry everything else.
+connection:
+  ansible_connection: local
+# Self-describing credential SHAPE (F1 TIER-A): a REST/httpapi device authenticates with an API TOKEN (or basic
+# auth) — NOT an SSH key. Deriving exactly these fields stops the form showing dead SSH boxes for a REST device (the
+# operator's headline gap). The token's hostvar is the recipe's token_var (resolved by the planner). The exact
+# multi-field API auth (e.g. proxmox api_user+api_token_id+api_token_secret) is a TIER-B/Rung-1 sharpening; this is
+# the generic REST shape. Read by scripts/kontroll/authspec.py.
+auth:
+  - {field: api_token, kind: token, label: "API token / key"}
+  - {field: username, kind: identity, label: "API username (basic auth)", maps_to: ansible_user}
+  - {field: password, kind: password, label: "API password (basic auth)", maps_to: ansible_password}

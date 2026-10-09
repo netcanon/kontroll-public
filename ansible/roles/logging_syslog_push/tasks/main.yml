@@ -1,0 +1,33 @@
+---
+# Configure the device to PUSH RFC5424 syslog to the kontroll collector (Vector's syslog source). Vendor-neutral:
+# the syslog config line is a DEFAULTABLE var (logging_syslog_lines, IOS-family default) and the push delegates
+# to the device_role-dispatched CLI backend (the ONE dispatch seam) — no per-vendor branching here. The enact
+# step (logsvc.logging_enact_commands) runs this via ansible/playbooks/wire-logging.yml with --check --diff FIRST.
+#
+# Access chain used:   control VM (mgmt VLAN) -> device mgmt (network_cli/netconf) sets `logging host <collector>`
+# May break:           the device's syslog config ONLY (a wrong collector host = logs go nowhere). NO forwarding
+#                      path, NO traffic rule, NO mgmt reachability is touched.
+# Fallback required:   console for edge_firewall/core_switch (OPNsense HDMI / CRS310 MAC-Winbox) per CLAUDE.md;
+#                      else no (a benign syslog-host line).
+# Blast radius:        this device's syslog config (reversible: re-run with the prior host, or `no logging host`)
+# Idempotence:         cli_config diffs against running-config — the host already set = 0 changed on a 2nd run
+# no_log:              handled in the backend (the device login cred + the running-config diff)
+# --check-safe:        check_mode renders the diff, applies nothing (CLAUDE.md: never apply a state-changing play
+#                      to the edge firewall / core switch without a --check --diff first — this touches the switch)
+- name: Fail loudly if no collector host was provided (never push an empty `logging host`)
+  ansible.builtin.assert:
+    that:
+      - logging_collector_host | default('') | length > 0
+    fail_msg: >-
+      logging_syslog_push needs logging_collector_host (the collector's mgmt IP). wire-logging.yml resolves it
+      from instance/instance.yml mgmt_ip; pass -e collector_host=<ip> to override.
+    quiet: true
+
+# noqa: var-naming[no-role-prefix] — backend_* are the shared cross-backend contract params.
+- name: Point the device's syslog at the collector (via the device_role CLI backend)  # noqa: var-naming[no-role-prefix]
+  ansible.builtin.include_role:
+    name: backend_netcommon_cli
+    tasks_from: configure
+  vars:
+    backend_config_label: syslog-push
+    backend_config_lines: "{{ logging_syslog_lines }}"

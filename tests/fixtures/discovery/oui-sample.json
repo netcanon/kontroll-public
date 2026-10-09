@@ -1,0 +1,8 @@
+{
+ "prefixes": {
+  "00005e": "IANA",
+  "00005e0": "IANA MA-M block",
+  "00005e005": "IANA MA-S block"
+ },
+ "schema": 1
+}

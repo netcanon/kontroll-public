@@ -1,0 +1,49 @@
+# Secret-onboarding FORM descriptor for the `dashboards` SOPS domain.
+# Declares the form FIELDS only — never values. Recipiency stays owned by /.sops.yaml
+# (base = control + break-glass). The shared secret dialog renders this; service/secrets.py
+# encrypts each value into instance/secrets/dashboards.sops.yml via gitio.sops_set. See secret-forms/README.md.
+domain: dashboards
+label: Dashboards & API token
+description: Grafana admin login + the kontroll API token that arms privileged mutation (C10).
+order: 30
+recipients: base          # informational: /.sops.yaml key_group (base = control + break-glass; no Semaphore key)
+# `rotatable: true` opts a field into the Secrets-dialog rotation UX (overwrite-confirm + an actuation
+# hand-off). The `actuation:` block is pure DATA describing how a NEW value goes LIVE on the running service
+# (a POST-promote operator/Semaphore step — the GUI never runs it). kind is a closed enum:
+#   recreate        → re-render .env + `deploy-stack -e stack_services=[<service>]` (env read at process start)
+#   grafana-cli     → `docker exec -i <service> <exec>` (Grafana honours its env only at first DB init)
+#   semaphore-admin → recreate THEN env-ferried `semaphore users change-by-login` (Semaphore sets the admin only
+#                     at first-run setup; see secret-forms/semaphore.yml)
+#   none/absent     → stage-only (the value is recorded; no actuation emitted)
+fields:
+  - key: gui_admin_password
+    label: Onboarding GUI password
+    type: password
+    required: true
+    rotatable: true
+    actuation:
+      kind: recreate
+      service: onboard-gui
+      consequence: self-evict   # recreating onboard-gui drops THIS GUI session (expected, not a fault)
+    help: The onboard-gui admin login (rendered to GUI_PASSWORD at deploy); kontroll-init mints it first.
+  - key: grafana_admin_password
+    label: Grafana admin password
+    type: password
+    required: true
+    rotatable: true
+    actuation:
+      kind: grafana-cli         # GF_SECURITY_ADMIN_PASSWORD applies only at first DB init → reset the live admin
+      service: grafana
+      # Grafana 13 removed the standalone `grafana-cli` binary — it is now the `grafana cli` subcommand.
+      # `--password-from-stdin` keeps the new value OFF argv (the operator pipes it in); the runner has no
+      # docker socket, so this stays an operator host-shell step (a one-click task is parked — see SECURITY C9).
+      exec: grafana cli admin reset-admin-password --password-from-stdin
+    help: Initial Grafana admin login; a live change needs `grafana cli` (see the enact hand-off after staging).
+  - key: kontroll_api_token
+    label: kontroll API token (C10)
+    type: token
+    generate: hex32       # offer a "generate" button — openssl rand -hex 32 (machine token, not typed)
+    required: true
+    rotatable: true
+    actuation: {kind: recreate, service: api, api_privileged: true}
+    help: Bearer token that arms the privileged API/GUI mutation routes (propose-then-promote).

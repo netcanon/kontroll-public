@@ -1,0 +1,15 @@
+# Grafana datasource provisioning — Loki auto-wired on first boot. The Layer-1 logging seam reserved by
+# dashboards/README.md. Grafana reaches Loki by container-name DNS on the kontroll network (never the published
+# port; access: proxy routes queries through the Grafana backend, so the browser never touches Loki directly).
+apiVersion: 1
+datasources:
+  - name: Loki
+    type: loki
+    uid: loki                # FIXED — dashboards + alert rules pin to this; never rename on a live Grafana
+                             #         (a uid change requires recreating grafana-data; dashboards/README §Errors)
+    access: proxy
+    url: http://loki:3100    # service-name resolution via the kontroll network (mirrors http://prometheus:9090)
+    isDefault: false
+    editable: false
+    jsonData:
+      maxLines: 1000

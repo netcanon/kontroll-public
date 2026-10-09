@@ -1,0 +1,12 @@
+# Instance identifier tokens — the names that identify ONE deployment (its hostnames, its domain, its operator
+# user names), one Python regex per line, `#` comments. tests/_leak_guard.py reads this list and FAILS the gate
+# (tests/validate.sh `pii-guard`, .github/workflows/pii-guard.yml, tests/unit/test_leak_guard.py) when any token
+# appears in a file that ships publicly — so a real hostname pasted into a doc, a fixture or a CHANGELOG entry is
+# caught before it is committed, without the tool ever publishing the list itself.
+#
+# This SHIPPED file holds synthetic CANARIES only, so the mechanism is exercised on every checkout. Your real list
+# goes in instance/leak-tokens.txt (the private overlay — never in the public tree, the bundle or the launch kit);
+# `kontroll-init --fresh` copies this template there for you to fill in. Suggested entries: every hostname in your
+# inventory, your domain (escape the dots: my\.example\.org), your workstation user name, your Proxmox node names.
+kontroll-canary-host
+canary-lab\.invalid

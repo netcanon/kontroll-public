@@ -1,0 +1,148 @@
+"""identity — the module-IDENTITY reconfigure instance (Phase 4b, #139).
+
+These pin the heaviest non-platform reconfigure: a diff-able, comment-preserving change to a device-class's
+top-level identity keys (secrets_domain / inventory_group / backend / role / status) in modules/<key>/module.yml.
+WHY (the failures they guard): before 4b an identity change had no surgical seam and fell off into a whole-file
+Overwrite (design 22 §5.4 G7) — silently flattening a hand-written module. And an identity re-point RE-HOMES
+hosts / ORPHANS creds, so it MUST carry the heaviest gate: each test asserts the change is classified
+`severity: identity` (not a plain modify), that a proposal may change AT MOST ONE identity key at a time (so the
+type-to-confirm value is unambiguous), that the comment-preserving write keeps the module's annotations, that the
+config-injection guard rejects a crafted value BEFORE the write, and that the plan_token gates the exact bytes.
+The regen-against-the-real-tree is out of scope (the plan stages module.yml only); these run under tmp_repo.
+"""
+import pytest
+import yaml
+
+from kontroll.service import identity, promote
+
+pytestmark = pytest.mark.unit
+
+# A hand-written module WITH comments + all five identity keys — the shape the write must never flatten.
+_MODULE = """# Device-class module: a network switch (hand-written, with comments).
+key: demo_sw
+description: demo switch
+status: active
+collections:
+  - name: cisco.ios
+role: backend_network_cli
+backend: network_cli
+inventory_group: core_switch   # the dispatch seam — this comment must survive
+secrets_domain: network
+metrics:
+  - {method: snmp, params: {module: if_mib}}
+"""
+
+# The full declared identity set the renderer submits, pre-filled from current (one value changed per test).
+_CURRENT = {"status": "active", "role": "backend_network_cli", "backend": "network_cli",
+            "inventory_group": "core_switch", "secrets_domain": "network"}
+
+
+def _write_module(tmp_repo, key, text):
+    d = tmp_repo / "modules" / key
+    d.mkdir(parents=True)
+    (d / "module.yml").write_text(text, encoding="utf-8")
+    return d / "module.yml"
+
+
+def _sel(**overrides):
+    return {"values": dict(_CURRENT, **overrides)}
+
+
+def test_propose_is_pure(tmp_repo):
+    """build_plan is PURE — computing an identity plan leaves module.yml byte-identical. Guards the propose/
+    promote boundary: reviewing an identity change must never mutate the repo (only promote writes)."""
+    p = _write_module(tmp_repo, "demo_sw", _MODULE)
+    before = p.read_text(encoding="utf-8")
+    plan = identity.build_plan("demo_sw", _sel(inventory_group="edge_firewall"))
+    assert plan["error"] is None
+    assert p.read_text(encoding="utf-8") == before
+
+
+def test_identity_change_is_modify_upgraded_to_identity_and_preserves_comments(tmp_repo):
+    """Changing inventory_group is a `modify` UPGRADED to `severity: identity` (the descriptor knob_meta), the
+    write swaps the value in place keeping the inline comment + siblings, and the plan_token gates the exact
+    bytes. THE load-bearing case: a re-home must fire the type-to-confirm, not a plain overwrite-confirm, and
+    must not flatten the module."""
+    p = _write_module(tmp_repo, "demo_sw", _MODULE)
+    plan = identity.build_plan("demo_sw", _sel(inventory_group="edge_firewall"))
+    assert plan["error"] is None and plan["severity"] == "identity"
+    chg = [c for c in plan["changes"] if c["path"] == "inventory_group"]
+    assert chg and chg[0]["kind"] == "modify" and chg[0]["severity"] == "identity"
+    assert chg[0]["before"] == "core_switch" and chg[0]["after"] == "edge_firewall"
+    assert "# the dispatch seam" in plan["text_after"] and "secrets_domain: network" in plan["text_after"]
+    # the token verifies against the bytes it will write, and fails for any drift (anti-drift + no-quiet-upgrade)
+    assert promote.verify_token(plan["plan_token"], *plan["token_parts"]) is True
+    assert promote.verify_token(plan["plan_token"], plan["text_after"] + "x", plan["token_parts"][1]) is False
+    identity.apply_plan(plan)
+    assert yaml.safe_load(p.read_text(encoding="utf-8"))["inventory_group"] == "edge_firewall"
+
+
+def test_no_drop_struct_is_the_full_module_not_the_edited_key(tmp_repo):
+    """build_plan feeds verify_no_drop the FULL module top-level keys (collections / metrics / every identity
+    key), NOT just the edited key — so a future writer dropping a co-owner key fails closed at promote. Guards
+    review SHOULD-FIX 1: upsert_top_level_key only replaces/appends (a legit edit keeps every key → passes), but
+    the gate can now SEE a drop instead of being fed a single-key struct in which a drop is inexpressible."""
+    _write_module(tmp_repo, "demo_sw", _MODULE)
+    plan = identity.build_plan("demo_sw", _sel(inventory_group="edge_firewall"))
+    assert {"collections", "metrics", "secrets_domain"} <= set(plan["current"])   # the FULL module, not {inventory_group}
+    from kontroll.service._reconfig import verify_no_drop
+    dropped = {k: v for k, v in plan["proposed"].items() if k != "secrets_domain"}  # a vanished co-owner identity key…
+    assert verify_no_drop(plan["current"], dropped, plan["changes"]) is False        # …now fails closed
+    assert verify_no_drop(plan["current"], plan["proposed"], plan["changes"]) is True   # the real edit passes
+
+
+def test_same_values_is_a_noop(tmp_repo):
+    """Submitting the current values unchanged is an idempotent no-op: error None, empty change-set, severity
+    None, text_after == text_before (writes nothing). Guards a re-submit of an unchanged identity form being
+    treated as a clobber or duplicating a key."""
+    _write_module(tmp_repo, "demo_sw", _MODULE)
+    plan = identity.build_plan("demo_sw", _sel())
+    assert plan["error"] is None and plan["changes"] == [] and plan["severity"] is None
+    assert plan["text_after"] == plan["text_before"]
+
+
+def test_two_identity_keys_at_once_is_refused(tmp_repo):
+    """Changing TWO identity-severity keys in one proposal is `multi_identity` (refused) — so the
+    type-to-confirm value stays unambiguous (one re-home/re-classify at a time). Guards a single GUI action
+    re-homing AND re-crediting a class behind one confirm."""
+    _write_module(tmp_repo, "demo_sw", _MODULE)
+    plan = identity.build_plan("demo_sw", _sel(inventory_group="edge_firewall", secrets_domain="semaphore"))
+    assert plan["error"] == "multi_identity"
+
+
+def test_a_status_modify_may_ride_with_one_identity_change(tmp_repo):
+    """A `status` flip (severity `modify`) MAY accompany a single identity change — two changes, max severity
+    `identity`. Guards the rule being over-strict (blocking a benign status flip alongside the re-home)."""
+    _write_module(tmp_repo, "demo_sw", _MODULE)
+    plan = identity.build_plan("demo_sw", _sel(inventory_group="edge_firewall", status="staged"))
+    assert plan["error"] is None and plan["severity"] == "identity"
+    assert {c["path"] for c in plan["changes"]} == {"inventory_group", "status"}
+
+
+def test_a_crafted_value_is_rejected_before_the_write(tmp_repo):
+    """A value outside the knob's pattern/allow-list (here a YAML-metacharacter injection into a slug key) is
+    `bad_value` — the P0a config-injection guard, server-side, BEFORE any byte is written. Guards a crafted
+    identity value ever reaching the rendered module.yml."""
+    _write_module(tmp_repo, "demo_sw", _MODULE)
+    plan = identity.build_plan("demo_sw", _sel(secrets_domain="network\ninjected: pwned"))
+    assert plan["error"] == "bad_value" and plan["field"] == "secrets_domain"
+
+
+def test_unknown_field_and_not_onboarded(tmp_repo):
+    """A submitted key that is not a declared identity knob is `unknown_field`; a class with no module.yml is
+    `not_onboarded`. Guards the dialog proposing a write for a typo'd/forged field or an un-onboarded class."""
+    _write_module(tmp_repo, "demo_sw", _MODULE)
+    assert identity.build_plan("demo_sw", {"values": {"bogus": "x"}})["error"] == "unknown_field"
+    assert identity.build_plan("ghost", _sel())["error"] == "not_onboarded"
+
+
+def test_apply_is_idempotent(tmp_repo):
+    """Applying the same identity plan twice writes once — a second apply is changed=False. Guards a
+    non-idempotent identity write (the 0-changed rule)."""
+    _write_module(tmp_repo, "demo_sw", _MODULE)
+    plan = identity.build_plan("demo_sw", _sel(role="backend_ssh"))
+    assert identity.apply_plan(plan)["changed"] is True
+    # a re-build sees the new value already current → no change; re-applying the SAME plan writes nothing.
+    assert identity.apply_plan(plan)["changed"] is False
+    re_plan = identity.build_plan("demo_sw", _sel(role="backend_ssh"))
+    assert re_plan["changes"] == [] and re_plan["text_after"] == re_plan["text_before"]

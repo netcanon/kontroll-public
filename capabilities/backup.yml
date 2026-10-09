@@ -1,0 +1,51 @@
+# capabilities/backup.yml — the SECONDARY-CAPABILITY descriptor for config backup (instance #2 of the
+# generalized dialog seam). Registering this touched ZERO spine file (promote.py / capability.py /
+# api/routes/capability.py / the GUI shell / the generic INVARIANT D* pins are all UNCHANGED) — the proof the
+# seam generalizes. The same shared shell + route + promote dispatch over THIS descriptor exactly as they do
+# over capabilities/telemetry.yml. Schema + rationale: docs/observability/secondary-capability-dialog.md §2.2.
+name: backup   # registry key == filename stem == route segment & ?cap= value
+label: "config backup (read-only capture, scheduled)"   # dialog header + nudge copy
+order: 20   # after telemetry (10)
+
+# --- detection (read-only suggester; a HINT, never a gate) --------------------------------------------- #
+vector: backup   # vectors/backup.yml (order 2) — high-confidence on _config option:backup / cliconf
+suggester:
+  module: classify
+  suggest: suggest_backup   # facts -> {cell, candidates, note}  (PURE)
+  declared: declared_backup   # the DECLARED-side reconciliation (reads the backup: block)
+  hint: {}   # backup has ONE capture path (its role entrypoint), not a plugin->method map — no hint needed
+
+# --- the declared block this capability owns in modules/<key>/module.yml ------------------------------- #
+block_key: backup   # the `backup:` mapping (sibling of metrics:/role/inventory_group)
+block_shape: mapping   # a class backs up ONE way -> a single MAPPING (vs telemetry's plural list)
+
+# --- the write half: resolved by IMPORT-BY-CONVENTION (the spine calls module.build_plan/apply_plan) ---- #
+service:
+  module: backup   # scripts/kontroll/service/backup.py — build_plan/apply_plan/offerable_methods + the enact builder
+
+# --- Stage 1: method picker ---------------------------------------------------------------------------- #
+method_source: role_entrypoint   # the ONE method = this class's roles/<role>/tasks/backup.yml (not a registry)
+method_registry: null
+render_method_stage: true   # render the picker — it shows the single role-entrypoint method + the schedule param;
+                            # so backup REUSES the generic shell's method+param picker with zero shell edit
+
+# --- Stage 3: the per-capability "second concern" (none — every knob rides Stage 1) ------------------- #
+resource_stage:
+  testid: cap-backup-policy
+  source_kind: none   # schedule + retention + destination ALL ride as Stage-1 method params (#123, like logging's
+                      # retention) — no Stage-3 render. The history-prune ENFORCEMENT is now LIVE (#125 — the
+                      # retention-prune play in backup-configs.yml, gated on kontroll_backup_retention; keep-all =
+                      # no-op). DEFERRED: offsite TRANSFER only (no encryption-at-rest, SECURITY.md C8 — destination
+                      # offsite is offered-but-refused).
+  fields: []
+
+# --- generation + enactment ---------------------------------------------------------------------------- #
+generator:
+  script: scripts/gen-backup.py
+  lockfile_glob: "config/semaphore/*.generated.yml"   # validate.sh derives the --check honesty step
+enact_kind: semaphore_schedule   # selects a CODE-resident enact builder (gen-backup + configure-semaphore) —
+                                 # the API runs NEITHER; the builder only emits the command strings.
+
+# --- trust posture (the dialog renders trust_note; the audit logs the secret-domain NAME only) -------- #
+secret_domain_field: null   # local capture history needs no SOPS domain (offsite — which would — is deferred)
+trust_note: "Captures hold secrets (config hashes/PSKs); local 0700, never pushed (SECURITY.md C8); offsite deferred."

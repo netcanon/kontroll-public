@@ -1,0 +1,11 @@
+{
+  "results": [
+    {"ip": "192.0.2.50", "mac": "00:00:5e:00:53:01", "hostname": "printer", "interface": "internal", "status": "leased", "type": "ipv4"},
+    {"ip": "192.0.2.51", "mac": "00:00:5e:00:53:02", "hostname": "nas", "interface": "internal", "status": "leased", "type": "ipv4"},
+    {"ip": "192.0.2.10", "mac": "00:00:5e:00:53:03", "hostname": "core-switch", "interface": "internal", "status": "reserved", "type": "ipv4"}
+  ],
+  "vdom": "root",
+  "path": "system",
+  "name": "dhcp",
+  "status": "success"
+}

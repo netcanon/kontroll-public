@@ -1,0 +1,12 @@
+---
+# Liveness for the Cisco IOS-XE class — delegates to the generic netcommon_cli
+# backend (ansible.netcommon.cli_command), no vendor module. cisco_ios now carries
+# only its identity + params; the capture/liveness logic is the shared backend.
+# noqa: var-naming[no-role-prefix] — backend_* are the shared cross-backend
+# contract params (uniform name regardless of which backend), like backup_capable.
+- name: Liveness via the netcommon_cli backend  # noqa: var-naming[no-role-prefix]
+  ansible.builtin.include_role:
+    name: backend_netcommon_cli
+    tasks_from: check
+  vars:
+    backend_liveness_command: show clock

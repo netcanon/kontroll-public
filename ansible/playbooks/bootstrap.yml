@@ -1,0 +1,198 @@
+---
+# Control-node bootstrap — idempotent, data-driven by instance/fleet.yml + modules/.
+# Codifies (and replaces) the manual Phase-1 setup. Run ON the control node:
+#
+#     cd ansible && ansible-playbook playbooks/bootstrap.yml
+#
+# Prereq (Stage 0): ansible + git already present — see bootstrap.sh / docs/SETUP.md.
+# This playbook does the data-driven Stage 1: select collections from the enabled
+# modules, install the toolchain, set up the age key, and verify.
+#
+# Access chain used:   localhost (the control node itself)
+# May break:           none (configures the control node only)
+# Fallback required:   no
+# Blast radius:        this VM only
+# Idempotence:         re-runnable; a clean second run reports 0 changed.
+
+- name: Bootstrap the kontroll control node
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  vars:
+    repo_root: "{{ playbook_dir }}/../.."
+    modules_dir: "{{ repo_root }}/modules"
+    fleet_file: "{{ repo_root }}/instance/fleet.yml"
+    req_generated: "{{ repo_root }}/ansible/collections/requirements.generated.yml"
+    age_dir: "{{ ansible_env.HOME }}/.config/sops/age"
+    age_key: "{{ ansible_env.HOME }}/.config/sops/age/keys.txt"
+    sops_version: "v3.13.1"          # pin; bump deliberately
+    gitleaks_version: "8.18.4"       # secret-scan gate (tests/validate); pin, bump deliberately
+    gitleaks_base_url: "https://github.com/gitleaks/gitleaks/releases/download"
+    # True only inside the compose-native installer container (the launcher sets KONTROLL_IN_CONTAINER=1). The
+    # host-provisioning tasks below (OS packages, qemu-guest-agent's systemd unit, the sops/gitleaks binaries) are
+    # baked into the installer image OR belong on the host (scripts/host-systemd.sh) — and a container has no
+    # systemd. Skipped in-container (MF-6, synthesis §4.5); the collection + age/ssh-key tasks still run here.
+    in_container: "{{ (lookup('env', 'KONTROLL_IN_CONTAINER') | default('', true)) | length > 0 }}"
+
+  tasks:
+    # ── 1. Resolve the fleet → collection set ────────────────────────────
+    - name: Load fleet profile
+      ansible.builtin.include_vars:
+        file: "{{ fleet_file }}"
+        name: fleet
+
+    # Collection resolution lives in ONE place now — scripts/gen-requirements.py (the lockfile task below).
+    # bootstrap only collects each module's secrets_domain (the §4 report), which the generator does not own.
+    - name: Seed the secrets-domain set
+      ansible.builtin.set_fact:
+        secrets_domains: []
+
+    - name: Collect each enabled module's secrets domain
+      ansible.builtin.set_fact:
+        secrets_domains: "{{ (secrets_domains + [_m.secrets_domain]) | unique }}"
+      loop: "{{ fleet.enabled_modules }}"
+      loop_control: { label: "{{ item }}" }
+      vars:
+        _m: "{{ lookup('file', modules_dir ~ '/' ~ item ~ '/module.yml') | from_yaml }}"
+
+    - name: Ensure the generated-collections dir exists (its content is gitignored ⇒ absent in a fresh bundle)
+      ansible.builtin.file:
+        path: "{{ repo_root }}/ansible/collections"
+        state: directory
+        mode: "0755"
+
+    # Collapse onto the single-source generator (F4 / report 21 §4.6 / worked-extraction follow-on): this is the
+    # SAME script deploy-stack.yml (and CI) runs, so the fleet -> collection resolution + dedup lives in ONE place
+    # and can never diverge from a hand-maintained Jinja copy. changed_when:false — the install task below carries
+    # the real change signal (mirrors deploy-stack.yml's gen-requirements call).
+    - name: Generate the collection lockfile (single-source scripts/gen-requirements.py)
+      ansible.builtin.command:
+        cmd: python3 scripts/gen-requirements.py
+        chdir: "{{ repo_root }}"
+      changed_when: false
+
+    # The never-brick install wrapper (C15-a): adaptive GPG signature WHERE the source serves one + a
+    # keyring is held, else a plain install on the pin + checksum floor (no keyring today ⇒ byte-identical
+    # to the raw flat install it replaces). Forwards the galaxy stdout so the 'Installing' change signal is
+    # preserved. scripts/install-collections.py.
+    - name: Install the selected collections (never-brick wrapper)
+      ansible.builtin.command:
+        cmd: python3 scripts/install-collections.py
+        chdir: "{{ repo_root }}"
+      register: galaxy
+      changed_when: "'Installing' in galaxy.stdout"
+
+    # ── 2. OS toolchain (idempotent) ─────────────────────────────────────
+    - name: Install OS packages (age, guest agent, lint tools, network SSH)
+      become: true
+      ansible.builtin.apt:
+        # python3-paramiko: required by network_cli (cisco.ios, etc.)
+        name: [age, qemu-guest-agent, yamllint, ansible-lint, python3-paramiko]
+        state: present
+        update_cache: true
+      when: not in_container          # baked in the installer image / host residual (scripts/host-systemd.sh)
+
+    - name: Enable qemu-guest-agent
+      become: true
+      ansible.builtin.systemd:
+        name: qemu-guest-agent
+        enabled: true
+        state: started
+      when: not in_container          # no systemd in a container; qemu-guest-agent is a HOST concern
+
+    - name: Check for sops
+      ansible.builtin.stat:
+        path: /usr/local/bin/sops
+      register: sops_bin
+      when: not in_container          # sops is baked into the installer image
+
+    - name: Install sops if missing, version {{ sops_version }}
+      become: true
+      ansible.builtin.get_url:
+        url: >-
+          https://github.com/getsops/sops/releases/download/{{ sops_version }}/sops-{{ sops_version }}.linux.{{
+          {'x86_64': 'amd64', 'aarch64': 'arm64', 'armv7l': 'armhf'}[ansible_architecture] | default('amd64') }}
+        dest: /usr/local/bin/sops
+        mode: "0755"
+      when: not in_container and not sops_bin.stat.exists
+
+    - name: Check for gitleaks
+      ansible.builtin.stat:
+        path: /usr/local/bin/gitleaks
+      register: gitleaks_bin
+      when: not in_container          # gitleaks is a host/CI secret-scan tool (tests/validate), not an install dep
+
+    - name: Install gitleaks if missing, version {{ gitleaks_version }}
+      become: true
+      ansible.builtin.unarchive:
+        src: "{{ gitleaks_base_url }}/v{{ gitleaks_version }}/gitleaks_{{ gitleaks_version }}_linux_x64.tar.gz"
+        dest: /usr/local/bin
+        include: [gitleaks]
+        remote_src: true
+        mode: "0755"
+      when: not in_container and not gitleaks_bin.stat.exists
+
+    # ── 3. age key (per-user; never become) ──────────────────────────────
+    - name: Ensure age key directory
+      ansible.builtin.file:
+        path: "{{ age_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Generate age key if absent
+      ansible.builtin.command:
+        cmd: "age-keygen -o {{ age_key }}"
+        creates: "{{ age_key }}"
+
+    - name: Read age public recipient
+      ansible.builtin.command: "grep -oE 'age1[a-z0-9]+' {{ age_key }}"
+      register: age_pub
+      changed_when: false
+
+    - name: Warn if no break-glass recipient is configured
+      ansible.builtin.debug:
+        msg: "Only one age recipient in .sops.yaml - add an offline break-glass key (SETUP.md section 5)."
+      when: (lookup('file', repo_root ~ '/instance/.sops.yaml') | regex_findall('age1[a-z0-9]+') | unique | length) < 2
+
+    # ── 3b. Dedicated SSH key for reaching SSH-managed hosts ─────────────
+    - name: Generate the ansible SSH key if absent
+      ansible.builtin.command:
+        cmd: "ssh-keygen -t ed25519 -f {{ ansible_env.HOME }}/.ssh/ansible_ed25519 -N '' -C ansible@control"
+        creates: "{{ ansible_env.HOME }}/.ssh/ansible_ed25519"
+
+    - name: Read ansible SSH public key
+      ansible.builtin.command: "cat {{ ansible_env.HOME }}/.ssh/ansible_ed25519.pub"
+      register: ansible_pub
+      changed_when: false
+
+    # ── 4. Report which secrets domains the fleet needs ──────────────────
+    - name: Check which secrets domains exist
+      ansible.builtin.stat:
+        path: "{{ repo_root }}/instance/secrets/{{ item }}.sops.yml"
+      register: sec_stat
+      loop: "{{ secrets_domains }}"
+      loop_control: { label: "{{ item }}" }
+
+    # ── 5. Verify ────────────────────────────────────────────────────────
+    - name: Verify inventory parses
+      ansible.builtin.command: ansible-inventory --graph
+      args:
+        chdir: "{{ repo_root }}/ansible"
+      changed_when: false
+
+    - name: Compute summary facts (secret files present + the resolved collection names)
+      ansible.builtin.set_fact:
+        secrets_present: "{{ sec_stat.results | selectattr('stat.exists') | map(attribute='item') | list }}"
+        resolved_colls: "{{ (lookup('file', req_generated) | from_yaml).collections | map(attribute='name') | list }}"
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg:
+          - "enabled modules : {{ fleet.enabled_modules | join(', ') }}"
+          - "collections     : {{ resolved_colls | join(', ') }}"
+          - "age recipient   : {{ age_pub.stdout }} (put in .sops.yaml)"
+          - "secrets needed  : {{ secrets_domains | join(', ') }}"
+          - "secrets present : {{ secrets_present | join(', ') if secrets_present else 'NONE (create with sops)' }}"
+          - "ansible sshkey  : {{ ansible_pub.stdout }}"
+          - "  -> install that pubkey on SSH-managed hosts (proxmox/docker/openwrt)"

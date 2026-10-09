@@ -1,0 +1,32 @@
+---
+# Install the Prometheus node_exporter on the metrics-eligible hosts — the device classes whose module
+# declares a `via: host` metrics source (today: proxmox -> hypervisors, docker_host -> docker_hosts; keep
+# the default group pattern in sync with those modules, or pass -e target=<host>/<group>). The scrape
+# targets for these hosts are already GENERATED (scripts/gen-observability.py); this play lands the agent so
+# those targets go UP. State-changing -> run with --check --diff FIRST (CLAUDE.md). A down host is tolerated.
+#
+# Backfill the fleet:   ansible-playbook playbooks/install-node-exporter.yml --check --diff   (then for real)
+# One host (onboard):   ansible-playbook playbooks/install-node-exporter.yml -e target=<host>
+#
+# Access chain used:   control VM (mgmt VLAN) -> target hosts (SSH, root key ~/.ssh/ansible_ed25519)
+# May break:           none — additive read-only agent (:9100); no firewall/network change
+# Fallback required:   no
+# Blast radius:        the targeted hosts (a node_exporter service each; reversible: apt remove)
+
+- name: Fleet preamble — stamp the run id + materialize per-host SSH keys
+  ansible.builtin.import_playbook: _fleet-preamble.yml
+
+- name: Install node_exporter on the metrics-eligible hosts
+  hosts: "{{ target | default('hypervisors:docker_hosts') }}"
+  gather_facts: true              # need ansible_os_family to dispatch apt+systemd (Debian) vs apk+OpenRC (Alpine)
+  ignore_unreachable: true        # a down host is tolerated, not fatal (CLAUDE.md)
+  tasks:
+    # include_role (dynamic), matching the repo convention (ping.yml) — resolves via roles_path at runtime
+    # (cwd = ansible/, ansible.cfg roles_path=roles), and doesn't trip syntax-check's static role resolution.
+    - name: Install + start node_exporter (the via:host host metrics agent)
+      ansible.builtin.include_role:
+        name: node_exporter
+
+# Post-run: remove the per-run ephemeral SSH key dir (imported LAST — after the fleet connections; MF-4).
+- name: Clean up the per-run ephemeral SSH key dir
+  ansible.builtin.import_playbook: _cleanup-ssh-keys.yml

@@ -1,0 +1,41 @@
+# caddy — the optional bundled HTTPS ingress for frontend.tls_mode=acme (Let's Encrypt). Fronts the
+# kontroll services by hostname (<sub>.<domain>), terminating TLS so the apps serve plain HTTP behind it.
+# The Caddyfile is RENDERED by deploy-stack from instance/instance.yml (scripts/kontroll/frontend.py
+# render_caddyfile) — never hand-edited. See docs/frontend-exposure.md.
+#
+# DNS-01 challenge (kontroll is never WAN-exposed, so HTTP-01 is unavailable): the operator supplies a
+# domain + a DNS provider + KONTROLL_ACME_DNS_TOKEN (SOPS -> docker/.env), and a Caddy IMAGE that carries
+# that provider's caddy-dns module (build via xcaddy; the stock caddy:2 has none). byo_proxy / self_signed
+# do NOT run this service (deploy-stack only adds `caddy` to the bring-up in acme mode).
+#
+# Deploy: set frontend.tls_mode=acme (+ domain/acme_email/dns_provider) in instance/instance.yml, then
+#   ansible-playbook playbooks/deploy-stack.yml -e '{"stack_services":["api","semaphore","homepage"]}'
+# (deploy-stack renders the Caddyfile and appends `caddy` to the up list automatically).
+services:
+  caddy:
+    image: ${KONTROLL_CADDY_IMAGE:-caddy:2.11.4}   # pinned; override with an xcaddy build carrying your DNS plugin
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "${KONTROLL_MGMT_IP:?set in .env}:443:443"
+      - "${KONTROLL_MGMT_IP:?set in .env}:443:443/udp"   # HTTP/3
+      - "${KONTROLL_MGMT_IP:?set in .env}:80:80"         # HTTP->HTTPS redirect (DNS-01 needs no inbound :80)
+    environment:
+      # DNS provider API token for the DNS-01 challenge — soft-default so an unset value never breaks
+      # compose ops for OTHER services (the app fails closed if acme is actually enabled without it).
+      KONTROLL_ACME_DNS_TOKEN: ${KONTROLL_ACME_DNS_TOKEN:-}
+    volumes:
+      - ${KONTROLL_STORAGE_ROOT:-/var/lib/kontroll}/caddy/Caddyfile:/etc/caddy/Caddyfile:ro   # rendered by deploy-stack
+      - caddy-data:/data                         # issued certs + ACME account — persist across restarts
+      - caddy-config:/config
+    networks:
+      - kontroll
+
+volumes:
+  caddy-data:
+  caddy-config:
+
+networks:
+  kontroll:
+    external: true
+    name: kontroll

@@ -1,0 +1,33 @@
+---
+# Reload Prometheus' config without a restart — the GUI/Semaphore enact (item F, Tier-1) for a freshly-promoted
+# scrape TARGET or JOB. file-sd targets auto-reload, but a NEW job file under prometheus/jobs.d needs a config
+# reload to be picked up. POSTs Prometheus' lifecycle reload endpoint (it runs with --web.enable-lifecycle) over
+# the shared docker network — no docker socket, no restart, no host root. Bad config is rejected by Prometheus
+# (the running config is kept), so this is safe to run after any observability promote.
+#
+# Access chain used:   the runner (kontroll docker network) -> http://prometheus:9090/-/reload
+# May break:           nothing — a config reload only (re-reads the mounted config; rejects a bad one, keeps old)
+# Fallback required:   no
+# Blast radius:        the prometheus container's config (no restart, no data loss)
+
+- name: Stamp the run correlation id
+  ansible.builtin.import_playbook: _log-run-id.yml
+
+- name: Reload Prometheus configuration (no restart)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    prometheus_url: "{{ prometheus_url | default('http://prometheus:9090') }}"
+  tasks:
+    - name: POST the Prometheus lifecycle reload endpoint
+      ansible.builtin.uri:
+        url: "{{ prometheus_url }}/-/reload"
+        method: POST
+        status_code: [200]
+      register: _reload
+      changed_when: _reload.status == 200
+
+    - name: Reload result
+      ansible.builtin.debug:
+        msg: "Prometheus config reloaded ({{ prometheus_url }}/-/reload -> {{ _reload.status }})."

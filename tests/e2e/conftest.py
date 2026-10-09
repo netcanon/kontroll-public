@@ -1,0 +1,166 @@
+"""E2E fixtures — a REAL booted Flask GUI in a daemon thread (no galaxy.py, no ansible, no lab —
+search/classify/onboard ALL run the service layer in-process, mocked at their seams), driven by
+Playwright headless. Mirrors netcanon's live-server pattern, adapted to Flask (werkzeug's make_server
+instead of uvicorn). HTTP Basic creds are supplied via the browser context (http_credentials) — the
+Playwright-correct way. The hermetic auth/contract is covered by tests/integration/test_gui_api.py;
+this layer proves the rendered UX.
+"""
+import os
+import socket
+import sys
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.request
+
+import pytest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(ROOT, "gui"))
+sys.path.insert(0, os.path.join(ROOT, "scripts"))
+os.environ.setdefault("GUI_USER", "admin")
+os.environ.setdefault("GUI_PASSWORD", "test-password-e2e")
+os.environ.setdefault("GUI_AUDIT_LOG", os.path.join(tempfile.gettempdir(), "kontroll-e2e-audit.log"))
+
+import app as gui  # noqa: E402  (after sys.path is set up)
+from kontroll import catalog as _catalog  # noqa: E402  (search/classify run the service layer in-process)
+from kontroll import probe as _probe  # noqa: E402
+
+def _fake_deep_probe(coll, version=None):
+    """Canned cliconf facts so the in-process classify/deep search renders a cisco.ios card
+    (backup=yes → netcommon_cli)."""
+    f = _probe._facts(coll, version or "5.0.0", "local", "deep")
+    f["plugins"] = {"cliconf": ["ios"]}
+    f["modules"] = ["ios_command"]
+    return f
+
+
+def _fake_local_shallow(keywords, limit):
+    """Canned SHALLOW facts — the seam the redesigned /api/search uses by DEFAULT (files-only, no ansible-doc).
+    Without this the default search would hit the runner's REAL ansible-galaxy and render whatever collections
+    happen to be installed. cisco.ios (a cliconf device) by default; a 'proxmox' query returns community.proxmox
+    so the e2e can drive the provisioning-surface flow (proxmox is the class that declares a PVEAuditor cred
+    prerequisite). Both render as cliconf devices — the offline backend classify needs no real probe. Mirrors
+    _fake_deep_probe for the --deep path. Returns a list, like catalog.galaxy_search."""
+    coll = "community.proxmox" if any("proxmox" in k.lower() for k in keywords) else "cisco.ios"
+    f = _probe._facts(coll, "5.0.0", "local", "shallow")
+    f["plugins"] = {"cliconf": ["ios"]}
+    f["modules"] = ["ios_command"]
+    return [f]
+
+
+# A canned REGISTERED actuation unit so the Index Automations section + the configure dialog render in a real
+# browser (the configure-dialog e2e). Mocking the ONE underlying read `catalog.load_actuation_units` flows through
+# registered_units_view (the Automations row), configurable_view→_unit_view (the knob group), AND
+# build_actuation_plan (the Preview play) — without overriding any of those higher seams (so the capability/secret
+# e2e flows that ALSO use configurable_view stay untouched). The Stage write is NOT driven in e2e (it commits).
+_E2E_UNIT = {
+    "schema": 1, "key": "community-docker-swarm",
+    "unit": {"kind": "role", "collection": "community.docker", "name": "swarm"},
+    "install": {"collections": [{"name": "community.docker", "version": "==3.10.4"}],
+                "provenance": {"source": "galaxy", "signature": "adaptive"}},
+    "target": {"device_class": "docker_host", "inventory_group": "docker_hosts", "blast_radius": "LAN"},
+    "knobs": [{"key": "listen_port", "label": "Listen port", "type": "int",
+               "range": {"min": 1, "max": 65535}, "default": 2377}],
+}
+
+
+def _mock_service_seams():
+    """Point search/classify's service I/O at offline facts (cisco.ios as a cliconf device, no Galaxy) + register
+    one canned actuation unit (the Automations/configure-dialog e2e). Covers the default shallow seam
+    (local_shallow), the deep seam (deep_probe), and the actuation registry read (load_actuation_units). Plain
+    assignment — the e2e server is a session-scoped thread that can't use function-scoped monkeypatch — so this
+    RETURNS the originals and live_server restores them on teardown (and the root conftest orders e2e last),
+    keeping a combined `py -m pytest` run from leaking these globals into non-e2e tests."""
+    from kontroll.service import provenance as _prov  # local import — the MF-5 read surface seam
+    from kontroll.service import discovery as _disc   # local import — the Rung-1b discovery-inbox read seam
+    originals = {
+        (_catalog, "local_installed"): _catalog.local_installed,
+        (_catalog, "local_shallow"): _catalog.local_shallow,
+        (_probe, "deep_probe"): _probe.deep_probe,
+        (_catalog, "galaxy_search"): _catalog.galaxy_search,
+        (_catalog, "load_actuation_units"): _catalog.load_actuation_units,
+        (_prov, "fleet_provenance"): _prov.fleet_provenance,
+        (_prov, "image_provenance"): _prov.image_provenance,
+        (_disc, "read_inbox"): _disc.read_inbox,
+    }
+    _catalog.local_installed = lambda: {"cisco.ios": "5.0.0"}
+    _catalog.local_shallow = _fake_local_shallow
+    _probe.deep_probe = _fake_deep_probe
+    _catalog.galaxy_search = lambda kw, limit: []
+    _catalog.load_actuation_units = lambda: [dict(_E2E_UNIT)]
+    # MF-5 Supply-chain section: one canned unsigned-pinned collection so the amber badge renders in a real browser.
+    _prov.fleet_provenance = lambda: {
+        "available": True, "default_policy": "adaptive", "keyring_present": False,
+        "collections": [{"name": "community.docker", "pin": "==4.0.0", "pin_kind": "exact", "policy": "adaptive",
+                         "class": "unsigned-pinned", "digest_recorded": False,
+                         "note": "verified by pin + checksum — no signature served by this source"}],
+        "summary": {"total": 1, "unsigned_pinned": 1, "signed": 0, "digests_recorded": 0}}
+    # Rung-1b discovery inbox: two un-onboarded candidates so the panel + the onboard pre-fill render in a real
+    # browser — one normal host + one whose hostname is a `<script>` payload (the F6 XSS-safe-render e2e; the ET/
+    # textContent rendering must show it as literal text, never execute it). P-1: RFC-5737 IPs + RFC-7042 MACs.
+    _disc.read_inbox = lambda: {
+        "generated_at": "2026-07-03T00:00:00+00:00",
+        "sources": [{"key": "opnsense", "method": "dhcp_leases_opnsense", "host": "192.0.2.1",
+                     "status": "ok", "count": 2}],
+        "candidates": [
+            {"ip": "192.0.2.42", "mac": "00:00:5e:00:53:01", "hostname": "sw-lab-3",
+             "vendor": "IEEE Example Vendor Inc",         # the Rung-3 OUI display hint (advisory text; renders via ET)
+             "source_key": "opnsense", "source_host": "192.0.2.1"},
+            {"ip": "192.0.2.43", "mac": "00:00:5e:00:53:02", "hostname": "<script>window.__xss=1</script>",
+             "vendor": None,                              # no OUI match -> the discovery-vendor line is absent
+             "source_key": "opnsense", "source_host": "192.0.2.1"}]}
+    # C1 images sub-panel (§7.3): one canned digest-pinned image so the amber image badge renders in a real browser.
+    _prov.image_provenance = lambda: {
+        "available": True, "signing_configured": False,
+        "images": [{"name": "kontroll-control", "ref": "ghcr.io/netcanon-dev/kontroll-control", "tag": "v1",
+                    "digest": "sha256:" + "a" * 64, "digest_short": "a" * 12, "class": "digest-pinned",
+                    "note": "Docker verifies this @sha256: on every pull — not a signature (a digest-pin is not signed)"}],
+        "summary": {"total": 1, "digest_pinned": 1, "local_build": 0, "signed": 0}}
+    return originals
+
+
+@pytest.fixture(scope="session")
+def live_server():
+    """Boot the real Flask app in a daemon thread, the service I/O seams patched. Throwaway process,
+    so the patch is a plain assignment, restored on teardown for a clean combined run."""
+    from werkzeug.serving import make_server
+
+    _orig_seams = _mock_service_seams()   # search/classify/onboard all run the service layer in-process
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    server = make_server("127.0.0.1", port, gui.app, threaded=True)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = "http://127.0.0.1:%d" % port
+    for _ in range(100):                       # wait until it answers (a 401 counts — it's up)
+        try:
+            urllib.request.urlopen(base, timeout=0.5)
+            break
+        except urllib.error.HTTPError:
+            break
+        except Exception:
+            time.sleep(0.1)
+    else:                                      # never came up — fail loudly, not as opaque browser errors
+        server.shutdown()
+        raise RuntimeError("e2e live server on %s did not respond in ~10s" % base)
+    yield base
+    server.shutdown()
+    for (mod, name), fn in _orig_seams.items():        # restore the globally-assigned seams so a combined
+        setattr(mod, name, fn)                          # `py -m pytest` run leaves no fakes behind
+
+
+@pytest.fixture(scope="session")
+def base_url(live_server):
+    """pytest-playwright resolves page.goto('/') against this."""
+    return live_server
+
+
+@pytest.fixture
+def browser_context_args(browser_context_args, base_url):
+    """Supply HTTP Basic creds at the context level (the Playwright-correct way). Use the app's
+    ACTUAL loaded creds (gui.GUI_USER/PASSWORD) so this matches whatever the app validates
+    against — robust to whichever conftest set GUI_PASSWORD in the env first."""
+    return {**browser_context_args, "base_url": base_url,
+            "http_credentials": {"username": gui.GUI_USER, "password": gui.GUI_PASSWORD}}

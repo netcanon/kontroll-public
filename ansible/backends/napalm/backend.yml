@@ -1,0 +1,16 @@
+# Backend: napalm — multi-vendor abstraction (get_config/get_facts) for the major
+# platforms. Support is a property of the DEVICE (a NAPALM driver), not detectable
+# from a collection's structure, so it is never auto-classified — select it by
+# declaring napalm_driver on the device class. One code path covers many vendors.
+name: napalm
+label: NAPALM multi-vendor (select by driver)
+order: 4
+classify: {manual: true}          # never auto-matched; chosen explicitly
+# F2 confers: NAPALM targets network gear — the same agent-less floor as netcommon_cli (snmp + blackbox + syslog).
+# Derivation still gates on applies_when, so a method only attaches when the device's facts support it.
+confers: {actuate: true, backup: true, telemetry: [snmp, blackbox], logs: [syslog_push]}
+requires: [napalm_driver]         # e.g. ios | eos | junos | nxos
+# Self-describing credential SHAPE (F1 TIER-A): NAPALM connects with an SSH login. Read by scripts/kontroll/authspec.py.
+auth:
+  - {field: username, kind: identity, label: "username", maps_to: ansible_user, required: true}
+  - {field: password, kind: password, label: "password", maps_to: ansible_password}

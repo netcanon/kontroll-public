@@ -1,0 +1,55 @@
+# Per-instance settings TEMPLATE — copy to instance/instance.yml (or let
+# `kontroll-init --fresh` scaffold it). Declares how THIS instance treats its source
+# of truth, its management IP/domain, where it backs up, and how it exposes frontends.
+# See docs/local-source-of-truth.md. (Listed in config/state-manifest.yml as state.)
+
+# The running instance is authoritative; git is optional. 'local' is the supported mode.
+source_of_truth: local
+
+# This node's management IP + base domain. deploy-stack renders them into docker/.env
+# as ${KONTROLL_MGMT_IP} / ${KONTROLL_DOMAIN}; the compose port binds use the IP so every
+# privileged service listens on the management interface ONLY (never 0.0.0.0 — SECURITY.md C3).
+# `kontroll-init --fresh --mgmt-ip X --domain Y` fills these in; otherwise edit them here.
+mgmt_ip: 192.0.2.10        # REPLACE — your control node's management IP (RFC 5737 placeholder)
+domain: example.com        # REPLACE — your base domain (placeholder ok for IP-only self_signed)
+
+# Optional offsite backup git remotes (each with its own single-repo, scoped credential —
+# SECURITY.md C7). scripts/backup.sh pushes to every remote listed. Empty = no offsite backup.
+backup_remotes: []
+
+# How THIS instance exposes its web frontends. Resolver: scripts/kontroll/frontend.py.
+#   byo_proxy   - services serve HTTP; YOUR reverse proxy (e.g. Nginx Proxy Manager) terminates TLS.
+#   self_signed - services serve HTTPS with a host-provisioned self-signed cert (zero-config DEFAULT).
+#   acme        - (planned) a bundled Caddy ingress does Let's Encrypt. Not yet built.
+# Unset / unknown => self_signed (fail-safe; the API is never silently dropped to plaintext).
+frontend:
+  tls_mode: self_signed
+
+# How THIS instance promotes a staged proposal (the C10 propose→promote second key — F3). Chosen at fresh-init;
+# NEVER silently defaulted — an UNSET value HARD-FAILS deploy-stack (unlike tls_mode, kontroll never guesses your
+# trust posture). The template ships it COMMENTED so a copied-but-unedited overlay has no active value.
+#   separated  - PROD (recommended): a human runs the `promote-proposal` Semaphore task to fast-forward main. The
+#                whole of today's system. Every staged proposal is reviewed before it advances the source of truth.
+#   solo       - HOMELAB: declares intent to auto-promote (a separate kontroll-autopromoter runs the SAME FF-only/
+#                FIX-M9 promote on each staged proposal). NOTE: the auto-promoter SHIPS IN A LATER RELEASE — until
+#                then `solo` behaves like `separated` (proposals stay staged for manual promote). The GUI is propose
+#                -only + AST read-only-pinned in BOTH modes; trust_mode only ever drops the human review keystroke.
+# `kontroll-init --fresh --trust-mode {separated|solo}` writes this; read docs/trust-mode.md before choosing.
+# trust_mode: separated
+
+# Optional per-device-class TRUST decisions — the instance DECISION half of the no-bespoke-config tenet (the
+# vendor FACT lives in modules/<key>/vendor_defaults, e.g. proxmox tls_posture: self_signed). Pin a CA here to
+# HARDEN a class's TLS verification; absent => the class vendor default applies (proxmox self_signed => verify
+# off). `tls_ca_file` is a repo-relative HOST path to YOUR PUBLIC CA cert (a PEM you commit, NOT a secret — it
+# does NOT go in instance/secrets/). deploy-stack ASSEMBLES every pinned CA into one bundle and BOTH consumers
+# verify against it: the Vector pull (source.tls.ca_file) AND the pve-exporter (REQUESTS_CA_BUNDLE) — one fact,
+# no drift, no per-class hub edit. Read by gen-logging + gen-exporters via scripts/kontroll/endpoints.py.
+# `ssh_known_hosts_file` (a sibling) is a repo-relative HOST path to a committed OpenSSH known_hosts (PUBLIC host
+# keys you obtain out-of-band, NOT a secret) for any class that declares the `file_tail_ssh` logging method. With
+# it pinned, Vector's exec ssh uses StrictHostKeyChecking=yes (no TOFU); WITHOUT it the file_tail_ssh stream blanks
+# (fail-closed) — deploy warns. deploy-stack assembles every pinned known_hosts into one file Vector reads RO.
+# device_trust:
+#   proxmox:
+#     tls_ca_file: instance/certs/pve-ca.pem   # commit your PVE CA here -> verify ON for proxmox_api + pve-exporter
+#   some_remote_host_class:
+#     ssh_known_hosts_file: instance/certs/some-host.known_hosts   # PUBLIC host key(s); no-TOFU for file_tail_ssh

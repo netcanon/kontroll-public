@@ -1,0 +1,21 @@
+# Key-role descriptor for ROTATING the control-VM key (the day-to-day decryptor). The FIRST control key is a
+# bootstrap step the running GUI cannot do (it needs that key to run) — that is the CLI `kontroll-init`'s job.
+# This role ROTATES it from a GUI that already holds the current key: MINT a fresh keypair (private shown ONCE,
+# saved by the operator to the control key path), add the PUBLIC half to EVERY domain, re-wrap (sops
+# updatekeys), then later retire the old recipient. Both keys decrypt during the overlap, so nothing is lost.
+# The service writes only the public recipient into /.sops.yaml — never the private key.
+role: control
+label: Control-VM key (rotation)
+description: Rotate the control VM's decryption key. Mint a new one, save it on the box, re-wrap, then retire the old.
+order: 30
+placement: path               # the operator saves the private key to the control key path on the control VM
+private_key_path: ~/.config/sops/age/keys.txt
+recipient_groups:             # the new control key must decrypt EVERY domain
+  - base_recipients
+  - ops_recipients
+scope_label: every secret domain
+high_blast: true              # every secret must be re-wrapped; retire the OLD recipient only after that lands
+warning: >-
+  This is the only time the private key is shown. Save it to ~/.config/sops/age/keys.txt on the control VM
+  (mode 0600). This ROTATES the control key: after promoting + `sops updatekeys`, both old and new decrypt —
+  remove the OLD recipient and re-wrap once more to complete the rotation.

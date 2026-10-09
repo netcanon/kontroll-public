@@ -1,0 +1,55 @@
+# capabilities/telemetry.yml — the SECONDARY-CAPABILITY descriptor for monitoring (instance #1 of the
+# generalized dialog seam). It parameterizes the ONE shared post-onboard dialog / route / promote spine
+# for telemetry with ZERO `if cap=="telemetry"` branching anywhere in the shell. Every field points at an
+# artifact that ALREADY exists (the telemetry registry + generators + the Phase-4 vector); nothing is
+# rewritten. Schema + rationale: docs/observability/secondary-capability-dialog.md §2.1.
+#
+# Adding a capability = a sibling file here + vectors/<cap>.yml + gen-<cap>.py + a suggest_<cap>/declared_<cap>
+# pair in classify.py. NEVER an edit to the dialog shell, /api/capability, promote.py, the generic pins,
+# or configure-semaphore.py. That is the whole point of the seam (the PLAN.md §2.5 "add an X" test).
+name: telemetry   # registry key == filename stem == route segment & ?cap= value
+label: "monitoring (metrics into Prometheus)"   # dialog header + nudge copy
+order: 10   # load/sort order (telemetry 10, backup 20)
+
+# --- detection (read-only suggester; a HINT, never a gate) --------------------------------------------- #
+vector: telemetry   # vectors/telemetry.yml (order 4) — Phase 4; eval_vector reads its cell
+suggester:   # resolved by IMPORT-BY-CONVENTION (§3.3), not a hand-maintained map
+  module: classify   # scripts/kontroll/service/classify.py
+  suggest: suggest_telemetry   # facts -> {cell, candidates, note}  (PURE; host_node trails)
+  declared: declared_metrics_methods   # the DECLARED-side reconciliation (reads the metrics: block)
+  hint:   # = today's classify._TELEMETRY_HINT, carried here AS DATA so adding a capability never edits classify.py
+    httpapi: ["proxy-exporter (api)", "host_node"]
+    cliconf: ["snmp", "blackbox", "host_node"]
+    netconf: ["snmp"]
+
+# --- the declared block this capability owns in modules/<key>/module.yml ------------------------------- #
+block_key: metrics   # the `metrics:` list (sibling of role/backend/inventory_group)
+block_shape: list   # proxmox declares host_node AND pve -> a LIST; the write is ADD-ONLY
+
+# --- the write half: resolved by IMPORT-BY-CONVENTION (the spine calls module.build_plan/apply_plan) ---- #
+service:
+  module: observe   # scripts/kontroll/service/observe.py — build_plan(key, selection) + apply_plan(plan);
+                    # the plan carries token_parts/enact. The spine (capability.py) dispatches with ZERO if-cap.
+
+# --- Stage 1: method picker ---------------------------------------------------------------------------- #
+method_source: registry   # a telemetry/<method>.yml row (vs backup's role_entrypoint)
+method_registry: telemetry   # which registry the picker fills from (catalog.load_telemetry())
+render_method_stage: true   # telemetry is plural -> render the picker (filtered by applies_when)
+
+# --- Stage 3: the per-capability "second concern" ------------------------------------------------------ #
+resource_stage:   # telemetry's = the curated-dashboard picker (the hybrid default tier)
+  testid: cap-telemetry-dashboards
+  source_kind: curated_list   # chips from each method's suggested_dashboards; policy_fields|none also exist
+  fields: []   # only used by source_kind: policy_fields
+
+# --- generation + enactment ---------------------------------------------------------------------------- #
+generator:
+  script: scripts/gen-observability.py
+  lockfile_glob: "prometheus/targets/*/*.generated.yml"   # validate.sh derives the --check honesty step
+enact_kind: prometheus_reload   # selects a CODE-resident enact builder (install-node-exporter / deploy-stack /
+                                # fetch-dashboards / `kill -HUP` prometheus) — the API runs NONE of these; the
+                                # builder only emits the command strings.
+
+# --- trust posture (the dialog renders trust_note; the audit logs the secret-domain NAME only) -------- #
+secret_domain_field: descriptor_field   # the SOPS domain is named by the METHOD descriptor (snmp.yml/pve.yml)
+trust_note: "Prometheus targets are non-secret; the exporter creds stay SOPS-encrypted, audited by NAME only."

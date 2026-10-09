@@ -1,0 +1,41 @@
+# Capture-exception matrix — the SPARSE registry of captures that MISBEHAVE.
+#
+# Sibling in spirit to overrides/ (which annotates capability *classification*); this one
+# annotates capture *behaviour* at backup time. Like overrides/, it lists ONLY the members
+# that are exceptions — never a flag carried by the whole fleet. A capture that behaves
+# normally needs NO entry here; the default is "version it in the capture history like
+# everything else". This is the opposite of a per-vendor switch: it grows one row at a time,
+# only when a real anomaly is OBSERVED.
+#
+# Add a member when you see a capture misbehave — e.g. a device whose export re-serialises
+# on every fetch, so the git capture-history (backup-configs.yml) fills with meaningless
+# noise commits. Add entries by hand here, via `galaxy.py capture-exception add --commit`
+# (the CLI the GUI will call — appends + commits the local canonical, --push for origin),
+# or — ahead — via the GUI itself, for reuse on this instance + any connected remote.
+#
+# Entry schema:
+#   subject:      the device class / module it concerns (human-meaningful key)
+#   match:        a capture-filename glob the backup-history play matches (e.g. "FortiGate_*")
+#   behavior:     the observed anomaly, free text (e.g. non_deterministic | volatile)
+#   disposition:  how backup-configs.yml's history play treats it. Implemented:
+#                   exclude_from_history — keep the latest capture on disk, do NOT version it
+#                                          (so non-diffable output makes no noise commits)
+#   observed:     when + what you saw (keep it honest)
+#   source:       derived (found by us) | user (you added it)
+#
+# SIBLING REGISTRY: config/capture-redactions.yml (C14) — the same sparse, grow-one-row-at-a-time pattern, but it
+# lists per-vendor secret-line SHAPES to MASK when a capture is served over the GUI backup viewer (service/backups.py).
+# A capture EXCLUDED here (no git history) is, in the viewer, *listed but never rendered* — its on-disk blob stays
+# off the wire (so the FortiGate export below is shown as "latest only — excluded", never displayed).
+
+exceptions:
+  - subject: fortigate
+    match: "FortiGate_*"
+    behavior: non_deterministic
+    disposition: exclude_from_history
+    observed: >-
+      2026-06-13 — the FortiOS full-configuration export re-serialises ~570 non-secret
+      lines per fetch (only ~46 changed lines are re-encrypted secret blobs), so an
+      unchanged config still produced a ~600-line diff every backup. Not meaningfully
+      diffable; kept on disk (latest) but excluded from the git history.
+    source: derived

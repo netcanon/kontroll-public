@@ -1,0 +1,23 @@
+---
+# Post-run: remove the per-run ephemeral SSH key dir _render-ssh-keys.yml created. Imported LAST by every fleet
+# play (after the fleet connections are done). The device keys are EPHEMERAL (unlike file_tail_ssh's persistent
+# bind-mounted read key). A hard-aborted run skips this; the dir is then cleared by the next run / a reboot — the
+# residue is a 0600 run-uid-owned key in a per-run dir outside the repo (accepted, SECURITY.md). Idempotent.
+#
+# Access chain used:   control node / Semaphore runner -> rm the local ephemeral key dir
+# May break:           nothing — removes a LOCAL ephemeral dir after the fleet connections completed
+# Fallback required:   no
+# Blast radius:        the runner's own per-run key dir
+- name: Remove the per-run ephemeral SSH key dir
+  hosts: all
+  gather_facts: false
+  connection: local
+  run_once: true
+  tasks:
+    - name: Delete the materialized per-host SSH keys (ephemeral)
+      ansible.builtin.file:
+        path: "{{ kontroll_device_key_dir }}"
+        state: absent
+      # delegate_to: localhost — same reason as _render-ssh-keys.yml: run_once picks the first host, whose
+      # ansible_connection would otherwise route this LOCAL `rm` over its device connection. Pin it to the runner.
+      delegate_to: localhost

@@ -1,0 +1,72 @@
+# capture-redactions.yml — the SPARSE registry of known secret-line SHAPES to MASK before a config capture is
+# served over the GUI backup viewer (SECURITY.md C14). Sibling of capture-exceptions.yml.
+#
+# DEFENSE-IN-DEPTH ONLY — *NOT* the boundary. The boundary is the GUI's fail-closed auth + TLS + mgmt-VLAN bind
+# (C3) + the `:ro` captures mount. A token shape NOT listed here LEAKS into the in-browser view: that is the
+# accepted, documented residual (SECURITY.md C14 — which names the FortiGate `ENC` view-only case concretely). The
+# point of redaction is to keep the COMMON, KNOWN secret shapes off the screen, not to be a containment guarantee.
+# Grow it ONE row at a time as a vendor token shape is OBSERVED (exactly like capture-exceptions.yml).
+#
+# Each pattern is validated against REAL lab captures (the migration repo's per-vendor baselines) — see `observed`.
+# To keep the operator's view trustworthy the mask preserves the line STRUCTURE (`secret 9 ‹redacted›`), so the
+# diff stays legible and the redaction is obvious.
+#
+# Entry schema:
+#   subject: the vendor/class the pattern concerns (human key)
+#   pattern: a Python regex with EXACTLY ONE capturing group — that group is the secret span replaced by `mask`.
+#            (Use non-capturing `(?:…)` for any alternation. The loader SKIPS an entry whose group-count != 1, so a
+#            mis-grouped regex fails loud-in-logs rather than masking the wrong span.)
+#   mask:    the placeholder (default ‹redacted›) — keep the line structure legible so the diff stays useful.
+#   observed: where the shape was seen (a real capture), so a reviewer can re-verify coverage.
+redactions:
+  # Cisco IOS — type-tagged credential hashes: `username … secret 9 $9$…`, `enable secret 5 …`, `password 7 …`.
+  # The `[0-9] ` algorithm-type digit is the discriminator that keeps this off non-secret lines like FortiGate's
+  # `set admin-ssh-password enable` (no digit follows "password"), so it under-fires rather than over-redacts.
+  - subject: cisco_ios_type_tagged_secret
+    pattern: '(?i)(?:secret|password) [0-9] (\S+)'
+    mask: '‹redacted›'
+    observed: "Cisco C9300 running-config: `username admin privilege 15 secret 9 $9$…` (vendor running-config form)"
+  # Cisco IOS — SNMP community string (read/write community is a bearer credential).
+  - subject: cisco_ios_snmp_community
+    pattern: '(?i)snmp-server community (\S+)'
+    mask: '‹redacted›'
+    observed: "Cisco IOS `snmp-server community <string> RO|RW` (vendor running-config form)"
+  # Cisco IOS — routing/interface auth key-string (EIGRP/OSPF/key-chain), also type-tagged.
+  - subject: cisco_ios_key_string
+    pattern: '(?i)key-string [0-9] (\S+)'
+    mask: '‹redacted›'
+    observed: "Cisco IOS key-chain `key-string 7 <hash>` (vendor running-config form)"
+  # FortiGate (FortiOS) — every `set <key> ENC <base64-blob>` is an encrypted secret (password, psksecret,
+  # privatekey, inter-controller-key, …). GENERIC on `ENC` — the design's narrow keyword list missed the real
+  # `set password ENC`/`set inter-controller-key ENC` lines. NB FortiGate captures are history-EXCLUDED
+  # (capture-exceptions.yml), so the viewer lists-but-never-RENDERS them TODAY — this mask is retained as
+  # defense-in-depth for the day a FortiGate (or ENC-bearing) config becomes TRACKED, and is exercised by the
+  # redaction regression. It does NOT mask a currently-served file.
+  - subject: fortigate_enc
+    pattern: 'set \S+ ENC (\S+)'
+    mask: '‹redacted›'
+    observed: "FortiGate export: `set password ENC …`, `set inter-controller-key ENC …` (vendor config form)"
+  # PEM / key-block opener — a best-effort flag for an inline private-key block (e.g. a FortiGate
+  # `set private-key "<the PEM BEGIN…KEY opener>`). LINE-oriented redaction STRUCTURALLY CANNOT mask a multi-line
+  # base64 BODY (its lines carry no keyword), so this masks the opener MARKER only — the limitation is named in
+  # SECURITY.md C14's residual. Vendors that emit multi-line PEM bodies in captures (FortiGate) are history-EXCLUDED
+  # → never rendered, so this is latent defense-in-depth. The pattern matches `…KEY-----` only (a public
+  # `BEGIN CERTIFICATE` is not masked). (The opener marker is described, not spelled out, to keep this file
+  # secret-scanner-clean — the regex below is the authoritative shape.)
+  - subject: pem_key_block_opener
+    pattern: '(-----BEGIN [A-Z0-9 ]*KEY-----)'
+    mask: '‹redacted›'
+    observed: "FortiGate `set private-key \"<PEM BEGIN…KEY opener>` (history-excluded vendor)"
+  # OPNsense (and pfSense-lineage) — XML config: user bcrypt `<password>$2y$…</password>`, IPsec PSKs, RADIUS
+  # secrets, passphrases, private keys. Anchored on the element so it can't swallow a whole block.
+  - subject: opnsense_xml_secret
+    pattern: '(?i)<(?:password|pre-shared-key|presharedkey|radius_secret|passphrase|private-key)>([^<]*)</'
+    mask: '‹redacted›'
+    observed: "OPNsense config.xml: `<password>$2y$11$…</password>` bcrypt user hashes (migration baseline)"
+  # RouterOS (MikroTik) — `.rsc` export key=value secrets: wireless PSKs, RADIUS secrets, login passwords.
+  # `("[^"]*"|\S+)` handles both the quoted (`key="…"`) and bare (`radius-password=…`) forms. `pre-shared-key`
+  # also catches `wpa2-pre-shared-key=` (the `\b` falls on the `-`), so no separate wpa alternative is needed.
+  - subject: routeros_kv_secret
+    pattern: '(?i)\b(?:password|passphrase|pre-shared-key|radius-password|auth-key|secret)=("[^"]*"|\S+)'
+    mask: '‹redacted›'
+    observed: "MikroTik CRS310 `.rsc`: `radius-password=…`, wireless `wpa2-pre-shared-key=…` (migration baseline)"

@@ -1,0 +1,14 @@
+# Grafana dashboard provider — auto-loads every JSON in the dashboards dir.
+# Add a dashboard = drop a .json in dashboards/grafana/dashboards/. No edits here.
+apiVersion: 1
+providers:
+  - name: kontroll
+    orgId: 1
+    folder: "Homelab"
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: true

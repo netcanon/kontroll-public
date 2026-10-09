@@ -1,0 +1,199 @@
+---
+# Ensure the LOCAL CANONICAL git — the instance's source of truth (Phase A of
+# docs/local-source-of-truth.md). A bare repo on the control node that Semaphore
+# reads instead of GitHub, so the running instance needs no remote git. The working
+# tree gains a `local` remote pointing at it; onboard/GUI push here (offline, free)
+# so changes are visible to Semaphore with zero GitHub dependency.
+#
+# Access chain used:   localhost (the control node itself)
+# May break:           nothing on the lab — control-node git only
+# Fallback required:   no
+# Blast radius:        this VM only
+# Idempotence:         re-runnable; init is `creates:`-guarded, remote add tolerated,
+#                      the mirror push is a fast-forward (no-op if already current).
+
+- name: Ensure the local canonical bare repo
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  vars:
+    # Operator-owned (the working tree pushes here) and runner-readable (Semaphore
+    # clones it via the mount). NOT under /var/lib/kontroll — that dir is 0700/uid-1001
+    # (Semaphore-private, for the secret captures), so the operator can't traverse it.
+    bare: /srv/kontroll.git
+    worktree: "{{ playbook_dir }}/../.."
+    # MF-1 (compose-native installer — docs/reviews/2026-06-29-compose-native-install/99-synthesis.md): inside the
+    # ephemeral installer container this play runs as root (user:0:0), so ansible_user_id is 'root' and a fact-derived
+    # chown would make the canonical root-owned — breaking the (non-root) operator's `git push local` (the F-CANON
+    # bug). The launcher passes the INVOKING host operator's identity in KONTROLL_OPERATOR_{USER,UID}; on a host-direct
+    # run those env vars are absent ⇒ fall back to the gathered facts (the SAME value), so off-container is unchanged.
+    operator: "{{ lookup('env', 'KONTROLL_OPERATOR_USER') or ansible_user_id }}"
+    # Chowns use the NUMERIC uid, not the name: in-container the host operator is absent from /etc/passwd, so a
+    # name owner can't resolve — a numeric uid is user-DB-independent and works on host + container alike.
+    operator_uid: "{{ lookup('env', 'KONTROLL_OPERATOR_UID') or ansible_user_uid }}"
+    # True only inside the installer container (the launcher sets KONTROLL_IN_CONTAINER=1). The NAMED gid-1001 group +
+    # the operator's membership are HOST gestures (MF-6) — writing a container-local group that dies with the ephemeral
+    # container is pointless; the canonical bytes still get gid 1001 via the numeric `group: "1001"` chown below.
+    in_container: "{{ (lookup('env', 'KONTROLL_IN_CONTAINER') | default('', true)) | length > 0 }}"
+
+  tasks:
+    # F-CANON (#119): the canonical is group-1001 (the runtime uid:gid the privileged API/runner writes as), but a
+    # FRESH control node has no NAMED group at gid 1001 AND the operator is not a member of it — so the operator's
+    # Mirror push below (run as the operator, no become) hits "Permission denied" the moment any canonical object
+    # is group-1001-owned but not operator-owned. Create the group + add the operator here, BEFORE the canonical is
+    # touched. (Old `.10` never hit this — it ran no onboard-gui that staged gid-1001 objects.) Both tasks are
+    # idempotent. The owner-side half lands on the recursive grant below.
+    # MF-6: these two are HOST gestures — skipped in-container (a container-local group/membership dies with the
+    # ephemeral installer and the operator name isn't even in the container's /etc/passwd). On the host they run as
+    # before; in-container the operator does `groupadd -g 1001 kontroll && usermod -aG kontroll $USER` once by hand.
+    - name: Ensure the gid-1001 group exists (the canonical's group = the runtime uid:gid)
+      become: true
+      ansible.builtin.group:
+        name: kontroll
+        gid: "1001"
+        state: present
+      when: not in_container
+
+    - name: Add the operator to the gid-1001 group (so its `git push local` can write the canonical)
+      become: true
+      ansible.builtin.user:
+        name: "{{ operator }}"
+        groups: kontroll
+        append: true            # supplementary only — never touches the operator's primary group
+      when: not in_container
+      # A newly-added supplementary group is NOT effective in the operator's CURRENT login session, so on the very
+      # first run the Mirror push can't rely on group membership yet. The recursive grant below makes the canonical
+      # OPERATOR-OWNED, so that push succeeds via OWNER perms regardless; this membership is the runtime/future
+      # half (effective on the operator's next login).
+
+    - name: Create the bare-repo dir (operator-owned; group-writable for the privileged API — C10)
+      become: true
+      ansible.builtin.file:
+        path: "{{ bare }}"
+        state: directory
+        owner: "{{ operator_uid }}"       # the operator's working tree pushes here (numeric — MF-1, user-DB-free)
+        group: "1001"                     # the runtime uid (the privileged API/runner) — the C10 write grant
+        mode: "2775"                      # setgid: pushed objects inherit gid 1001 so BOTH writers keep access;
+                                          # others still clone (content is SOPS-encrypted). Group-write is the
+                                          # C10 grant; receive.deny* below bounds it (no history rewrite).
+
+    # The git module covers clone/checkout, not init-bare / remote-add / push — these
+    # are raw git by necessity, hence the command-instead-of-module suppressions.
+    - name: Initialize the bare repo if absent  # noqa: command-instead-of-module
+      ansible.builtin.command:
+        cmd: "git init --bare {{ bare }}"
+        creates: "{{ bare }}/HEAD"
+
+    - name: Point the bare repo's HEAD at main (so a fresh clone checks out main)
+      ansible.builtin.copy:
+        dest: "{{ bare }}/HEAD"
+        content: "ref: refs/heads/main\n"
+        mode: "0664"            # group-writable, consistent with the C10 gid-1001 grant below — a 0644 here
+                                #  would oscillate with the recursive `chmod g+w` (each run re-fighting HEAD)
+
+    - name: Harden the bare repo — deny non-FF/deletes; group-share new objects  # noqa: command-instead-of-module
+      # receive.deny*: no force-push / history rewrite on the canonical, from ANY writer (the staging API —
+      # which can only push a proposed/<run_id> ref anyway — the runner, or an accidental operator `-f`).
+      # Defence-in-depth with the propose-then-promote posture; protects the operator's own pushes too.
+      # core.sharedRepository=group: git itself makes NEW refs/objects group-writable + setgid, so a gid-1001
+      # actor (the privileged API pushing a proposal; the Semaphore `promote-proposal` task fast-forwarding main
+      # + deleting the proposal) can write them WITHOUT host root — the runtime complement to the recursive grant
+      # below, which only fixes EXISTING objects. Idempotent (set-or-replace).
+      # SECURITY.md C10 / docs/privileged-mutation-enablement.md.
+      ansible.builtin.command:
+        cmd: "git -C {{ bare }} config {{ item.key }} {{ item.value }}"
+      loop:
+        - {key: receive.denyNonFastForwards, value: "true"}
+        - {key: receive.denyDeletes, value: "true"}
+        - {key: core.sharedRepository, value: "group"}
+      changed_when: false
+
+    - name: Install the C10 update-hook — the network service (uid 1001) may not receive-pack main (defence-in-depth)
+      become: true
+      # Belt-and-braces with gitio.commit_and_push's `and not staging` guard (the code boundary): even a compromised
+      # uid-1001 container that shells a raw `git push local HEAD:main` is refused HERE, by the canonical itself.
+      # Scoped to uid 1001 so the legit Mirror push below (uid 0 in the installer container, or the operator uid on a
+      # host-direct run — NEVER 1001) and a human promote (promote_ref = update-ref, NOT receive-pack — C2) are
+      # untouched. The hook body is the committed files/canonical-update-hook.sh (one source of truth the tests read
+      # too — no twin drift). Idempotent (fixed file). Inert unless something pushes main AS uid 1001, which a
+      # read-only deploy never does. Runs in BOTH container + host modes (a canonical-config gesture, not a host
+      # gesture — no KONTROLL_IN_CONTAINER skip). Closes the dogfood VM-144 breach's push half.
+      # SECURITY.md C10 / docs/privileged-mutation-enablement.md.
+      ansible.builtin.copy:
+        src: files/canonical-update-hook.sh
+        dest: "{{ bare }}/hooks/update"
+        mode: "0755"
+
+    # The top-dir grant (above) + setgid cover a FRESH canonical (objects inherit gid 1001); an EXISTING
+    # canonical created before the grant has objects still on the operator's primary group / not group-writable /
+    # owned by a different actor (e.g. uid-1001 staged a proposal), so the operator's push can't write near them.
+    # Recursively fix the existing objects — the one-time manual `chown -R <operator>:1001 + chmod -R g+w +
+    # find -type d setgid` step (F-CANON, #119), now an idempotent task. owner=<operator> is the F-CANON half:
+    # operator-owned objects let the operator's Mirror push succeed via OWNER perms even before the group
+    # membership added above takes effect (next login). SECURITY.md C10 / docs/install-from-scratch.md §3.
+    - name: Recursively own (operator) + group (gid 1001) the existing canonical objects (C10 write-grant; F-CANON)
+      become: true
+      ansible.builtin.file:
+        path: "{{ bare }}"
+        state: directory
+        owner: "{{ operator_uid }}"       # numeric — MF-1 (works in-container where the operator name is absent)
+        group: "1001"
+        recurse: true
+
+    - name: Detect canonical objects missing group-write or dir-setgid  # noqa: command-instead-of-module
+      become: true
+      # find's own ( ) ! operators (no shell) — `command` passes them as argv, so there's no pipe to SIGPIPE
+      # (a `| head` under pipefail would fail the task). -print -quit stops at the FIRST offender (fast);
+      # non-empty stdout ⇒ at least one object still needs the grant. The find module can't express this perm
+      # predicate, hence raw find.
+      ansible.builtin.command:
+        cmd: "find {{ bare }} ( ! -perm -020 -o -type d ! -perm -2000 ) -print -quit"
+      register: _grant_needed
+      changed_when: false
+
+    - name: Grant group-write (all) + setgid (dirs) on existing canonical objects  # noqa: command-instead-of-module
+      become: true
+      ansible.builtin.shell: "chmod -R g+w {{ bare }} && find {{ bare }} -type d -exec chmod g+s {} +"
+      args:
+        executable: /bin/bash
+      when: _grant_needed.stdout | length > 0
+      changed_when: true
+
+    - name: Ensure the working tree has a 'local' remote  # noqa: command-instead-of-module
+      ansible.builtin.command:
+        cmd: "git remote add local {{ bare }}"
+        chdir: "{{ worktree }}"
+      register: _remote
+      changed_when: _remote.rc == 0
+      failed_when: _remote.rc != 0 and 'already exists' not in _remote.stderr
+
+    - name: Commit uncommitted instance state into the canonical  # noqa: command-instead-of-module
+      # kontroll-init --fresh scaffolds instance/ AFTER install.sh's initial commit, so on a fresh node the
+      # overlay (inventory, fleet, .sops.yaml, ENCRYPTED secrets) is untracked — the mirror below pushes HEAD,
+      # which would omit it, leaving Semaphore's canonical clone without any instance config. Commit it here (the
+      # operator needs no git knowledge — local-source-of-truth goal); everything committed is ciphertext or
+      # public. Idempotent: a no-op when the tree is already clean.
+      ansible.builtin.shell: |
+        cd {{ worktree }}
+        if [ -n "$(git status --porcelain)" ]; then
+          git add -A
+          git -c user.name=kontroll -c user.email=kontroll@localhost \
+              commit -q -m "kontroll: instance state {{ ansible_date_time.iso8601 }}"
+          echo committed
+        fi
+      args:
+        executable: /bin/bash
+      register: _state_commit
+      changed_when: "'committed' in _state_commit.stdout"
+
+    - name: Mirror the working tree's commit into the canonical  # noqa: command-instead-of-module
+      ansible.builtin.command:
+        cmd: "git push local HEAD:refs/heads/main"
+        chdir: "{{ worktree }}"
+      register: _mirror
+      changed_when: "'->' in _mirror.stderr or 'new branch' in _mirror.stderr"
+      failed_when: _mirror.rc != 0 and 'up-to-date' not in _mirror.stdout + _mirror.stderr
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: "local canonical ready at {{ bare }} (Semaphore reads file:///srv/kontroll.git)."

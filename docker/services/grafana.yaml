@@ -1,0 +1,35 @@
+# Grafana — metrics UI. Datasources + dashboards are PROVISIONED from
+# ../dashboards/grafana (config-as-code). Adding a dashboard = drop a JSON in
+# dashboards/grafana/dashboards/, auto-loaded. No click-ops.
+
+services:
+  grafana:
+    image: grafana/grafana:13.0.2
+    container_name: grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    ports:
+      # mgmt interface only — never 0.0.0.0 (C3 parity with api.yaml); published externally via NPM
+      - "${KONTROLL_MGMT_IP:?set in .env}:3002:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set in .env}
+      GF_SERVER_ROOT_URL: "https://grafana.${KONTROLL_DOMAIN:-localhost}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      # ../../ : compose resolves an included file's relative paths from THIS file's dir
+      # (docker/services/), so two levels up reaches the repo-root dashboards/ tree
+      # (matches homepage.yaml). One level (../) wrongly targets docker/dashboards/.
+      - ../../dashboards/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../../dashboards/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    networks:
+      - kontroll
+
+volumes:
+  grafana-data:
+
+networks:
+  kontroll:
+    external: true
+    name: kontroll

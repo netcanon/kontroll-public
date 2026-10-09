@@ -1,0 +1,16 @@
+# PINNED offline probe facts fortigate was classified + capability-derived from (F2, north-star Rung 4). Re-deriving
+# the metrics:/logs: floor from these (scripts/gen-class-capabilities.py --check) is hermetic — no re-probe (which
+# needs the collection installed + is non-deterministic). The classify-SIGNAL surface only: the connection plugins +
+# the module-name-pattern signals the classifier/applies_when read (a `_config`-suffix module for the vendor_config
+# rule; a `proxmox_kvm` module for the pve applies_when). fortinet.fortios ships an `httpapi` connection plugin and
+# NO cliconf/netconf → predicate.classify → the `api` backend, which confers telemetry [blackbox] only (an httpapi
+# device is ICMP-probable but its plugin shape does NOT prove SNMP) → the derived floor is blackbox; the curated
+# `snmp` entry stays a BARE (non-derived) override. Probed from fortinet.fortios 2.5.1 (satisfies the module's
+# >=2.3.0). `probed_at` is provenance, NOT read by the derivation (determinism). A vendor/method churn shows as a
+# diff HERE + in module.yml (a reviewable diff, never silent rot).
+collection: fortinet.fortios
+version: ">=2.3.0"
+plugins: {httpapi: [fortios]}
+modules: [fortios_system_ssh_config]
+module_options: {}
+probed_at: "2026-07-01"

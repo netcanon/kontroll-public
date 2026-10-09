@@ -1,0 +1,15 @@
+# config.d/transforms/internal_gui_audit.yaml  → transform id "internal_gui_audit_shape".
+# TSV: ts \t ip \t action \t detail  (gui/app.py _audit). Parse fallibly; one bad line never drops the event.
+# The IP is operational metadata kept in the BODY (cardinality) — never a label.
+type: remap
+inputs: [internal_gui_audit]
+source: |
+  .source = "internal"
+  .service = "gui-audit"
+  .host = get_env_var("HOSTNAME") ?? "control-vm"
+  .level = "audit"
+  fields = split(string(.message) ?? "", "\t")
+  if length(fields) >= 4 {
+    .action = fields[2]
+    .audit_ip = fields[1]
+  }

@@ -1,0 +1,11 @@
+---
+# Liveness check for the FortiGate class — delegates to the generic `api` backend
+# (REST GET of the fortios recipe's check endpoint, /api/v2/monitor/system/status).
+# Token resolved from the network secrets domain (group_vars/edge_firewall.yml).
+# noqa: var-naming[no-role-prefix] — backend_* are shared cross-backend contract params.
+- name: Liveness via the api backend (fortios recipe)  # noqa: var-naming[no-role-prefix]
+  ansible.builtin.include_role:
+    name: backend_api
+    tasks_from: check
+  vars:
+    backend_api_recipe: fortios

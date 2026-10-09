@@ -1,0 +1,14 @@
+---
+# Alpine path: apk + OpenRC. The `-openrc` package ships the /etc/init.d/node-exporter service (the Alpine
+# docker hosts).
+- name: Install node_exporter + its OpenRC service (apk)
+  community.general.apk:
+    name: "{{ node_exporter_packages_alpine }}"
+    state: present
+    update_cache: true
+
+- name: Ensure node_exporter is enabled + running (OpenRC)
+  ansible.builtin.service:
+    name: "{{ node_exporter_service_openrc }}"
+    enabled: true
+    state: started

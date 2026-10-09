@@ -1,0 +1,26 @@
+# Prometheus scrape config. Targets are NOT listed here — they live as data in
+# targets/*.yml via file-based service discovery. Add a target = drop a file in
+# targets/, no edit to this file (modularity doctrine §2.5).
+
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+# Proxy-exporter scrape JOBS are GENERATED into jobs.d/ from the telemetry registry (gen-prometheus-jobs.py):
+# adding a proxy exporter (pve, snmp, blackbox) is a telemetry/<name>.yml drop-in, not an edit here. The glob
+# is relative to THIS file's dir, so it resolves at host lint time (prometheus/jobs.d/) AND in the container
+# (/etc/prometheus/jobs.d/); the committed jobs.d/*.generated.yml make the glob non-empty.
+scrape_config_files:
+  - jobs.d/*.generated.yml
+
+scrape_configs:
+  - job_name: node            # host metrics (node_exporter on each host)
+    file_sd_configs:
+      - files: ["/etc/prometheus/targets/node/*.yml"]
+
+  # job_name: proxmox is GENERATED into jobs.d/proxmox.generated.yml (gen-prometheus-jobs.py ← telemetry/pve.yml)
+  # job_name: network is GENERATED into jobs.d/network.generated.yml (gen-prometheus-jobs.py ← telemetry/snmp.yml)
+
+  - job_name: prometheus      # self
+    static_configs:
+      - targets: ["localhost:9090"]

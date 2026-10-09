@@ -1,0 +1,19 @@
+---
+# Config backup for the OpenWrt class — delegates to the generic raw_ssh backend
+# (`uci export` over raw SSH). No bespoke logic here: the backend captures whatever
+# read-only command the class supplies.
+#
+# Access chain used:   control VM (mgmt VLAN) -> OpenWrt AP <ap-ip> (raw SSH)
+# May break:           none (read-only `uci export`)
+# Fallback required:   no
+# Blast radius:        none — pure read
+# Idempotence:         capture file overwritten each run; no device state changes
+# no_log:              handled in the backend (uci export carries wireless PSKs)
+# noqa: var-naming[no-role-prefix] — backend_* are shared cross-backend contract vars.
+- name: Capture uci export via the raw_ssh backend  # noqa: var-naming[no-role-prefix]
+  ansible.builtin.include_role:
+    name: backend_raw_ssh
+    tasks_from: backup
+  vars:
+    backend_backup_label: OpenWrt
+    backend_backup_command: uci export

@@ -1,0 +1,57 @@
+---
+# Backup entrypoint for the Proxmox VE device class (hypervisor nodes).
+# Captures the text configs needed to understand/rebuild a node: per-guest
+# definitions (.conf), node network, and storage — all read-only over SSH.
+# Follows the backup contract — see roles/cisco_ios/tasks/backup.yml.
+#
+# Scope note: this is a CONFIG capture (how the node + guests are defined), not a
+# data/VM-image backup — bulk guest backups are vzdump/PBS's job, deliberately
+# out of scope for this read-only seam.
+#
+# Access chain used:   control VM (mgmt VLAN) -> PVE node mgmt (SSH, root key)
+# May break:           none (read-only `cat`/`pvesh get`)
+# Fallback required:   no
+# Blast radius:        none — pure read
+# Idempotence:         capture file overwritten each run; no node state changes
+#
+# no_log: storage.cfg can hold backend credentials and guest .conf can hold
+# cloud-init passwords, so the capture output and file are no_log.
+
+- name: Record skip when this class is not backup-capable
+  ansible.builtin.set_fact:
+    kontroll_backup_result: "skipped — class not backup-capable"
+  when: not (backup_capable | default(true) | bool)
+
+- name: Capture Proxmox node + guest config
+  when:
+    - backup_capable | default(true) | bool
+    - not (molecule_test | default(false) | bool)
+  block:
+    - name: Resolve capture filename
+      ansible.builtin.set_fact:
+        _backup_file: "Proxmox_{{ inventory_hostname }}_node-and-guests.txt"
+
+    - name: Gather node + guest config (read-only)
+      ansible.builtin.shell: |
+        echo "### pveversion";            pveversion 2>/dev/null
+        echo "### /etc/network/interfaces"; cat /etc/network/interfaces 2>/dev/null
+        echo "### /etc/pve/storage.cfg";   cat /etc/pve/storage.cfg 2>/dev/null
+        echo "### qemu guests (/etc/pve/qemu-server/*.conf)"
+        for f in /etc/pve/qemu-server/*.conf; do [ -e "$f" ] || continue; echo "--- $f"; cat "$f"; done
+        echo "### lxc guests (/etc/pve/lxc/*.conf)"
+        for f in /etc/pve/lxc/*.conf; do [ -e "$f" ] || continue; echo "--- $f"; cat "$f"; done
+      register: pve_cfg
+      changed_when: false
+      no_log: true                       # storage creds / cloud-init passwords
+
+    - name: Write capture
+      ansible.builtin.copy:
+        content: "{{ pve_cfg.stdout }}\n"
+        dest: "{{ config_backup_dir }}/{{ _backup_file }}"
+        mode: "0640"
+      delegate_to: localhost
+      no_log: true                       # content is the secret-bearing config
+
+    - name: Record successful capture
+      ansible.builtin.set_fact:
+        kontroll_backup_result: "captured -> {{ _backup_file }}"

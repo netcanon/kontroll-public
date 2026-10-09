@@ -1,0 +1,20 @@
+# snmp_exporter config — RENDERED at deploy by ansible/playbooks/deploy-stack.yml from this template + the
+# SNMPv3 creds (instance/secrets/snmp_observability.sops.yml) into prometheus/exporters/snmp/snmp.yml
+# (gitignored, 0600). This template is COMMITTED and holds NO secret — the rendered file is not committed.
+# The composed snmp.yml is CREDS-BEARING (the auths: block below) — its render task is no_log + 0600 forever.
+#
+# The `modules:` block is GENERATED from public IETF MIBs (prometheus/exporters/snmp/generator.yml + mibs/, via
+# scripts/gen-snmp.py — the no-bespoke-config tenet) and included below as modules.generated.yml (modules: only,
+# no secret). To change the scraped OIDs, edit generator.yml and regenerate (CI/VM, CGO); do NOT hand-edit the
+# modules. SNMPv3 authPriv (SHA-1 / AES-128; `SHA` = SHA-1 in snmp_exporter). The `network` job's per-target
+# __param_module + __param_auth labels select the module + auth.
+auths:
+  v3_kontroll:
+    version: 3
+    username: {{ _snmp.snmp_v3_username }}
+    security_level: authPriv
+    password: {{ _snmp.snmp_v3_auth_password }}
+    auth_protocol: SHA
+    priv_protocol: AES
+    priv_password: {{ _snmp.snmp_v3_priv_password }}
+{% include 'modules.generated.yml' %}

@@ -1,0 +1,71 @@
+# Logging method: Vector PULLS a REMOTE host's journald over SSH. Vector's `exec` source runs `ssh <opts>
+# root@<host>`; the host's authorized_keys (dropped by roles/logging_file_tail_ssh) FORCES `journalctl -f -o
+# json`, so the key can run ONLY that read command — no shell, no arbitrary file read. Vector decodes the NDJSON
+# and ships to Loki. PULL direction (Vector reaches OUT — no inbound socket, no uploader unit on the host). This
+# is the PULL twin of journald_remote (which PUSHES via systemd-journal-upload -> a mgmt :19532 receiver): use
+# file_tail_ssh when you can authorize a read key but won't run an uploader unit / open an inbound receiver.
+# UNIVERSAL (any Linux host has a journal), operator-DECLARED only. Schema: logging/README.md.
+#
+# WHY journald-over-SSH and NOT an arbitrary `tail -F <file>`: the operator chose the journald model (one shaped
+# pipeline, the SAME ._HOSTNAME/._SYSTEMD_UNIT/PRIORITY derivation journald_remote uses) over a free file tail;
+# the forced command locks the key to journalctl, the tightest possible read grant. A non-journald file tail
+# (nginx/app logs) would be a SEPARATE method with a path-bundle-locked forced command — deliberately not built.
+#
+# WHY `exec` + `decoding: json` (not the Vector `journald` source): a `journald` source reads a LOCAL journal
+# dir; this reads a REMOTE host's journal over SSH, where the only stream is journalctl's stdout. `journalctl -o
+# json -f` emits clean NDJSON (all boots, version-robust) that Vector's exec source decodes with full field
+# fidelity — the SAME read journald_remote uses, just sourced over SSH instead of from a landed file (S10).
+name: file_tail_ssh
+label: File tail SSH (Vector exec — ssh + forced journalctl -f, remote journald PULL)
+order: 4
+kind: exec
+direction: pull                    # Vector reaches OUT over SSH; nothing is pushed to us (no inbound socket)
+source:
+  # `ssh <opts> root@<host>` with NO remote command — the host's authorized_keys forces `journalctl -f -o json`
+  # (roles/logging_file_tail_ssh logging_tail_command), so the client cannot choose the command (the forced-
+  # command seam). BatchMode: never prompt (fail fast, no password fallback). StrictHostKeyChecking=yes + a
+  # READ-ONLY, OPERATOR-PINNED UserKnownHostsFile (/etc/vector-keys/file_tail_known_hosts, assembled by
+  # deploy-stack from device_trust.<key>.ssh_known_hosts_file — sibling of the device-CA bundle): NO TOFU, NO
+  # write. An unpinned/changed host key makes ssh REFUSE the connection (the stream blanks — fail-closed — never
+  # a silent MITM-accept; SECURITY.md C12). The operator pins the key out-of-band, exactly like a device CA;
+  # keyscan-at-provision only relocates the TOFU, so it is offered only as an operator-reviewed helper. NB the
+  # fail-closed behaviour change: a file_tail_ssh class produces NO logs until the operator pins the host key
+  # (deploy warns when the assembled known_hosts is empty). ${DEVICE_ADDR} = the declaring host's inventory
+  # address, substituted per host by gen-logging (the per-host PULL target).
+  command: ["ssh", "-i", "/etc/vector-keys/file_tail_ssh",
+            "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=yes",
+            "-o", "UserKnownHostsFile=/etc/vector-keys/file_tail_known_hosts",
+            "-o", "ConnectTimeout=10",
+            "-o", "ServerAliveInterval=30",
+            "root@${DEVICE_ADDR}"]
+  mode: streaming
+  decoding:
+    codec: json
+labels: [host, service, level]
+# Data-driven shaping (S9) — the SAME journald derivation journald_remote uses: the remote host's ._HOSTNAME ->
+# .host (the source serves ONE host but the record carries the canonical name), ._SYSTEMD_UNIT -> .service, and
+# the numeric PRIORITY (0-7) -> an RFC-keyword .level via to_syslog_level (mirrors the live internal journald
+# transform, config.d/transforms/internal_journald_shape.yaml).
+transform_vrl:
+  - '.host = string(._HOSTNAME) ?? .host'
+  - '.service = string(._SYSTEMD_UNIT) ?? .service'
+  - 'if exists(.PRIORITY) { .level = to_syslog_level(to_int(.PRIORITY) ?? 6) ?? .level }'
+# NO applies_when -> UNIVERSAL (any host has a journal); never AUTO-suggested, only offerable/declared.
+params:
+  retention:
+    allowed: ["7d", "30d", "90d"]
+    required: false
+wiring_role: logging_file_tail_ssh     # roles/logging_file_tail_ssh -- authorizes the read PUBLIC key on the
+                                       # remote host, FORCED to `journalctl -f -o json` (no shell). The matching
+                                       # PRIVATE key is the logging_file_tail SOPS domain, rendered to a file and
+                                       # bind-mounted RO into Vector by deploy-stack (the 3rd injection shape).
+secret_domain: logging_file_tail       # the read keypair Vector authenticates with. UNLIKE journald/syslog (no
+                                       # secret) and UNLIKE proxmox_api (an env TOKEN), this is a KEY FILE: the
+                                       # private key is decrypted + mounted RO into Vector, never an env var, so
+                                       # there is no secret_env_map. Audited by NAME only (C12).
+access_chain:
+  chain: "control VM -> Vector exec ssh (read-only forced-command key) -> remote journalctl -f -> Loki"
+  may_break: nothing -- a read-only forced-command pull; a creds/reach failure blanks a stream, not the lab
+  fallback: "no"
+  blast_radius: control node + this host (a read-only forced-command key on the host; reversible -- remove the line)

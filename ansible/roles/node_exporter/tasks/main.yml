@@ -1,0 +1,32 @@
+---
+# Install + run the Prometheus node_exporter (host CPU/mem/disk/net metrics agent), dispatching by OS
+# family — the fleet is MIXED (Debian: Proxmox / OpenMediaVault hosts via apt+systemd; Alpine: e.g. a
+# reverse-proxy pair via apk+OpenRC). The
+# package is `prometheus-node-exporter` on both; only the manager + init differ. Invoked by
+# playbooks/install-node-exporter.yml (backfill) and — soon — the onboard --observability opt-in, for
+# classes whose module declares `metrics: via: host`. The scrape TARGET is generated separately
+# (scripts/gen-observability.py); this role just lands the agent so that target goes DOWN -> UP.
+#
+# Access chain used:   control VM (mgmt VLAN) -> target host (SSH, root key ~/.ssh/ansible_ed25519)
+# May break:           none — installs a read-only metrics agent; no firewall/network change beyond a :9100 listener
+# Fallback required:   no
+# Blast radius:        this host (adds a node_exporter service + :9100 listener; reversible: apt/apk del)
+# Idempotence:         package present + service enabled/started — a second run reports 0 changed
+#
+# Security: node_exporter exposes host internals (CPU/mem/disk/process) on :9100 — sensitive, not secret.
+# Keep it mgmt/server-VLAN-only; never publish :9100 to WAN (SECURITY.md C3).
+
+- name: Install + run node_exporter for this host's OS family
+  ansible.builtin.include_tasks: "{{ ansible_os_family }}.yml"
+  when:
+    - not (molecule_test | default(false) | bool)
+    - ansible_os_family in ['Debian', 'Alpine']
+
+- name: Fail loudly on an unsupported OS family (never a silent skip)
+  ansible.builtin.fail:
+    msg: >-
+      node_exporter supports Debian + Alpine; {{ inventory_hostname }} is {{ ansible_os_family }} —
+      add roles/node_exporter/tasks/{{ ansible_os_family }}.yml.
+  when:
+    - not (molecule_test | default(false) | bool)
+    - ansible_os_family not in ['Debian', 'Alpine']

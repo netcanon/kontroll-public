@@ -1,0 +1,54 @@
+# settings/instance.yml — the EDITABLE platform knobs of instance/instance.yml (Phase 5, #140). The DATA half of
+# design 23's Settings EDIT: which instance.yml knobs the :8443 Settings page may STAGE a change to, each one's
+# validator type, its reconfigure severity/blast-radius, the writer that surgically edits it, and the
+# consequence-naming confirm text. severity drives the shared reconfigure gate: modify (overwrite-confirm) <
+# redeploy (ack — live only after deploy-stack) < identity (type-to-confirm — re-IP severs this session). Every
+# write rides C10 staging (proposed/<run_id>; the GUI never promotes). NOT instance config — a repo-level
+# descriptor (a sibling of capabilities/); it carries NO values. `writer`: scalar (top-level) | nested (under
+# `parent`) | list (a top-level list). api_privileged + docker/.env are NOT here — categorically FORBID (C10/C11).
+area: instance
+file: "config/instance.yml"
+knobs:
+  - key: backup_remotes
+    type: text
+    pattern: "([a-z0-9][a-z0-9_.-]*(,[a-z0-9][a-z0-9_.-]*)*)?"   # comma-separated remote names, or empty to clear
+    writer: list
+    reconfigurable: true
+    severity: modify
+    blast_radius: none
+    help: "Offsite backup git remotes (comma-separated names). scripts/backup.sh pushes to each; empty = none."
+    confirm_text: ""
+  - key: mgmt_ip
+    type: ipv4
+    writer: scalar
+    reconfigurable: true
+    severity: identity
+    blast_radius: re-IP
+    help: "This control node's management IP — EVERY privileged service binds it (mgmt-only, C3)."
+    confirm_text: >-
+      Changing the management IP RE-IPs the control plane: the :8443 GUI, Semaphore, and Homepage move to the new
+      IP after the next deploy-stack. YOUR CURRENT SESSION WILL DISCONNECT — reconnect at https://<new-ip>:8443.
+      This only STAGES the change; an admin promotes it and re-runs deploy-stack to take effect.
+  - key: domain
+    type: hostname
+    writer: scalar
+    reconfigurable: true
+    severity: redeploy
+    blast_radius: re-render-urls
+    help: "The base domain — renders into service URLs, cert SANs, and Homepage tiles."
+    confirm_text: >-
+      Changing the domain re-renders all service URLs, cert SANs, and Homepage tiles on the next deploy-stack.
+      Stage-only; it takes effect after an admin promotes and re-runs deploy-stack.
+  - key: tls_mode
+    type: enum
+    allowed: [byo_proxy, self_signed]
+    writer: nested
+    parent: frontend
+    reconfigurable: true
+    severity: redeploy
+    blast_radius: tls-flip
+    help: "How frontends expose TLS — byo_proxy (plain HTTP behind YOUR reverse proxy) or self_signed (host cert)."
+    confirm_text: >-
+      byo_proxy: services serve PLAIN HTTP — only safe if your reverse proxy terminates TLS in front of them.
+      self_signed: deploy-stack provisions a host self-signed cert. Stage-only; takes effect after promote +
+      deploy-stack. (acme is not yet built; not selectable here.)

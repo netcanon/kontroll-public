@@ -1,0 +1,58 @@
+name: zizmor — GHA workflow security scan
+
+# zizmor audits .github/workflows/*.yml for GitHub-Actions-specific supply-chain
+# anti-patterns the rest of the pipeline doesn't model (template injection via
+# `${{ github.event.* }}` in `run:`, excessive `permissions:`, untrusted-checkout,
+# secrets leaking to forks via `pull_request_target`, unpinned third-party actions).
+# The action-pinning policy lives in .github/zizmor.yml.
+#
+# kontroll is a PRIVATE repo WITHOUT GitHub Advanced Security / code scanning (confirmed
+# 2026-06-15: the code-scanning API 403s), so findings go to the JOB LOG, not the Security
+# tab — netcanon uploads SARIF only because it has GHAS. This job is ADVISORY
+# (continue-on-error): a finding is visible in the log but never blocks the rest of CI.
+# Adopt the SARIF-upload form (a `security-events: write` + codeql-action/upload-sarif step)
+# if GHAS is ever enabled on this repo.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - '.github/dependabot.yml'
+      - '.github/zizmor.yml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - '.github/dependabot.yml'
+      - '.github/zizmor.yml'
+  schedule:
+    - cron: '17 4 * * 1'        # weekly (Mon early-UTC) — catches drift from new zizmor rule releases
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  zizmor:
+    name: zizmor scan
+    runs-on: ${{ fromJSON(vars.KONTROLL_RUNS_ON || '"ubuntu-latest"') }}   # see ci.yml "RUNNERS"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install zizmor
+        run: pip install --quiet "zizmor>=1,<2"
+
+      - name: Run zizmor (advisory — findings print to the log; policy in .github/zizmor.yml)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}   # zizmor's online audits resolve action refs via the API (read-only)
+        run: zizmor .github/

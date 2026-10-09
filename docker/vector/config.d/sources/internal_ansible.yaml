@@ -1,0 +1,13 @@
+# config.d/sources/internal_ansible.yaml  → source id "internal_ansible", type file.
+# Depends on the persistent ANSIBLE_LOG_PATH fix. Timestamped text (yaml callback); the kontroll_run_id header
+# line (_log-run-id.yml) carries the correlation key. Multi-line task results/tracebacks join into one event.
+type: file
+include:
+  - /host/ansible-log/ansible.log
+read_from: beginning
+data_dir: /var/lib/vector
+multiline:
+  start_pattern: '^\d{4}-\d{2}-\d{2}'    # a new line starts at an ISO date stamp
+  mode: halt_before
+  condition_pattern: '^\d{4}-\d{2}-\d{2}'
+  timeout_ms: 1000

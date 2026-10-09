@@ -1,0 +1,22 @@
+# settings/inventory-host.yml — the EDITABLE per-host inventory vars a device-class host exposes for reconfigure
+# (the banner-owned drop-in instance/inventory/onboarded-<key>.yml). The DATA half of design 22 §5.3's host-var
+# edit: which scalar connection vars may be changed in place + each one's validator type + reconfigure metadata.
+# MVP (Phase 4b, #139) exposes `ansible_host` only — the routine "the device moved to a new IP" case — validated
+# by the P0a ipv4 validator. The TEMPLATED credential-lookup vars (ansible_user/ansible_password = `{{ lookup(…)
+# }}` strings) are NOT listed here, so they render READ-ONLY: editing a credential is the secret-rotate path
+# (M-R-B), deliberately out of this surface. severity `modify` (an overwrite-confirm) — a host re-IP is a value
+# change scoped to ONE host (blast `this-host`), not the control-plane re-IP that `mgmt_ip` is (severity identity,
+# Phase 5). NOT instance config — this ships with the tool (a repo-level descriptor); it carries NO values.
+area: inventory-host
+file: "instance/inventory/onboarded-{key}.yml"
+knobs:
+  - key: ansible_host
+    type: ipv4
+    reconfigurable: true
+    severity: modify
+    blast_radius: this-host
+    help: "The reachable address Ansible connects to for THIS host. Change it when the device moves to a new IP."
+    confirm_text: >-
+      Changing ansible_host re-points the control plane at a new address for this ONE host — the device must
+      actually be reachable there after promote, or its next run fails. (This is a single-host re-IP, not the
+      control-plane mgmt_ip.)

@@ -1,0 +1,138 @@
+name: publish-images
+
+# Publish the kontroll-owned images to PRIVATE ghcr.io on a release tag — NEVER on every push (publishing is a
+# deliberate, tagged event, mirroring make-bundle.sh's git-describe versioning). workflow_dispatch lets a maintainer
+# publish a test tag (e.g. an `edge` build) without cutting a release. C0 = kontroll-control (the Semaphore runner,
+# baking the all-modules SUPERSET — report 22 §2.3) + kontroll-vector. C1 adds kontroll-installer (the compose-native
+# installer glue — report 22 §2.1 Image C): so a fresh node pulls the installer by digest instead of building it.
+#
+# AFTER a publish: `python3 scripts/gen-image-digests.py --refresh <tag>` (needs `docker login ghcr.io`) records the
+# digests into docker/images.lock.yml; commit that, then deploy with `-e use_published_images=true` to pull by digest.
+# Packages inherit the repo's PRIVATE visibility; the control node pulls with a read:packages `docker login`.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag to publish (e.g. v1.0.0 or edge)'
+        required: true
+        default: edge
+      platforms:
+        description: 'Build platforms (linux/amd64 default; add linux/arm64 for SBC control nodes — slower, QEMU)'
+        required: false
+        default: linux/amd64
+
+permissions:
+  contents: read
+
+jobs:
+  # M5 (Phase-B bake-code): the read-only-by-construction AST pin must pass on THIS commit before any code-baking
+  # image is published. Baking the api/gui/service code into the control image moves the read-only guarantee from
+  # "proven on the running clone (== the tested source)" to "proven on the tested source, then baked" — so the
+  # publish MUST be gated on the pin + the WRITE_ROOT seam, on the same commit (review 21 §3.3 / phase-b synthesis M5).
+  gate:
+    runs-on: ${{ fromJSON(vars.KONTROLL_RUNS_ON || '"ubuntu-latest"') }}   # see ci.yml "RUNNERS"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install --quiet pytest pyyaml
+      - name: read-only-by-construction pin (gates the code-baked publish)
+        run: python -m pytest tests/unit/test_readonly_completeness.py tests/unit/test_write_root_seam.py -q
+      - name: baked-code manifest matches the code being baked (M6 "L2b for code")
+        # The published control image bakes scripts/kontroll/ at /opt/kontroll. Gate the publish on the recorded
+        # sha256 floor (docker/code-manifest.lock.yml) matching the source on THIS commit — so a tag can never
+        # publish baked code that drifts from the committed, reviewed manifest (phase-b synthesis §3, M6 / M5-adjacent).
+        run: python scripts/gen-code-manifest.py --check
+
+  publish:
+    needs: gate                  # M5: no code-baked image publishes unless the read-only pin clears on this commit
+    runs-on: ${{ fromJSON(vars.KONTROLL_RUNS_ON || '"ubuntu-latest"') }}   # see ci.yml "RUNNERS"
+    permissions:
+      contents: read
+      packages: write            # push to ghcr.io/netcanon-dev/kontroll-*
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: control
+            context: .
+            dockerfile: docker/semaphore-runner/Dockerfile
+            superset: true       # the runner bakes the all-modules superset (a published image can't know a fleet)
+          - image: vector
+            context: docker/vector-image
+            dockerfile: docker/vector-image/Dockerfile
+            superset: false
+          - image: installer
+            context: .
+            dockerfile: docker/installer/Dockerfile
+            # NOT superset: the installer bakes only the control-plane base (community.sops/general/docker via its own
+            # transient docker_host fleet, Dockerfile §"Bake the CONTROL-PLANE collection base") — never the device
+            # fleet. The all-modules superset is the RUNNER's job (it runs fleet ansible); the installer only drives
+            # bootstrap/local-canonical/deploy-stack on the control node itself.
+            superset: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Generate the all-modules superset lockfile (offline; the published runner bakes the full catalog)
+        if: ${{ matrix.superset }}
+        run: |
+          pip install --quiet pyyaml
+          python3 scripts/gen-requirements.py --all-modules
+          echo "superset lockfile:"; cat ansible/collections/requirements.generated.yml
+
+      - id: meta
+        env:
+          EVENT: ${{ github.event_name }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          TAG="$REF_NAME"
+          [ "$EVENT" = "workflow_dispatch" ] && TAG="$DISPATCH_TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Build platforms
+        id: plat
+        env:
+          EVENT: ${{ github.event_name }}
+          DISPATCH_PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          PLATFORMS="linux/amd64"
+          [ "$EVENT" = "workflow_dispatch" ] && PLATFORMS="$DISPATCH_PLATFORMS"
+          echo "platforms=$PLATFORMS" >> "$GITHUB_OUTPUT"
+
+      # QEMU only matters for cross-arch (linux/arm64). Harmless for amd64-only.
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ steps.plat.outputs.platforms }}
+          push: true
+          tags: ghcr.io/netcanon-dev/kontroll-${{ matrix.image }}:${{ steps.meta.outputs.tag }}
+          # NO secrets, NO instance/ in the context — the repo-root .dockerignore strips instance/ and a clean CI
+          # checkout has none (report 22 §3.3 build-context hygiene).
+
+      - name: Record the published digest (run gen-image-digests.py --refresh to pin the lock)
+        env:
+          IMG: kontroll-${{ matrix.image }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          { echo "### $IMG"; echo "\`ghcr.io/netcanon-dev/$IMG:$TAG@$DIGEST\`"; } >> "$GITHUB_STEP_SUMMARY"

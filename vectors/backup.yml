@@ -1,0 +1,16 @@
+# Capability vector: backup (read-only config capture). See vectors/actuate.yml
+# for the drop-in contract.
+name: backup
+label: backup
+symbol: backup
+order: 2
+match:
+  # Strongest + deep-confirmable: a *_config module that advertises `backup:`.
+  - rule: {module_option: {suffix: _config, option: backup}}
+    confidence: high
+  # Shallow-confirmable (visible in Galaxy contents): a cliconf plugin means the
+  # generic ansible.netcommon.cli_config "get" backs the device up.
+  - rule: {plugin: cliconf}
+    confidence: high
+  - rule: {module_suffix: _facts}
+    confidence: medium

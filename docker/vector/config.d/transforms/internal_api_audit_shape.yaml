@@ -1,0 +1,15 @@
+# config.d/transforms/internal_api_audit.yaml  → transform id "internal_api_audit_shape".
+# TSV: ts \t user \t ip \t action \t run_id \t detail  (api/audit.py). run_id -> a LABEL (bounded); ip -> body.
+type: remap
+inputs: [internal_api_audit]
+source: |
+  .source = "internal"
+  .service = "api-audit"
+  .host = get_env_var("HOSTNAME") ?? "control-vm"
+  .level = "audit"
+  fields = split(string(.message) ?? "", "\t")
+  if length(fields) >= 6 {
+    .action = fields[3]
+    .run_id = fields[4]        # the kontroll_run_id correlation key → a LABEL (bounded)
+    .audit_ip = fields[2]      # body only, never a label
+  }

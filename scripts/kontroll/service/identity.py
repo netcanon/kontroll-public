@@ -1,0 +1,153 @@
+"""identity — the module-IDENTITY reconfigure instance (Phase 4b, #139).
+
+A safe, diff-able change to a device-class's top-level IDENTITY keys (secrets_domain / inventory_group / backend /
+role / status) in `modules/<key>/module.yml`. Before 4b these had NO surgical seam — changing one fell off into a
+whole-file Overwrite (design `docs/reviews/2026-06-19-gui-paradigm/22-design-reconfigure-overwrite-rework.md`
+§5.4, G7). This rides the SAME propose→token→promote→stage spine as the capability reconfigure (Phase 4a): a pure
+`current_values` read-back → `_diff.compute_changes` (with the `module-identity` knob_meta that UPGRADES a value
+change to the `identity` gate) → a comment-preserving `upsert_top_level_key` write → `verify_no_drop` + the human
+type-to-confirm + the C10 two-key promote.
+
+Heaviest-blast reconfigure short of platform settings: changing `inventory_group` RE-HOMES every host of the class
+at the one dispatch seam; changing `secrets_domain` ORPHANS its credentials. So each identity change carries
+`severity: identity` (the type-to-confirm `reconfig-identity-confirm`), and a proposal may change AT MOST ONE
+identity-severity key at a time (so the type-to-confirm value is unambiguous); a `status` flip (severity `modify`)
+may ride along. The staged proposal carries `module.yml` only — the operator REGENERATES the scrape/log targets +
+re-runs bootstrap/deploy-stack at enact (the identity ripple is named in the enact hint), keeping the blast of a
+single GUI action bounded (MVP scope; M6 single-object). PURE propose; the write is the operator-promoted stage.
+"""
+import logging
+import os
+
+import yaml
+
+from kontroll import catalog, paths
+from kontroll.service import _diff, promote
+from kontroll.service._blockwrite import upsert_top_level_key
+from kontroll.service._validate import validate_value
+
+log = logging.getLogger("kontroll.service.identity")
+
+_AREA = "module-identity"
+
+
+def _knobs():
+    """The declared identity-knob descriptors (settings/module-identity.yml `knobs`), or [] if unregistered.
+    The single source of which top-level keys are reconfigurable identity + each one's type/severity/blast."""
+    doc = next((a for a in catalog.load_knob_descriptors() if a.get("area") == _AREA), None)
+    return (doc.get("knobs") or []) if doc else []
+
+
+def _mod_path(key):
+    return paths.module_file(key)
+
+
+def current_values(key):
+    """The DECLARED identity values of class `key` — a FLAT `{identity_key: value}` over the reconfigurable keys
+    PRESENT in modules/<key>/module.yml (for pre-filling the renderer + the diff). PURE — reads via paths.ROOT,
+    writes nothing; {} if not onboarded / unreadable (degrade, never raise — service-never-sys.exit). The
+    reconfigure read-back (design 22 §3.3); these are non-secret config keys, so the value (never a secret) is
+    surfaced."""
+    try:
+        with open(_mod_path(key), encoding="utf-8") as fh:
+            module = yaml.safe_load(fh.read()) or {}
+    except (OSError, yaml.YAMLError):
+        return {}
+    declared = [k["key"] for k in _knobs() if k.get("key")]
+    return {k: module[k] for k in declared if k in module and not isinstance(module[k], (dict, list))}
+
+
+def build_plan(key, selection):
+    """Compute the identity reconfigure PLAN for class `key`. `selection` = `{"values": {identity_key: value}}`
+    (the renderer submits the full identity knob set, pre-filled from `current_values`). PURE — reads
+    modules/<key>/module.yml, writes nothing. Returns
+    {"error": "not_onboarded"|"unknown_field"|"bad_value"|"multi_identity"|None, ...}; on success the plan
+    carries the comment-preserving `text_after`, the field-level `changes`/`will_overwrite`/`severity` (each
+    identity change UPGRADED via the descriptor knob_meta), the `current`/`proposed` structs `verify_no_drop`
+    checks, the enact hand-off, and `token_parts`/`plan_token` (text_after + the severity decision — anti-drift +
+    no-quiet-upgrade, M1). At most ONE identity-severity change per proposal (so the type-to-confirm is
+    unambiguous); a `status` modify may ride along."""
+    mod_path = _mod_path(key)
+    if not os.path.exists(mod_path):
+        return {"error": "not_onboarded", "key": key}
+    with open(mod_path, encoding="utf-8") as fh:             # read ONCE — the diff, text_before, and the no-drop
+        text_before = fh.read()                              # full-struct all derive from these bytes (review NIT 3)
+    module = yaml.safe_load(text_before) or {}
+    knobs = {k["key"]: k for k in _knobs() if k.get("key")}
+    declared = [k["key"] for k in _knobs() if k.get("key")]
+    submitted = (selection or {}).get("values") or {}
+    proposed = {}
+    for field, value in submitted.items():
+        knob = knobs.get(field)
+        if knob is None:
+            return {"error": "unknown_field", "key": key, "field": field}
+        bad = validate_value(dict(knob, key=field), value)   # the P0a config-injection guard, server-side
+        if bad:
+            return {"error": "bad_value", "key": key, "field": field, "detail": bad}
+        proposed[field] = value
+
+    # The renderer submits the full declared set; restrict the editable `current` to the submitted keys so an
+    # UNSUBMITTED key is not seen as a `remove` (we only diff what the dialog offered).
+    current_edit = {k: module[k] for k in declared
+                    if k in module and k in proposed and not isinstance(module[k], (dict, list))}
+    diff = _diff.compute_changes(current_edit, proposed, catalog.knob_meta(_AREA))
+    identity_changes = [c for c in diff["changes"] if _diff.effective_severity(c) == "identity"]
+    if len(identity_changes) > 1:
+        return {"error": "multi_identity", "key": key,
+                "detail": "change identity keys one at a time (each re-homes/re-classifies the class); "
+                          "fields: %s" % ", ".join(sorted(c["path"] for c in identity_changes))}
+
+    text_after = text_before
+    for c in diff["changes"]:                                # fold each changed key (≤1 identity + optional status)
+        if c["kind"] in ("add", "modify"):
+            text_after = upsert_top_level_key(text_after, c["path"], c["after"])
+
+    mod_rel = "modules/%s/module.yml" % key
+    sev_dec = _diff.severity_decision(diff)
+    # verify_no_drop runs over the FULL module top-level keys (not just the edited identity keys) — so a future
+    # writer bug dropping a co-owner key (collections / metrics / a sibling identity key) fails closed at promote.
+    # upsert_top_level_key only replaces/appends (never removes), so a legit edit keeps every key → passes; the
+    # operator-facing diff stays the editable change-set (review SHOULD-FIX 1).
+    after_module = yaml.safe_load(text_after) or {}
+    return {"error": None, "key": key, "mod_rel": mod_rel, "mod_path": mod_path,
+            "text_before": text_before, "text_after": text_after,
+            "changes": diff["changes"], "will_overwrite": diff["will_overwrite"], "severity": diff["severity"],
+            "current": module, "proposed": after_module,     # FULL top-level keys — what verify_no_drop checks
+            "paths": [mod_rel],                              # MVP: module.yml only; operator regens targets at enact
+            "enact": identity_enact_commands(key, diff["changes"]),
+            "token_parts": [text_after, sev_dec],
+            "plan_token": promote.plan_token(text_after, sev_dec)}
+
+
+def apply_plan(plan):
+    """Write the reconfigured identity keys into modules/<key>/module.yml (comment-preserving line-surgery).
+    Idempotent: identical content → no write. Returns {"changed", "paths"} — the repo-rel paths the route's
+    scoped commit stages (module.yml only; the operator regenerates targets at enact). The API runs no play."""
+    changed = False
+    with open(plan["mod_path"], encoding="utf-8") as fh:
+        if fh.read() != plan["text_after"]:
+            with open(plan["mod_path"], "w", encoding="utf-8", newline="\n") as out:
+                out.write(plan["text_after"])
+            changed = True
+            log.info("identity: wrote identity keys for %s (paths %s)",
+                     plan["key"], ",".join(c["path"] for c in plan["changes"]))
+    return {"changed": changed, "paths": [plan["mod_rel"]]}
+
+
+def identity_enact_commands(key, changes):
+    """The hand-off steps to make a promoted identity change LIVE — the API runs none. An identity change ripples
+    to the dispatch seam + the generators, so the enact NAMES the re-gen + (when the dispatch identity moved) the
+    bootstrap dry-run. Each step is `{kind, cmd, why}` (kind 'operator' — needs the control node)."""
+    cmds = []
+    fields = {c["path"] for c in changes if c["kind"] in ("add", "modify")}
+    if fields & {"inventory_group", "role", "backend"}:
+        cmds.append({"kind": "operator",
+                     "cmd": "cd ansible && ansible-playbook playbooks/bootstrap.yml -e target=%s --check --diff" % key,
+                     "why": "the new identity re-homes/re-classifies %s — dry-run bootstrap (the dispatch seam now "
+                            "selects a different role/collection) before applying" % key})
+    cmds.append({"kind": "operator",
+                 "cmd": "python3 scripts/gen-observability.py && python3 scripts/gen-logging.py "
+                        "&& git add -A && git commit -m 'regen targets after identity change'",
+                 "why": "regenerate the scrape/log targets from the updated module identity, then deploy-stack so "
+                        "the change takes effect"})
+    return cmds

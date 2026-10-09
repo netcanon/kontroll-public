@@ -1,0 +1,10 @@
+# config.d/transforms/internal_scripts.yaml  → transform id "internal_scripts_shape".
+# filename stem → the script name (e.g. backup-2026-06-16T....log → "backup"); low-cardinality service label.
+type: remap
+inputs: [internal_scripts]
+source: |
+  .source = "internal"
+  name = parse_regex(string(.file) ?? "", r'/(?P<n>[a-z0-9-]+)-\d{4}') ?? {}
+  .service = string(name.n) ?? "script"   # string() makes the infallible path access fallible (VRL E651 guard)
+  .host = get_env_var("HOSTNAME") ?? "control-vm"
+  .level = "info"

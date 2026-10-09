@@ -1,0 +1,17 @@
+# Secret-onboarding FORM descriptor for the `logging_rest` SOPS domain — the API token Vector's http_client uses
+# to POLL a device/service log endpoint (logging/rest_pull.yml). A monitoring READ credential (an HTTP GET of
+# logs — cannot actuate the device). Fields only; recipiency is base (control + break-glass) per /.sops.yaml.
+# This makes the token GUI-supplyable + SOPS-staged (closes the secret-dialog gap). The per-vendor INJECTION (the
+# source.auth header shape + the secret_env_map ${ENV} ref on rest_pull) is wired when a class ADOPTS the method —
+# the auth scheme is vendor-specific (Bearer vs Basic vs a query token), so it is NOT pinned generically here.
+domain: logging_rest
+label: Log-poll API token
+description: The API token Vector's http_client uses to poll a device/service log endpoint (read-only).
+order: 50
+recipients: base
+fields:
+  - key: api_token
+    label: Log API token
+    type: password
+    required: true
+    help: The read-only token authorizing Vector to GET the device/service log endpoint.

@@ -1,0 +1,25 @@
+# Python tooling config for the testable surfaces of the control plane:
+# scripts/galaxy.py (the onboarding engine) + gui/ (the Flask shell over it).
+# kontroll is a composed control plane, not a Python package — there is no build
+# here, only the test + lint config the pytest layer (docs/qa-and-release-pipeline.md
+# §1) needs. The IaC half is gated by tests/validate.sh; this gates the code half.
+
+[tool.pytest.ini_options]
+addopts = "-q --strict-markers"
+testpaths = ["tests"]
+markers = [
+  "unit: pure-function tests, no I/O (predicate engine, classify, record, openapi)",
+  "integration: galaxy.py/gui driven as black boxes with the shell-outs mocked — no live lab",
+  "e2e: full GUI browser flow (Playwright) — opt-in, never in the hermetic CI default",
+  "slow: long-running; excluded from the fast pre-commit/CI subset",
+]
+
+[tool.coverage.run]
+source = ["scripts", "gui"]
+# Scoped to the surfaces this suite covers (galaxy.py + the GUI). The other scripts
+# get their own coverage when their tests land (qa-and-release-pipeline.md §1) —
+# omitted here so the reported number reflects what is actually under test.
+omit = ["tests/*", "scripts/configure-semaphore.py", "scripts/gen-requirements.py"]
+
+[tool.coverage.report]
+show_missing = true

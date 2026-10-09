@@ -1,0 +1,43 @@
+# Prometheus — metrics TSDB. Scrape config + targets are config-as-code under
+# ../prometheus (targets use file-based service discovery, so adding a target
+# is a new file in prometheus/targets/, never an edit here or to prometheus.yml).
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.5.4
+    container_name: prometheus
+    restart: unless-stopped
+    ports:
+      # mgmt interface only — never 0.0.0.0 (C3 parity with api.yaml); reached via NPM for external use
+      - "${KONTROLL_MGMT_IP:?set in .env}:9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      # Retention (storage paradigm): an age window AND a disk-size HARD CAP. Both fail closed via the compose
+      # ${VAR:-default} form — an empty/unset .env value falls to the default, never to "no cap" = unbounded disk.
+      # The size cap is the backstop a runaway scrape / label-explosion can't blow past; it was ABSENT before
+      # (the one real metrics fail-open hole). Prometheus deletes a block when it violates EITHER (whichever trips).
+      - "--storage.tsdb.retention.time=${PROM_RETENTION_TIME:-90d}"
+      - "--storage.tsdb.retention.size=${PROM_RETENTION_SIZE:-20GB}"
+      # Enable POST /-/reload (and /-/quit) so a freshly-promoted scrape job can be made live by a config reload
+      # — no restart, no docker socket. The `reload-observability` Semaphore task POSTs it (item F, Tier-1 enact).
+      # Exposure is bounded to the mgmt VLAN (:9090 is mgmt-bound, C3); /-/quit is an accepted mgmt-only risk.
+      - "--web.enable-lifecycle"
+    volumes:
+      # ../../ : compose resolves an included file's relative paths from THIS file's dir
+      # (docker/services/), so two levels up reaches the repo-root prometheus/ tree
+      # (matches homepage.yaml). One level (../) wrongly targets docker/prometheus/.
+      - ../../prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../../prometheus/targets:/etc/prometheus/targets:ro
+      - ../../prometheus/jobs.d:/etc/prometheus/jobs.d:ro    # GENERATED proxy-exporter jobs (scrape_config_files)
+      - prometheus-data:/prometheus
+    networks:
+      - kontroll
+
+volumes:
+  prometheus-data:
+
+networks:
+  kontroll:
+    external: true
+    name: kontroll

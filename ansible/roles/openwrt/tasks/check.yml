@@ -1,0 +1,10 @@
+---
+# OpenWrt liveness — delegates to the generic raw_ssh backend (no python on the
+# target; raw SSH over Dropbear). openwrt now carries only its identity + params.
+# noqa: var-naming[no-role-prefix] — backend_* are shared cross-backend contract vars.
+- name: Liveness via the raw_ssh backend  # noqa: var-naming[no-role-prefix]
+  ansible.builtin.include_role:
+    name: backend_raw_ssh
+    tasks_from: check
+  vars:
+    backend_liveness_command: cat /tmp/sysinfo/board_name

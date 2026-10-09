@@ -1,0 +1,48 @@
+---
+# Backup entrypoint for the OPNsense device class (STAGED — post-cutover edge).
+# Captures /conf/config.xml (the complete restorable config) via SSH. Follows the
+# backup contract — see roles/cisco_ios/tasks/backup.yml.
+#
+# STAGED: logic written from OPNsense conventions but NOT yet verified against a
+# live device — there is no OPNsense in the active fleet. Verify at cutover
+# before trusting the output.
+#
+# Access chain used:   control VM (mgmt VLAN) -> OPNsense mgmt (SSH, root)
+# May break:           none (read-only `cat`)
+# Fallback required:   no
+# Blast radius:        none — pure read
+# Idempotence:         capture file overwritten each run; no device state changes
+#
+# no_log: config.xml carries secrets (CA keys, PSKs, password hashes).
+
+- name: Record skip when this class is not backup-capable
+  ansible.builtin.set_fact:
+    kontroll_backup_result: "skipped — class not backup-capable"
+  when: not (backup_capable | default(true) | bool)
+
+- name: Capture OPNsense config.xml
+  when:
+    - backup_capable | default(true) | bool
+    - not (molecule_test | default(false) | bool)
+  block:
+    - name: Resolve capture filename
+      ansible.builtin.set_fact:
+        _backup_file: "OPNsense_{{ ansible_host | replace('.', '-') }}_config.xml"
+
+    - name: Read /conf/config.xml
+      ansible.builtin.slurp:
+        src: /conf/config.xml
+      register: opn_cfg
+      no_log: true
+
+    - name: Write capture
+      ansible.builtin.copy:
+        content: "{{ opn_cfg.content | b64decode }}"
+        dest: "{{ config_backup_dir }}/{{ _backup_file }}"
+        mode: "0640"
+      delegate_to: localhost
+      no_log: true                       # content is the secret-bearing config
+
+    - name: Record successful capture
+      ansible.builtin.set_fact:
+        kontroll_backup_result: "captured -> {{ _backup_file }} (staged/unverified)"

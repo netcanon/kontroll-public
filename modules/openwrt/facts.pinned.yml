@@ -1,0 +1,13 @@
+# PINNED offline "probe" facts openwrt was classified + capability-derived from (F2, north-star Rung 4). openwrt has
+# NO Ansible collection (it is managed by raw SSH via ansible.builtin), so there is nothing to deep-probe — the facts
+# are legitimately EMPTY. With no cliconf/httpapi/netconf plugin and no `_config`-suffix module, predicate.classify
+# falls through every structured backend to the `raw_ssh` catch-all (its `none_of` is satisfied by the absence of all
+# those signals), which confers telemetry [blackbox, host_node]. So the derived floor is ICMP reachability + a
+# node_exporter host target. This is the ONE class whose pinned facts are empty-by-construction (not a signal subset)
+# — the honest representation of "a bespoke appliance with no collection." `probed_at` is provenance only.
+collection: null
+version: null
+plugins: {}
+modules: []
+module_options: {}
+probed_at: "2026-07-01"

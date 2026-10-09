@@ -1,0 +1,61 @@
+# Loki — single-binary log store (filesystem TSDB + compactor retention). Config is config-as-code under
+# ../loki (filesystem store; bounded retention). Reached by Grafana (datasource uid: loki) and written by
+# Vector (loki sink) over the kontroll network by name (http://loki:3100). Adding a log SOURCE is a Vector
+# drop-in (docker/vector/config.d/sources/), never an edit here.
+#
+# At-rest: the store is a BIND MOUNT at /var/lib/kontroll/loki (0750, uid 10001) — NOT a named volume — because
+# it holds log BODIES that may carry a secret an upstream emitter failed to redact. That puts it inside the C8
+# crown-jewel-at-rest boundary (operator-owned, runner-not-mounted, never pushed), same as the backup captures.
+# SECURITY.md C12.
+
+services:
+  loki:
+    image: grafana/loki:3.4.2
+    container_name: loki
+    restart: unless-stopped
+    # Loki's official image runs as uid 10001; the host state dir (deploy-stack) is chowned to match.
+    user: "10001:10001"
+    command:
+      - "-config.file=/etc/loki/loki-config.yml"
+      # Let the retention window be set from the container env without editing the committed config.
+      - "-config.expand-env=true"
+    ports:
+      # mgmt interface only — never 0.0.0.0 (C3 parity with prometheus.yaml/grafana.yaml); :? fails closed.
+      # Published so the operator can curl the push/query API from the mgmt host; Grafana reaches it in-network
+      # by name (http://loki:3100) and never needs the published port.
+      - "${KONTROLL_MGMT_IP:?set in .env}:3100:3100"
+    environment:
+      # 30-day homelab default; overridable per-instance from .env. ALWAYS populated (the :-720h default) so
+      # loki-config.yml's ${LOKI_RETENTION_PERIOD} never expands empty (= infinite retention = unbounded disk).
+      LOKI_RETENTION_PERIOD: ${LOKI_RETENTION_PERIOD:-720h}
+    volumes:
+      # ../ : compose resolves an included file's relative paths from THIS file's dir (docker/services/), so
+      # ONE level up reaches docker/loki/. (prometheus.yaml uses ../../ because its config lives at REPO-ROOT
+      # prometheus/; loki/vector configs live under docker/, so they are ../ — a non-existent bind source is
+      # silently created as an empty DIR at runtime, which is why this must be exact. Caught live on the dogfood.)
+      - ../loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      # GENERATED per-class retention overrides (runtime_config, hot-reloaded). The dir is kept non-empty by the
+      # committed retention.generated.yaml (`overrides: {}` by default) so this bind never auto-creates an empty
+      # host dir, and Loki always has a VALID file at startup (an invalid one is fatal — M-1 F4).
+      - ../loki/overrides:/etc/loki/overrides:ro
+      # Persistent store (BIND MOUNT — C8 at-rest boundary; the dir is created 0750/uid-10001 by deploy-stack):
+      # chunks, TSDB index, index_cache, compactor working dir all live under /loki (path_prefix).
+      # Relocatable via KONTROLL_LOGS_DIR (a separate data disk for the high-growth log store). Fail-closed: the
+      # default is today's exact path; an empty value can never mean "/". This is a HOST bind SOURCE consumed by
+      # compose + the deploy-stack chown ONLY — NEVER pushed through Loki's os.Expand config (which ignores
+      # ${VAR:-default}); the container side stays the literal /loki (loki-config.yml path_prefix). SECURITY.md C8.
+      - ${KONTROLL_LOGS_DIR:-/var/lib/kontroll/loki}:/loki
+    healthcheck:
+      # Loki exposes /ready once it has joined its (in-memory) ring and is serving.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3100/ready || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - kontroll
+
+networks:
+  kontroll:
+    external: true
+    name: kontroll

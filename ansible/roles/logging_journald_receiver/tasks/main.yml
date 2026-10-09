@@ -1,0 +1,76 @@
+---
+# Collector-side receiver for the journald_remote logging method (the counterpart to the SENDER role
+# logging_journald_remote, which runs on each remote host). Installs systemd-journal-remote on the control node
+# and runs it as a small service bound to the MGMT IP :19532 only; uploaded journals land in
+# /var/log/journal-remote/ where Vector's `exec` source (logging/journald_remote.yml: journalctl -D ... -o json
+# -f + the docker/services/vector.yaml RO bind mount) reads them. WHY journal-remote + an exec/journalctl read,
+# not a Vector http_server or journald source: systemd-journal-upload streams the binary journal EXPORT format
+# (http_server can't field-parse it) and the journald source filters to the current boot +0 (drops remote
+# journals) -- both LIVE-DISPROVEN; the exec path is LIVE-PROVEN (local/s10-journald-receiver-bench-findings.md).
+# The bound socket is created by `--listen-http=<mgmt>:19532` (a SPECIFIC IP -> never 0.0.0.0; LIVE-verified),
+# NOT the packaged systemd-journal-remote.socket unit (which was flaky in the bench).
+#
+# Access chain used:   runs ON the control node (localhost) -- installs a host package + a systemd service; NO
+#                      device/network path is traversed.
+# May break:           nothing on the lab -- adds a mgmt-bound receiver service on the control node only.
+# Fallback required:   no
+# Blast radius:        this control node (a host package + a mgmt-bound :19532 service + a journal dir; reversible)
+# Idempotence:         package + copy (unit file) + systemd are idempotent -- a 2nd run = 0 changed
+# --check-safe:        package/copy/systemd render diffs in check_mode, apply nothing
+# no_log:              not needed -- journal-upload on the mgmt VLAN is unauthenticated (no cred handled here; C12)
+# PRIVILEGE (C12): the receiver runs as the NON-ROOT `systemd-journal-remote` user (Group=systemd-journal), so this
+#   network-facing UNAUTHENTICATED listener no longer runs root. Its 2750 output dir is group=systemd-journal, so
+#   Vector reads the uploaded journals via the SAME supplementary gid it reads host journald by (one grant). The
+#   unauthenticated mgmt-bound :19532 itself is the deferred residual 4 (TLS journal-upload), not this change.
+- name: Fail loudly if the collector mgmt host is not supplied (never bind 0.0.0.0)
+  ansible.builtin.assert:
+    that:
+      - logging_collector_host | default('') | length > 0
+    fail_msg: "logging_journald_receiver needs logging_collector_host (the mgmt IP to bind :19532 to -- never 0.0.0.0)"
+    quiet: true
+
+- name: Install systemd-journal-remote (provides the journal-upload receiver binary)
+  ansible.builtin.package:
+    name: systemd-journal-remote
+    state: present
+  become: true
+
+- name: Ensure the systemd-journal-remote system user exists + is in the systemd-journal group
+  # The unit runs as this NON-ROOT user (the package's sysusers creates it, but assert it so User= never references
+  # a missing account); membership in systemd-journal lets it write a group-readable output dir AND makes its
+  # .journal output group=systemd-journal — the SAME gid Vector reads host journald by (one supplementary grant).
+  ansible.builtin.user:
+    name: systemd-journal-remote
+    system: true
+    create_home: false
+    shell: /usr/sbin/nologin
+    groups: systemd-journal
+    append: true
+  become: true
+
+- name: Ensure the remote-journal output dir exists (receiver writes it; Vector reads it RO; group=systemd-journal)
+  ansible.builtin.file:
+    path: /var/log/journal-remote
+    state: directory
+    owner: systemd-journal-remote
+    group: systemd-journal
+    mode: "2750"          # setgid so new .journal files inherit group=systemd-journal (Vector's read gid); not world
+  become: true
+
+- name: Install the mgmt-bound journal-remote receiver service unit
+  # The unit lives in templates/ (a .j2 -- the systemd ExecStart line is long, and a template file keeps it out of
+  # the yamllint/ansible-lint 120-char gate; templates are the idiomatic home for unit files anyway).
+  ansible.builtin.template:
+    src: kontroll-journal-remote.service.j2
+    dest: /etc/systemd/system/kontroll-journal-remote.service
+    mode: "0644"
+  become: true
+  notify: Restart journal-remote receiver
+
+- name: Enable + start the mgmt-bound journal-remote receiver
+  ansible.builtin.systemd:
+    name: kontroll-journal-remote.service
+    enabled: true
+    state: started
+    daemon_reload: true
+  become: true

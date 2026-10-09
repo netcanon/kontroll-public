@@ -1,0 +1,54 @@
+# Logging method: a REMOTE host's systemd-journald is shipped to the collector. The host runs
+# systemd-journal-upload (wired by roles/logging_journald_remote) -> the collector's systemd-journal-remote
+# receiver (roles/logging_journald_receiver, mgmt IP :19532) writes the uploads to /var/log/journal-remote/*.journal;
+# Vector reads that dir with an `exec` source running `journalctl -f` (the dir is bind-mounted RO into the
+# container) and ships to Loki. The control-VM-LOCAL journal is a SEPARATE source (config.d/sources/
+# internal_journald.yaml), NOT a capability method -- every host a capability log-method targets is remote
+# relative to the collector. UNIVERSAL (no applies_when), operator-DECLARED only. Schema: logging/README.md.
+#
+# WHY `exec` journalctl (NOT http_server, NOT the journald source) -- both LIVE-DISPROVEN on the bench, the
+# correct path LIVE-PROVEN (2026-06-17; local/s10-journald-receiver-bench-findings.md):
+#  - http_server: systemd-journal-upload streams the BINARY journal EXPORT format (FIELD=value lines), NOT JSON,
+#    so Vector's http_server can't field-parse it (codec json -> 0 events; the reverted PR #12/#13).
+#  - journald source: filters to the CURRENT boot (+0) even with `current_boot_only` omitted (and an explicit
+#    `false` is rejected on systemd 250-257) -> it DROPS remote journals, whose boot differs from the collector's.
+#  - exec `journalctl --directory=<remote> -o json -f`: reads ALL boots, version-robust, emits clean NDJSON that
+#    Vector decodes with full field fidelity. ONE exec reads ALL uploaders (--split-mode=host per-host files);
+#    .host comes from each record's ._HOSTNAME, never the inventory.
+name: journald_remote
+label: Journald (remote systemd-journal-upload -> journal-remote -> Vector exec journalctl)
+order: 2
+kind: exec
+direction: push                    # the remote host PUSHES (uploads, via the wiring role); Vector follows locally
+source:
+  # journalctl follows the landed remote journals as NDJSON; one event per entry. `-f` (not `-n0`) keeps the
+  # existing backlog on first start; a Vector restart re-tails (minor, acceptable dup -- Loki has no since-cursor).
+  command: ["journalctl", "--directory=/var/log/journal-remote", "-o", "json", "-f"]
+  mode: streaming
+  decoding:
+    codec: json
+labels: [host, service, level]
+# Data-driven shaping (S9): map the uploading host's ._HOSTNAME to `.host` (ONE source serves MANY hosts, so
+# .host MUST come from the record, not the inventory -- the `.host` default is only a last-resort fallback), the
+# unit to `.service`, and PRIORITY (0-7) to an RFC-keyword `.level` via to_syslog_level -- the SAME derivation
+# the live internal journald transform uses (config.d/transforms/internal_journald_shape.yaml).
+transform_vrl:
+  - '.host = string(._HOSTNAME) ?? .host'
+  - '.service = string(._SYSTEMD_UNIT) ?? .service'
+  - 'if exists(.PRIORITY) { .level = to_syslog_level(to_int(.PRIORITY) ?? 6) ?? .level }'
+# NO applies_when -> UNIVERSAL (any host may have a journal; never AUTO-suggested, only offerable/declared).
+params:
+  retention:
+    allowed: ["7d", "30d", "90d"]
+    required: false
+wiring_role: logging_journald_remote   # roles/logging_journald_remote -- persistent journald + journal-upload on
+                                       # the SENDER (remote host). The COLLECTOR receiver is
+                                       # roles/logging_journald_receiver (systemd-journal-remote on mgmt :19532 +
+                                       # the Vector /var/log/journal-remote bind mount).
+secret_domain: null                    # unauthenticated upload on the mgmt VLAN (accepted risk, parity with :5514
+                                       # syslog -- SECURITY.md C12); a future TLS/cred variant would name a domain.
+access_chain:
+  chain: "remote systemd-journal-upload -> mgmt :19532 systemd-journal-remote -> Vector exec journalctl -> Loki"
+  may_break: none -- adds a journal-upload unit on the host + a mgmt-bound receiver socket; no traffic/forwarding path
+  fallback: "no"
+  blast_radius: this host (adds an uploader unit) + the collector (one mgmt-bound receiver service + a journal dir)

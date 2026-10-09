@@ -1,0 +1,190 @@
+# CI — the OFFLINE correctness gate. Runs the exact same tests/validate.sh used locally
+# and on the control VM (single source of truth for "is it green"), hermetically: the
+# live lab is NEVER in CI (docs/qa-and-release-pipeline.md). pytest/molecule/gui-smoke
+# land here as the QA plan rolls out.
+#
+# RUNNERS (public-split, 2026-10-08): every job's `runs-on` is the repository/organization variable
+# KONTROLL_RUNS_ON — a JSON string — and defaults to GitHub-hosted `ubuntu-latest` when the variable is unset.
+#   * the PUBLIC repo leaves it unset: GitHub-hosted runners only. A public repo must NEVER run on a self-hosted
+#     runner (a fork's pull_request could execute on the box — GitHub's own guidance).
+#   * the PRIVATE instance repo sets KONTROLL_RUNS_ON='["self-hosted","Linux","X64"]' to keep using the org
+#     runners (no GitHub-hosted minutes budget on the private plan).
+# Nothing else differs between the two repos' CI — same file, same gates.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Opt in to Node.js 24 for JavaScript actions ahead of the forced cutover (netcanon parity).
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  validate:
+    name: validate (lint · secrets · compose · syntax · generators)
+    runs-on: ${{ fromJSON(vars.KONTROLL_RUNS_ON || '"ubuntu-latest"') }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: tests/requirements-dev.txt
+
+      - name: Install lint + ansible toolchain (pinned to the production gate's versions)
+        # pathspec<0.12 avoids a transitive DeprecationWarning the linters' newer pathspec
+        # emits (ansible-lint overrides PYTHONWARNINGS, so we pin instead). Not our code.
+        run: |
+          pip install --quiet "yamllint==1.37.1" "ansible-core==2.19.4" "ansible-lint==25.2.1" "pathspec<0.12"
+          pip install --quiet -r tests/requirements-dev.txt
+
+      - name: Install sops + gitleaks + promtool + vector (pinned release binaries, sha256-verified)
+        # Every tool validate.sh can run is installed, so the gate runs with --strict below: a tool that is
+        # missing is a FAILURE, never a silent SKIP (the 2026-10-08 review found promtool + vector-config had
+        # been skipped on every green run since 2026-06-30 — the Prometheus + Vector configs were unvalidated).
+        # User-local install dir (no sudo) so the step is identical on GitHub-hosted and self-hosted runners.
+        # Versions track the compose pins: prom/prometheus:v3.5.4 -> promtool 3.5.4, timberio/vector:0.56.0 ->
+        # vector 0.56.0. The digests are the publishers' release checksums; a mismatch fails the job (BRICK-1
+        # posture for the gate's own toolchain).
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/kontroll-tools"; mkdir -p "$bin"; cd "$RUNNER_TEMP"
+          fetch() { # url sha256 -> file in cwd
+            curl -fsSL -o "$(basename "$1")" "$1"
+            echo "$2  $(basename "$1")" | sha256sum -c --quiet
+          }
+          fetch https://github.com/getsops/sops/releases/download/v3.13.1/sops-v3.13.1.linux.amd64 \
+                620a9d7e3352ababeca6908cea24a6e8b14ce89a448ddbd3f94f1ef3398f470a
+          install -m 0755 sops-v3.13.1.linux.amd64 "$bin/sops"
+          fetch https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
+                551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          tar -xzf gitleaks_8.30.1_linux_x64.tar.gz -C "$bin" gitleaks
+          fetch https://github.com/prometheus/prometheus/releases/download/v3.5.4/prometheus-3.5.4.linux-amd64.tar.gz \
+                be64e1cf657e6e7d132aca022f6135abedd660db053952e3f69e8affa3b9cc9e
+          tar -xzf prometheus-3.5.4.linux-amd64.tar.gz --strip-components=1 -C "$bin" \
+              prometheus-3.5.4.linux-amd64/promtool
+          vec=vector-0.56.0-x86_64-unknown-linux-gnu.tar.gz
+          fetch "https://github.com/vectordotdev/vector/releases/download/v0.56.0/$vec" \
+                7139f412c9d1c5fdff4b59d566c6dbad8a2ef8bb5aa3db82c81e78e4cd919019
+          # the GitHub release archive's top-level dir differs from the packages.timber.io one — extract by
+          # wildcard member path, so the install does not depend on it
+          tar -xzf "$vec" --wildcards -O '*/bin/vector' > "$bin/vector" && chmod 0755 "$bin/vector"
+          echo "$bin" >> "$GITHUB_PATH"
+          "$bin/sops" --version; "$bin/gitleaks" version; "$bin/promtool" --version | head -1; "$bin/vector" --version
+
+      - name: Resolve + install collections (from modules/, not a hardcoded list)
+        run: |
+          set -euo pipefail
+          python3 scripts/gen-requirements.py
+          ansible-galaxy collection install -r ansible/collections/requirements.generated.yml
+
+      - name: validate --strict (the same gate as local + the VM; a missing tool is a failure here)
+        # Quiet UPSTREAM toolchain deprecation noise in the CI log only (ansible-core's
+        # internal `disable_lookups` use when loading our SOPS-in-group_vars; pathspec
+        # inside the linters) — these are not our code. This does NOT disable
+        # ansible-lint's own `deprecated-*` rules, which still guard our code, and does
+        # not touch production config (the operator still sees deprecations on real runs).
+        env:
+          ANSIBLE_DEPRECATION_WARNINGS: "false"
+          PYTHONWARNINGS: "ignore::DeprecationWarning"
+        run: bash tests/validate.sh --strict
+
+  tests:
+    name: pytest (unit · integration · gui) — py${{ matrix.python }}
+    runs-on: ${{ fromJSON(vars.KONTROLL_RUNS_ON || '"ubuntu-latest"') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: tests/requirements-dev.txt
+
+      - name: Install the code-half test deps (no ansible, no lab — the shell-outs are mocked)
+        run: pip install --quiet -r tests/requirements-dev.txt
+
+      - name: pytest (offline; e2e/slow excluded — the hermetic default)
+        run: pytest -m "not e2e and not slow" --cov=scripts --cov=gui --cov=api --cov-report=term-missing
+
+  snmp-modules:
+    name: snmp modules (generator rebuild · CGO byte-gate)
+    # The no-bespoke gate for the snmp_exporter if_mib module: rebuild the committed modules.generated.yml from
+    # generator.yml + the vendored MIB closure with the PINNED generator and assert it byte-matches. The
+    # snmp_exporter generator is NetSNMP/CGO (no static binary, no reliable image — upstream #944), so this is a
+    # dedicated job that compiles it from source against libsnmp-dev. Drift (a MIB bump, a generator.yml edit
+    # without regenerating) => red. validate.sh's gen-snmp --check is the binary-free Model-B half of the same gate.
+    runs-on: ${{ fromJSON(vars.KONTROLL_RUNS_ON || '"ubuntu-latest"') }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.24'   # the version that built generator v0.30.1 on the dogfood VM
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install NetSNMP dev headers (the generator is CGO — links libsnmp)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsnmp-dev build-essential
+
+      - name: Build the PINNED snmp_exporter generator (v0.30.1) from source
+        run: |
+          set -euo pipefail
+          # Self-hosted runners are NON-ephemeral — a prior run's clone persists in /tmp, so `git clone` into it
+          # fails ("destination path already exists"). Clone into the per-job RUNNER_TEMP (cleaned each job) and
+          # make it idempotent with rm -rf, so the build is robust on both ephemeral (GitHub-hosted) and persistent
+          # (self-hosted) runners.
+          src="${RUNNER_TEMP:-/tmp}/snmp_exporter"
+          rm -rf "$src"
+          git clone --branch v0.30.1 --depth 1 https://github.com/prometheus/snmp_exporter "$src"
+          ( cd "$src/generator" && CGO_ENABLED=1 go build -o /usr/local/bin/snmp-generator . )
+
+      - name: Regenerate modules.generated.yml from generator.yml + the vendored MIBs
+        env:
+          KONTROLL_SNMP_GENERATOR: /usr/local/bin/snmp-generator
+        run: pip install --quiet pyyaml && python3 scripts/gen-snmp.py
+
+      - name: Assert the committed artifact byte-matches a fresh rebuild (no drift)
+        run: git diff --exit-code -- prometheus/exporters/snmp/modules.generated.yml
+
+  e2e:
+    name: e2e (GUI · Playwright headless)
+    runs-on: ${{ fromJSON(vars.KONTROLL_RUNS_ON || '"ubuntu-latest"') }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: tests/requirements-dev.txt
+
+      - name: Install test deps (incl. pytest-playwright)
+        run: pip install --quiet -r tests/requirements-dev.txt
+
+      - name: Install the Playwright chromium browser (+ OS deps)
+        run: python -m playwright install --with-deps chromium
+
+      - name: pytest (e2e — real Flask app booted in-process, service seams mocked, headless chromium)
+        run: pytest tests/e2e -m e2e -q

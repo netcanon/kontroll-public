@@ -1,0 +1,15 @@
+# Secret-onboarding FORM descriptor for the `acme` SOPS domain — the DNS-01 provider API token for the
+# OPTIONAL Caddy HTTPS ingress (instance/instance.yml frontend.tls_mode=acme). Only needed if you run that
+# mode. The domain file instance/secrets/acme.sops.yml is created on first save (create-if-missing). Fields
+# only; recipiency is base (control + break-glass) per /.sops.yaml.
+domain: acme
+label: ACME DNS-01 token (optional HTTPS ingress)
+description: The DNS provider API token Caddy uses for DNS-01 certificate issuance (only for frontend.tls_mode=acme).
+order: 50
+recipients: base
+fields:
+  - key: acme_dns_token
+    label: DNS provider API token
+    type: token
+    required: true
+    help: DNS provider API token (Cloudflare/etc.), scoped to the zone Caddy manages (read as KONTROLL_ACME_DNS_TOKEN).

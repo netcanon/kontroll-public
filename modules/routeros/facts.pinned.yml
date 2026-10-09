@@ -1,0 +1,14 @@
+# PINNED offline probe facts routeros was classified + capability-derived from (F2, north-star Rung 4). Re-deriving
+# the metrics:/logs: floor from these (scripts/gen-class-capabilities.py --check for an ENABLED class; the
+# frozen-oracle unit test while staged) is hermetic — no re-probe. The classify-SIGNAL surface only:
+# community.routeros ships a `cliconf` connection plugin (verified by a real probe of 3.21.0) → predicate.classify →
+# the `netcommon_cli` backend, which confers the full network-gear floor telemetry [snmp, blackbox] + logs
+# [syslog_push] → a MikroTik switch derives the SAME floor as a Cisco one (it genuinely speaks SSH/CLI + SNMP +
+# syslog). `module_options` stays {} (no vendor_config `_config`+backup module). `probed_at` is provenance, NOT read
+# by the derivation. A vendor/method churn shows as a diff HERE + in module.yml (reviewable, never silent rot).
+collection: community.routeros
+version: ">=3.0.0"
+plugins: {cliconf: [routeros]}
+modules: [command, facts]
+module_options: {}
+probed_at: "2026-07-01"

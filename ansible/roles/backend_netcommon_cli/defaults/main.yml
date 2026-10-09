@@ -1,0 +1,4 @@
+---
+# shared cross-role contract var — see roles/cisco_ios/defaults/main.yml for why
+# it carries no role-name prefix (the dispatcher + every class read one name).
+backup_capable: true  # noqa: var-naming[no-role-prefix]

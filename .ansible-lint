@@ -1,0 +1,36 @@
+# ansible-lint config — L1/L2 layer.
+# GRADUATION PLAN: stay 'moderate' while scaffolding; flip to 'safety' at the
+# Phase 2 exit (once device-class roles carry real logic worth the higher bar),
+# then 'shared' only if a role is ever published. See engineering-standards.md §1.
+profile: moderate
+
+exclude_paths:
+  - ansible/collections/
+  - tests/molecule/
+  - ansible/backups/
+  - ansible/roles/.role-template/   # a copy-me template, not a real role
+  - ansible/secrets/                # SOPS ciphertext — not human YAML, don't lint (legacy path, pre-move)
+  - instance/secrets/               # SOPS ciphertext (instance overlay) — not human YAML, don't lint
+  - instance.example/               # shipped overlay TEMPLATE — stub data, not ansible content
+  - ansible/backends/*/backend.yml  # classifier metadata (data, not ansible content)
+  - ansible/backends/*/recipes/     # per-API recipes (data consumed by backend_api)
+  - tests/e2e/                      # e2e onboarding fixture (test inventory)
+  - .github/                        # GitHub Actions workflows — not ansible content
+  - ansible/collections/            # generated requirements + installed collections (build artifacts)
+  - docker/vector/generated/        # gen-logging.py output (Vector fragments) — generated, not human YAML;
+                                    #   correctness is gated by `gen-logging --check` + `vector validate`
+  - prometheus/exporters/snmp/modules.generated.yml  # gen-snmp.py output (snmp_exporter if_mib) —
+                                    #   generated from public MIBs, not human YAML (long help: lines);
+                                    #   gated by `gen-snmp --check` + the CGO `snmp-modules` byte-gate
+
+# Roles are intentionally thin; some entrypoints are non-main (backup.yml)
+# invoked via include_role(tasks_from:). Don't flag those as "unused".
+kinds:
+  - playbook: "ansible/playbooks/*.yml"
+  - tasks: "ansible/roles/**/tasks/*.yml"
+
+# We require no_log on secret tasks by convention + the grep gate in validate;
+# keep the rule on as a reminder.
+enable_list:
+  - no-log-password
+  - no-changed-when

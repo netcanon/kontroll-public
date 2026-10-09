@@ -1,0 +1,208 @@
+"""Filesystem paths + shared constants for the kontroll service package.
+
+`ROOT` is the repo-root READ seam: the derived directory constants (`MODULES_DIR`, …) are
+bound once from the REAL tree at import, so loaders always read the real repo (read-only
+input) even when a test has repointed ROOT for a mutator. `write_root()` is the WRITE seam:
+where the file-mutating service functions write the instance-overlay propose tree + run git,
+read DYNAMICALLY (so the tmp_repo test fixture's `paths.ROOT` repoint still diverts writes).
+
+`write_root()` defaults to `ROOT` — so the CLI, the tests, and the legacy `/repo`-clone deploy
+are byte-for-byte unchanged (WRITE_ROOT == ROOT is the identity). A Phase-B BAKED deploy sets
+`KONTROLL_WRITE_ROOT=/propose` so the read-only image code tree at ROOT is never written: the
+immutable code + data registries are read from the baked ROOT, while every write + git op
+targets the thin propose clone (docs/reviews/2026-06-29-phase-b-baked-code/99-synthesis.md §0).
+Lifted from the old galaxy.py module-level constants, now in one place every module imports.
+"""
+import os
+
+# scripts/kontroll/paths.py -> scripts/kontroll -> scripts -> repo root (three dirnames).
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+MODULES_DIR = os.path.join(ROOT, "modules")        # modules/<key>/module.yml — the SHIPPED device-class registry
+VECTORS_DIR = os.path.join(ROOT, "vectors")
+TELEMETRY_DIR = os.path.join(ROOT, "telemetry")   # telemetry/<method>.yml — the ingestion-protocol registry
+DASHBOARD_LOCKS_DIR = os.path.join(ROOT, "dashboards", "derived")   # dashboards/derived/<method>.lock.yml — the Rung-4a derived-board pins (gen-dashboard-floor)
+LOGGING_DIR = os.path.join(ROOT, "logging")       # logging/<method>.yml — the log-source/export registry (gen-logging)
+DISCOVERY_DIR = os.path.join(ROOT, "discovery")   # discovery/<method>.yml — the passive lease-source registry (kontroll-discover)
+OUI_DIR = os.path.join(ROOT, "oui")               # oui/oui-lookup.generated.json — the pinned IEEE OUI->vendor lookup (gen-oui; ROOT-bound read registry, display-only)
+CAPABILITIES_DIR = os.path.join(ROOT, "capabilities")   # capabilities/<cap>.yml — the secondary-capability registry
+SECRET_FORMS_DIR = os.path.join(ROOT, "secret-forms")   # secret-forms/<domain>.yml — secret-onboarding FORM schemas (NOT secrets)
+KEY_ROLES_DIR = os.path.join(ROOT, "key-roles")         # key-roles/<role>.yml — keygen role schemas (NOT key material)
+SETTINGS_DIR = os.path.join(ROOT, "settings")           # settings/<area>.yml — reconfigure knob METADATA (severity/blast_radius), NOT instance config
+# NOTE: the SOPS-encrypted values (ansible/secrets/<domain>.sops.yml) and the recipiency rules (.sops.yaml) are
+# INSTANCE config that moves into the `instance/` overlay — resolve them via resolve()/overlay_rel()/overlay_target
+# below, NEVER a static ROOT-bound constant (a constant would silently read the legacy location post-move).
+BACKENDS_DIR = os.path.join(ROOT, "ansible", "backends")
+RECIPES_DIR = os.path.join(BACKENDS_DIR, "api", "recipes")
+OVERRIDES_DIR = os.path.join(ROOT, "overrides")
+MATRIX_CACHE = os.path.join(ROOT, "capability-matrix.generated.json")
+GALAXY = "https://galaxy.ansible.com/api/v3/plugin/ansible"
+PLUGIN_TYPES = ["cliconf", "httpapi", "netconf", "connection"]
+TICK, CROSS, QMARK = "✓", "✗", "?"
+MARKS = {"yes": TICK, "no": CROSS, "maybe": QMARK}
+
+
+def write_root():
+    """The WRITE root — where mutators write the instance-overlay propose tree + run git, DISTINCT from ROOT (the
+    read root for the immutable code + data registries). Read dynamically (like the legacy `paths.ROOT` reads) so a
+    test that repoints `paths.ROOT` (the tmp_repo fixture + ~25 unit-test sites) still diverts writes to the
+    throwaway tree. Defaults to ROOT, so with `KONTROLL_WRITE_ROOT` UNSET — the CLI, the tests, and the legacy
+    `/repo`-clone deploy — every write is byte-for-byte identical (the zero-behaviour-change identity). A Phase-B
+    BAKED deploy sets `KONTROLL_WRITE_ROOT=/propose`: ROOT is the read-only baked image tree (`/opt/kontroll`) the
+    mutators must NEVER write, and write_root() is the thin propose clone that carries the operator-mutable
+    `instance/` overlay + the C10 git remote. Design-of-record: docs/reviews/2026-06-29-phase-b-baked-code/."""
+    return os.environ.get("KONTROLL_WRITE_ROOT") or ROOT
+
+
+# --- Instance-overlay resolution (genericization arc, Decision A: a dedicated `instance/` dir) ----------------
+# The TOOL ships generic stubs at the legacy in-tree paths; a given instance's REAL config (its inventory,
+# secrets, .sops.yaml recipients, fleet selection, instance.yml) lives in a private, gitignored `instance/`
+# overlay. Readers go through resolve()/overlay_rel(): the overlay file shadows the shipped stub when present,
+# else the legacy path is used. PER-FILE fallback — a half-populated overlay still reads each missing file from
+# its legacy location. With NO overlay file present (today), these are the IDENTITY on every mapped path: the
+# zero-behavior-change invariant the Phase-2 step-(i) repoint relies on. Full plan: local/genericization-plan.md;
+# refactor surface + the two ⚠ couplings: local/genericization-manifest.md §4.
+INSTANCE_DIR_NAME = "instance"
+EXAMPLE_DIR_NAME = "instance.example"   # the SHIPPED placeholder overlay (TEST-NET addrs, one fake recipient)
+
+# Legacy ROOT-relative path -> overlay equivalent. Matched exactly OR as a directory prefix
+# (ansible/secrets/network.sops.yml -> instance/secrets/network.sops.yml). Inventory + secrets keep their
+# RELATIVE arrangement inside the overlay so ansible's `inventory_dir/../secrets` lookup and the group_vars
+# SOPS vars-plugin still resolve (manifest §4, coupling 2).
+_OVERLAY_MAP = (
+    ("config/fleet.yml", "instance/fleet.yml"),
+    ("config/instance.yml", "instance/instance.yml"),
+    (".sops.yaml", "instance/.sops.yaml"),
+    ("ansible/inventory", "instance/inventory"),
+    ("ansible/secrets", "instance/secrets"),
+    # actuation/<key>/unit.yml — the app-store unit registry (R2). A unit is an INSTANCE-specific operator choice
+    # (a chosen, version-pinned install) staged by the GUI + promoted; it lives in the private overlay (stripped
+    # from the public tree by make-bundle.sh's instance/ strip). The shipped tree's `actuation/` carries only the
+    # schema README, so resolve("actuation") is the empty legacy dir until the first unit is promoted into instance/.
+    ("actuation", "instance/actuation"),
+)
+
+
+def _overlay_of(rel):
+    """The overlay equivalent of a legacy ROOT-relative path, or None if the path is not instance config."""
+    rel = rel.replace(os.sep, "/")
+    for legacy, overlay in _OVERLAY_MAP:
+        if rel == legacy:
+            return overlay
+        if rel.startswith(legacy + "/"):
+            return overlay + rel[len(legacy):]
+    return None
+
+
+def overlay_rel(rel):
+    """Resolve a legacy ROOT-relative instance path to the overlay location when that file is present, else the
+    legacy path — returned ROOT-relative (posix). The instance overlay lives in the WRITE root (the propose clone),
+    so the existence check + every overlay-mapped resolution is against `write_root()` (read DYNAMICALLY — the
+    tmp_repo fixture's repoint diverts it; a BAKED deploy points it at the clone, never the read-only image). Only
+    overlay-mapped instance paths route through here; the data registries are read via the ROOT-bound `*_DIR`
+    constants (V1 §2.3 — the two seams are non-overlapping). Used for strings that must stay overlay-relative (e.g.
+    the sops --filename-override that must match a .sops.yaml path_regex)."""
+    overlay = _overlay_of(rel)
+    if overlay is not None and os.path.exists(os.path.join(write_root(), overlay)):
+        return overlay
+    return rel.replace(os.sep, "/")
+
+
+def _example_rel(rel):
+    """The shipped-example equivalent of a legacy instance path (config/fleet.yml -> instance.example/fleet.yml),
+    or None for a non-instance path."""
+    overlay = _overlay_of(rel)
+    if overlay is None:
+        return None
+    return EXAMPLE_DIR_NAME + overlay[len(INSTANCE_DIR_NAME):]
+
+
+def resolve(rel, write=False):
+    """overlay_rel() as an ABSOLUTE path under the WRITE root — the form file readers of INSTANCE-overlay config
+    want (the live `instance/` lives in the propose clone, not the baked image). Safe to hand to a `_load(rel)` that
+    prepends a root (os.path.join drops the redundant root when the second arg is absolute). For registry paths use
+    the `*_DIR` constants (ROOT), never resolve() — resolve() is the instance-overlay seam (write_root).
+
+    THIRD TIER — the shipped example (public-checkout floor, genericization Phase 5): on a tree that has NO
+    `instance/` overlay dir at all (a public clone, a CI checkout, a node before `kontroll-init --fresh`) AND no
+    legacy in-tree file either, a READ of a mapped instance path falls through to the shipped
+    `instance.example/` placeholder under ROOT — so the generators' `--check` gates, the service readers and the
+    test suite run against TEST-NET example data instead of dying on a missing file. The fallback is deliberately
+    NARROW: it never applies once an `instance/` dir exists (a configured node that lost a file still fails loud,
+    exactly as before), it never rewrites `overlay_rel()` (the STAGED/git-add path string, which must never name
+    the example), and `write=True` disables it entirely — every writer (keygen's .sops.yaml, onboard's
+    enable_in_fleet, kontroll-init's personalize) passes it, so the shipped example can never become a write target
+    (tests/unit/test_paths_overlay.py pins all three properties)."""
+    r = overlay_rel(rel)
+    if not write and r == rel.replace(os.sep, "/"):               # no overlay file shadows it
+        example = _example_rel(rel)
+        if (example is not None
+                and not os.path.isdir(os.path.join(write_root(), INSTANCE_DIR_NAME))   # an UNCONFIGURED tree only
+                and not os.path.exists(os.path.join(write_root(), r))                 # and no legacy file either
+                and os.path.exists(os.path.join(ROOT, example))):                      # and the example ships it
+            return os.path.join(ROOT, example)
+    return os.path.join(write_root(), r)
+
+
+def overlay_target(rel):
+    """The WRITE location for a file that may NOT exist yet — overlay_rel is file-existence based and would send a
+    brand-new file to the legacy path; this is DIR-active based: prefer the overlay when the `instance/` overlay is
+    present (the instance/ dir exists in the WRITE root), else legacy. Returns ROOT-relative (posix). Use it for
+    new-file writes (a drop-in inventory host, a new/rewritten secret domain) AND for the matching git-add path, so
+    the write target and the staged path always AGREE (the C10 staging invariant). The instance/ check is against
+    `write_root()` (the propose clone holds the overlay). With NO instance/ dir (today / WRITE_ROOT==ROOT) it is
+    identical to legacy on every mapped path — the same zero-behavior-change guarantee as resolve()."""
+    overlay = _overlay_of(rel)
+    if overlay is not None and os.path.isdir(os.path.join(write_root(), INSTANCE_DIR_NAME)):
+        return overlay
+    return rel.replace(os.sep, "/")
+
+
+# --- The modules registry overlay (Phase-B Fork B, synthesis §2) -------------------------------------------------
+# `modules/` is the ONE registry that grows with operator action (onboarding a new device-class) and is EDITED in
+# place (reconfigure of a shipped class's identity/telemetry/logging/backup blocks). So unlike the other read-only
+# `*_DIR` registries (vectors/telemetry/logging/…, which stay ROOT-bound), the runtime service readers resolve a
+# module file through this overlay: the WRITE-mutable clone (write_root) SHADOWS the immutable baked ROOT. A SHIPPED
+# class is baked read-only into the image at ROOT; an operator-ONBOARDED class (and any reconfigured shipped one)
+# lives in the propose clone, so the clone copy wins when present. The DECISION (D1, ratified by the catalog-reader
+# trace): operator classes land in the canonical's `modules/`, NOT instance/modules — so the deploy-time generators
+# (gen-requirements et al.) keep reading `modules/` off the canonical clone with ZERO change, and this overlay is
+# confined to the baked runtime readers. With write_root()==ROOT (CLI/tests/legacy `/repo` deploy) both helpers are
+# byte-for-byte the plain ROOT join — the zero-behaviour-change identity.
+
+def module_file(key):
+    """Absolute path to `modules/<key>/module.yml` (the device-class descriptor) — the clone (write_root) shadows
+    the baked ROOT, so an operator-onboarded/reconfigured class in the propose clone is read in preference to a
+    pristine SHIPPED class baked at ROOT. The runtime-reader analogue of resolve() for the modules registry. With
+    write_root()==ROOT this == os.path.join(ROOT, "modules", key, "module.yml") (identity)."""
+    clone = os.path.join(write_root(), "modules", key, "module.yml")
+    if os.path.exists(clone):
+        return clone
+    return os.path.join(ROOT, "modules", key, "module.yml")
+
+
+def module_keys():
+    """Sorted device-class keys across BOTH module roots — pristine SHIPPED classes baked at ROOT plus operator-
+    onboarded/reconfigured ones in the write_root clone (deduped; the clone shadows ROOT on a shared key). The scan
+    analogue of module_file() for the one runtime reader that ENUMERATES classes (catalog.module_for_collection).
+    With write_root()==ROOT this is just sorted(os.listdir(ROOT/modules))."""
+    keys = set()
+    for base in (os.path.join(ROOT, "modules"), os.path.join(write_root(), "modules")):
+        if os.path.isdir(base):
+            keys.update(os.listdir(base))
+    return sorted(keys)
+
+
+def _cli(argv):
+    """Tiny CLI so a NON-Python caller (ansible/playbooks/deploy-stack.yml) can resolve an instance-overlay path
+    through the SAME seam the service layer uses: `python3 scripts/kontroll/paths.py resolve ansible/secrets` prints
+    the absolute overlay (or legacy) dir. This keeps deploy-stack's secret READ path identical to the GUI
+    onboarding WRITE path (secrets.py overlay_target) — no hardcoded `instance/secrets` that could silently drift
+    from the overlay map under a relocation. resolve() is existence-based, matching secrets.py's read (L31)."""
+    if len(argv) == 2 and argv[0] == "resolve":
+        return resolve(argv[1])
+    raise SystemExit("usage: paths.py resolve <root-relative-path>")
+
+
+if __name__ == "__main__":
+    import sys
+    print(_cli(sys.argv[1:]))

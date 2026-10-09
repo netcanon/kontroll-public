@@ -1,0 +1,8 @@
+# config.d/transforms/internal_journald.yaml  → transform id "internal_journald_shape".
+type: remap
+inputs: [internal_journald]
+source: |
+  .source = "internal"
+  .service = string(._SYSTEMD_UNIT) ?? "host"              # e.g. docker.service, sshd.service
+  .host = string(.host) ?? string(._HOSTNAME) ?? "control-vm"
+  .level = to_syslog_level(to_int(.PRIORITY) ?? 6) ?? "info"

@@ -1,0 +1,1256 @@
+# kontroll — Security Architecture
+
+Security model, threat assumptions, implemented controls, and accepted risks for
+the control plane. Modeled on the NetConfig project's SECURITY.md. **Update this
+document whenever a security-relevant change is made** (triggers in the last
+section).
+
+> Status (as of Phase 1, 2026-06-13): secrets-at-rest wiring (age key + `.sops.yaml`
+> recipient) and repo hygiene are in place; device-credential files are pending.
+> Rows are marked ⬚ planned / ◑ partial / ✔ implemented. Each control names the
+> file that implements it and the check that proves it — security claims without
+> a covering check are not claims.
+
+---
+
+## Reporting a vulnerability
+
+Report security issues **privately** through GitHub's private vulnerability reporting for this
+repository (*Security → Report a vulnerability*, which opens a draft advisory only the
+maintainers can read). Never open a public issue or pull request for a vulnerability. You
+will get an acknowledgement within a few days; fixes ship as a normal release with a credit
+in `CHANGELOG.md` unless you ask otherwise. Supported: the current `main` and the latest
+`v*` release. Out of scope: the managed devices and third-party images themselves (report
+those upstream), and findings that require an already-compromised control node.
+
+---
+
+## Threat model
+
+kontroll is a **single-user homelab control plane** running on a dedicated VM on
+the Proxmox cluster, on the management VLAN. It holds standing credentials
+to every managed device — so **encryption at rest is mandatory here.**
+
+| Actor | Trust level |
+|---|---|
+| The operator (you) on the control VM | Fully trusted |
+| Other hosts on the mgmt VLAN | Semi-trusted — reachable, but not granted control creds |
+| Hosts on the other VLANs | Untrusted toward the control plane; reached only outbound, scoped |
+| WAN / Internet | Out of scope — the control plane is never WAN-exposed |
+
+---
+
+## Controls
+
+### C1 — Secrets encrypted at rest (SOPS + age)  ◑ partial
+
+**Implements:** `.sops.yaml` (real control-VM recipient + per-domain rules), age
+key on the control VM, and the live secret files `instance/secrets/network.sops.yml`
++ `proxmox.sops.yml` (SOPS/age-encrypted, committed).
+**Proves:** `tests/validate` refuses to pass if a file under `instance/secrets/`
+is not SOPS-encrypted; `.gitignore` blocks the age key.
+**Break-glass:** every secret is encrypted to **two** age recipients — the
+control-VM operational key and an **offline break-glass recovery key** (private
+half stored off-machine, never on the VM or in the repo). Either decrypts; losing
+the VM key is recoverable, not catastrophic (SETUP.md §5).
+**Pending:** the `compute` (docker SSH), `dashboards`, and `semaphore` secret files.
+
+Device passwords, API tokens, and service secrets are **never written to the
+repo in plaintext**. They are encrypted with the control VM's age key (recipient
+in `.sops.yaml`) and decrypted at runtime in memory via the `community.sops`
+vars plugin. One file per domain (network / proxmox / dashboards / semaphore / acme).
+
+**Key management:** the age private key lives only at
+`~/.config/sops/age/keys.txt` (mode 600) on the control VM, is **never
+committed**. Losing it is **recoverable** via the offline break-glass key (every
+secret is encrypted to both recipients), so it is no longer a single point of
+total loss. This is the analog of NetConfig's
+OS-keyring Fernet key, with a different mechanism (documented choice, PLAN.md §7).
+
+### C2 — Secrets never logged  ⬚ planned
+
+**Implements:** `no_log: true` on every Ansible task handling a credential or
+decrypted value; `ansible.cfg` `log_path`.
+**Proves:** a grep gate in `tests/validate` flags secret-handling modules
+(`*_command`, `uri`, `*_token` vars) lacking `no_log`. Mirrors NetConfig's
+`test_logging_config.py` "credentials are never logged" guarantee.
+
+Scheduled jobs never run at `-vvvv` (can echo secrets despite `no_log`).
+
+### C3 — Least-privilege network reachability  ⬚ planned
+
+**Implements:** edge-firewall rules allowing the control VM (mgmt VLAN)
+→ specific service ports on the server VLAN and the AP on the AP VLAN. **Scoped, not
+any/any.**
+**Proves:** documented in `docs/bootstrap-control-vm.md` §7; verified by an L3
+smoke probe (only intended ports reachable). The compose layer enforces it too:
+every published port binds `${KONTROLL_MGMT_IP}` (fail-closed `:?`, rendered from
+`instance/instance.yml`), checked by `tests/check-mgmt-port-binding.py` in
+`validate` — never `0.0.0.0` (the NPM-fronted homepage/Semaphore UIs excepted).
+
+The control plane is **never bound to WAN** and is published internally only,
+behind NPM at `control.${KONTROLL_DOMAIN}`.
+
+The **homepage `:3000` all-interfaces bind is the documented NPM-fronted exception**:
+Homepage is an *unauthenticated, read-only, no-actuation* tile board carrying no
+secret in its served config — the rationale + the "keep `:3000` on the mgmt VLAN"
+caveat live in [instance.example/dashboards/homepage/README.md](../instance.example/dashboards/homepage/README.md).
+The boundary is enforced at the NPM/firewall layer, never the container bind. No new
+control row — no trust boundary moves and the served YAML stays secret-free.
+
+### C4 — Blast-radius / access-chain gating on changes  ◑ partial
+
+**Implements:** access-chain header on every state-changing play (CLAUDE.md);
+`--check --diff` before live; `risky` tag on path-severing plays.
+**Proves:** review checklist + the header convention; per-class console fallbacks
+(MAC-Winbox, HDMI console) documented in each role README.
+
+Defence in depth against locking yourself out of the very device carrying your
+session — the runbook discipline, applied to automation.
+
+### C5 — Graceful degradation (fail soft on load, fail closed on secrets)  ✔ implemented (pattern)
+
+**Implements:** `ignore_unreachable: true` on fleet plays (`playbooks/*.yml`);
+a missing/invalid secret aborts the run.
+**Proves:** `backup-configs.yml`'s `ignore_unreachable` tolerates a down host and
+`ping.yml`'s TCP-probe block/rescue reports it honestly (no false "ok"); SOPS
+decryption failure raises, never silently continues with an empty secret.
+
+Same availability/safety split NetConfig uses: one bad *definition* warns and
+skips; a bad *secret* stops the world.
+
+### C6 — Repo hygiene  ✔ implemented
+
+**Implements:** `.gitignore` (keys, `.env`, decrypted outputs, runtime data),
+`.gitattributes` (LF); **`gitleaks`** deep secret scan in `tests/validate` + a
+`pre-commit` hook (`.gitleaks.toml` allowlists SOPS ciphertext + the gitignored
+`local/`; a custom rule always catches an `AGE-SECRET-KEY`). **`zizmor`** statically
+audits the GitHub Actions workflows for supply-chain anti-patterns
+(`.github/workflows/zizmor.yml`, advisory; the hybrid action-pinning policy
+`.github/zizmor.yml` forces SHA-pins on third-party actions); every CI checkout sets
+`persist-credentials: false`.
+**Proves:** `tests/validate` fails on any plaintext key/credential in a committable
+file (verified: a planted age key is caught); `git status` clean of secret artifacts.
+
+---
+
+### C7 — Git access is least-privilege, per-repo  ✔ implemented
+
+The control VM's outbound git access is scoped so **no remote repo can be written
+except where explicitly intended, and a leaked credential reaches only one repo.**
+Every GitHub credential is an SSH **deploy key** (cryptographically bound to a single
+repository — not an account-scoped token), pinned with `IdentitiesOnly yes` so each
+remote offers only its own key.
+
+| Remote (VM working tree) | Repo | Key | Access |
+|---|---|---|---|
+| `origin` | `netcanon/kontroll` (product code) | `~/.ssh/kontroll_deploy` | **read-only** (cannot write) |
+| `local` | `/srv/kontroll.git` (the instance canonical) | n/a (local file) | the source of truth |
+| `backup` | `netcanon/kontroll-prod-test` (optional offsite DR) | `~/.ssh/kontroll_backup_deploy` | **write, this repo ONLY** |
+
+**Implements:** per-repo deploy keys + `~/.ssh/config` host aliases with
+`IdentitiesOnly yes`; private keys are generated on the VM and never leave it.
+**Proves (verified):** `ssh -T git@github-backup` → "Hi netcanon/kontroll-prod-test!"
+(the backup key authenticates only as that repo); the same key against
+`git@github.com:netcanon/kontroll` → **denied** ("Repository not found"). The instance
+operates entirely from the `local` canonical, so even read-access to `origin` is
+optional (developer code-sync only — `scripts/update.sh`). Offsite backup is opt-in
+(`scripts/backup.sh`); the encrypted secrets are safe to host, the age keys never leave.
+
+---
+
+### C8 — Local state at rest is the trust boundary  ◑ partial
+
+Since the *instance* (not GitHub) is the source of truth, the local state **is** the
+crown jewel — protect it where it lives, not at a remote.
+
+**Implements:**
+- Secrets are **SOPS-encrypted** wherever state flows — the canonical repo, the offsite
+  backup, the DR snapshot, and the install bundle all carry only ciphertext (C1). The
+  age key is on the VM + offline break-glass, never in any of those artifacts.
+- The local canonical (`/srv/kontroll.git`) is operator-owned; the runner mounts it
+  **read-only**; the secret captures (`/var/lib/kontroll/backups`) are `0700`/uid-1001.
+- **Retention pruning stays inside this boundary (#125).** The capture-history prune (`backup-configs.yml`)
+  rewrites the commit graph of the **same** `0700`/uid-1001 captures dir to enforce a finite
+  `kontroll_backup_retention` window. It is **fail-closed**: it runs only when a finite window is set
+  (`keep-all`/undefined ⇒ no-op) and refuses unless the target is a **non-bare git worktree at
+  `config_backup_dir` with NO git remote** that is **not** `/srv/kontroll.git` and has no root `CLAUDE.md`. The
+  **load-bearing distinguisher is the no-remote check** — the captures repo never has a remote; the canonical AND
+  the deploy tree both do (the deploy tree is caught by this leg, since a clone always has a remote). The
+  **canonical** is additionally excluded several independent ways (bare-repo check, `rev-parse` rc, `.git` stat,
+  path regex). So a wrong-repo history rewrite of the source of truth is designed out — verified by an adversarial
+  review that ran the prune against a symlinked canonical, the bare canonical, and the deploy tree and could not
+  reach a rewrite. It touches **commit metadata/trees only, never prints capture content** (no secret logged), and
+  the reclaimed history is **local-only with no remote/offsite copy** — pruning it moves **no trust boundary** and
+  the C10 canonical's `denyNonFastForwards` posture is untouched. **Accepted residual:** a per-class snapshot
+  commit from a *concurrent* backup run could be orphaned by the rewrite and reclaimed — bounded to one historical
+  diff point on local-only ephemeral data (never the canonical, never the current capture, which the next run
+  re-captures), serialized prune-vs-prune by an mkdir lock and mitigated by the staggered crons. Pinned by
+  `tests/unit/test_backup_prune.py` (the fail-closed guard + `--check` safety + behavioral tmp-repo tests covering
+  pre-cutoff drop, idempotency, all-older, and crash-recovery stale-ref cleanup).
+- The at-rest stores are **relocatable** (`KONTROLL_STORAGE_ROOT` + per-class overrides — put logs/backups on a
+  data disk) but the **uid/0750 chown FOLLOWS the path**: one `.env` var feeds BOTH the compose bind source AND
+  the deploy-stack chown task, which runs **before** `up` — so a relocated store is created operator-/uid-scoped,
+  never a Docker-auto-created `root:root 0755` (world-readable) bind. Enforced fail-closed by
+  **`tests/check-storage-chown.py`** (a bind source with no uid-scoped provisioner fails CI — the G9 guard); the
+  same change **closed two pre-existing holes** (the onboard-gui `age.key` gained a fail-closed absence guard, the
+  `caddy/` dir gained an owner/group). An empty/`/` root is rejected by a deploy-stack assert.
+- `scripts/make-bundle.sh` strips the **entire `instance/` overlay** (recipients, all `*.sops.yml`,
+  inventory IPs, fleet, dashboards) + the internal `docs/reviews/` snapshots, shipping only the
+  `instance.example/` stub; `scripts/state-snapshot.sh` excludes the age key by design — a leaked
+  bundle/snapshot **decrypts nothing** and names no recipient. (Pinned by `tests/integration/test_make_bundle.py`.)
+- The state boundary is explicit + machine-checked-able (`config/state-manifest.yml`),
+  so backup/DR cover exactly the state and nothing leaks code/secrets unintentionally.
+
+The **onboarding GUI is privileged** (writes the working tree, encrypts secrets, runs
+Ansible) and is now guarded: **HTTP Basic auth, fail-closed** (refuses to start without
+`GUI_PASSWORD`, constant-time compare, password from SOPS), **TLS** (`GUI_TLS_CERT/KEY`),
+and an **audit log** of every action + auth-denial (no creds). Verified: no-auth → 401,
+HTTP→HTTPS-port refused, wrong password → 401, denials logged.
+
+**Residual (tracked):** the GUI uses a **self-signed** cert + no SSO/rate-limiting — fine
+mgmt-only, but front it with a CA cert + SSO before any wider exposure. Inventory IPs
+travel **plaintext** in backups/snapshots — keep those artifacts on trusted media.
+
+---
+
+### C9 — The onboarding API is a privileged surface  ◑ partial
+
+The typed API (`api/`) is the second privileged surface: it can rebuild the capability
+cache, declare capture-exceptions, **commit + push the local canonical**, run the full
+**onboard** mutation (module + drop-in host + fleet-enable + creds→SOPS, dry-run by default), and —
+since Capability-track Phase 7 — the **secondary-capability promote** (`POST /capability/{cap}`,
+audited `capability-promote`): a propose-then-promote, plan-hash-gated, data-only write of a capability
+block (telemetry today) committed to **only the plan's scoped paths**, carrying **no credential** (the
+chosen exporter's creds stay SOPS; the audit logs the secret-domain NAME only). The whole
+`/capability/<cap>` prefix is privileged — a registry-parametrized tripwire (`test_api_ratelimit`) keeps
+any future capability route inside the token budget. It is guarded like the GUI (C8), extended for a
+token-auth service.
+
+**Self-describing onboard credentials (F1) — domain confinement.** The onboard form's credential fields are
+DERIVED per-backend from each backend's declared `auth:` shape (`scripts/kontroll/authspec.py` — a `network_cli`
+device gets SSH login, a REST device a token), replacing the static 4-field union with one data-driven loop. The
+field DESCRIPTORS are pure schema (names/kinds, **never values** — the same no-leak posture as the rest of the
+onboard plan: values transit `creds_to_set` in memory → the stdin-only SOPS write, MF-3). Because the mapping is now
+data-driven, a **domain-confinement guard** (`build_onboard_plan`, MF-S2) refuses — loudly, catchably, BEFORE any
+`creds_to_set` write — any derived SECRET field stamped for a SOPS domain other than the one the onboard targets, so
+a malformed/adversarial descriptor can never smuggle a secret into a domain the operator didn't choose (the hardcoded
+if-ladder couldn't cross domains; a data-driven loop could, so the invariant is now enforced in code, not by
+convention). Pinned by `test_onboard_ssh_key.py::test_domain_confinement_refuses_a_cross_domain_secret`. The GUI
+half (Rung 0a-2) renders these derived fields from a new READ-ONLY route (`GET /onboard/cred-fields`, mirrored on
+the typed API + the in-process GUI) and from the dry-run plan's `cred_fields`; both surfaces project every
+descriptor through `authspec.public_descriptor`, a closed-key whitelist that drops any value-shaped key, so the
+field SHAPE on the wire stays **names-only** even if a descriptor ever grew a value (belt-and-braces, not just
+convention). The read route is auth-gated under the privileged onboard prefix and writes nothing (never gates
+onboarding, INVARIANT D*). Pinned by the no-value-on-the-wire asserts in `test_api_onboard.py`/`test_gui_api.py` +
+`test_authspec.py::test_public_descriptor_projects_only_schema_keys_drops_anything_else`.
+
+*Rung 1 — coherent `auth_set` + `shared` domain creds (seam S1).* A curated class may declare its own `auth:` block
+(a multi-field `auth_set`, e.g. proxmox's API token user/id/secret) that wins on the reuse path. A field marked
+`shared: true` is a DOMAIN-level credential — stored FLAT under its `sops_stem` (not host-keyed), so one read-only
+service token serves the whole domain (the pve-exporter's `secret_env_map`). This is **still domain-confined**: the
+field's `domain` is stamped from the class's `secrets_domain` and the SAME MF-S2 guard refuses any cross-domain
+secret before a write; `shared` only changes the KEY shape (flat vs `<host>_`-prefixed) within the chosen domain,
+never which domain. The planner additionally refuses a **partially-filled** required `auth_set` (a half credential is
+catchable-rejected, never silently stored) while a values-free dry-run still plans. No `ansible-doc` introspection is
+added (config-as-data only; the argspec tier is Rung 3). Pinned by `test_onboard_proxmox_auth.py` (flat-keying +
+coherence + dry-run) and `test_authspec.py::test_proxmox_shared_sops_stems_match_the_pve_exporter_secret_env_map`.
+
+*Rung 3 — TIER-B argument_spec introspection (`deep`), with two hardening gates.* When `deep`, `authspec.
+auth_fields_from_argspec` reads the connecting module's `argument_spec` via `ansible-doc -j` and derives the EXACT
+credential fields (proxmox's coherent `api_user`+`api_token_id`+`api_token_secret`, not a generic single-token box).
+Two adversary-driven gates (design record: `docs/reviews/2026-06-29-north-star-onboard/99-synthesis.md`):
+- **MF-S1 — install-confinement, FAIL-CLOSED.** `ansible-doc -j` imports the collection's Python (code execution).
+  This is **not a new exposure** — `deep_probe` already runs `ansible-doc -j` on every deep search, and the trust
+  boundary is the **install** (already gated by the never-brick L2b recorded-sha256 floor, C15-a). TIER-B introspects
+  only the SAME already-installed collections. The `coll in local_installed()` check is a fail-closed invariant
+  **inside `auth_fields_from_argspec`, before any `ansible-doc` call**, so no future caller (e.g. a "sharpen a
+  Galaxy result" path) can bypass it into executing an **un-installed** collection's Python. TIER-B is never reached
+  for a Galaxy result — an un-installed collection stays on the coarse TIER-A shape at zero code-execution cost.
+  Pinned by `test_authspec.py::test_tier_b_install_confined_never_introspects_an_uninstalled_collection_mf_s1`
+  (asserts the `ad` seam is **never called** when the collection is absent).
+- **MF-S6 — mask-ambiguous, FAIL-SAFE.** `ansible-doc`'s `no_log` is not a complete secret oracle (a module can set
+  `no_log` only in code). A genuinely-ambiguous derived field (no `no_log`, no secret-class name, but a required
+  member of an auth-bearing module) defaults to **masked/secret**, never plaintext — masking a non-secret is
+  harmless; plaintexting a missed secret is a leak. Pinned by
+  `test_authspec.py::test_tier_b_masks_a_genuinely_ambiguous_required_field_mf_s6`.
+
+TIER-B changes only WHICH fields are offered — the descriptors stay pure schema (the same `public_descriptor`
+names-only wire projection), MF-S2 domain-confinement still stamps + checks every field's `domain`, and any miss
+(un-installed / flaky `ansible-doc` / ambiguous) degrades to the TIER-A shape, never a blocked onboard (INVARIANT
+D*). No new value-bearing surface, no new install path, no new network call.
+
+**Self-describing capability FLOOR (F2 de-bespoke) — creds-free auto-derivation (MF-S5).** A blind onboard now
+AUTO-DERIVES the universal monitoring/logging floor (snmp + blackbox metrics, syslog logs) from each backend's
+`confers.telemetry`/`confers.logs`, written into the new module (`classify.derive_class_capabilities`). The
+security invariant: **a method is auto-derivable only if it needs no PER-CLASS secret** — its `secret_domain` is
+null/absent, OR it reuses one of the closed `classify.SHARED_DERIVABLE_SECRET_DOMAINS` (today just
+`snmp_observability` — the SNMPv3 USM creds provisioned ONCE for the whole fleet, control + break-glass, READ-ONLY
+GET, never actuation). A method with a per-class secret (`pve`→proxmox, `rest_pull`→its own token) is NEVER in a
+confer list, so it can never be silently auto-attached to a blind device with an unfilled credential (the never-fake
+invariant, enforced in `_is_creds_free_to_derive`, not just by convention). The derivation is PURE/offline (no
+network at generate time, BRICK-1) and best-effort (a bug degrades to no floor, never a failed onboard). Pinned by
+`test_derive_class_capabilities.py` (`test_every_conferred_method_is_creds_free_to_derive` +
+`test_vendor_narrow_credentialed_method_is_never_faked_but_named_in_the_gap`).
+
+**Derived dashboard FLOOR (Rung 4a) — even the board id is derived, and the derive tier is out-of-band.** A telemetry
+method carries a `derive_dashboard:` SELECTOR (a search query + datasource + a required series, NOT an id);
+`scripts/gen-dashboard-floor.py --resolve` derives the grafana.com board from the parseable public registry and PINS
+`{id, revision, content_sha256}` into `dashboards/derived/<method>.lock.yml`. Unlike the metrics/logs floor (a
+pure-offline derivation), a board id is derived over the network — so the security posture is the **BRICK-1 split**,
+not offline-purity: **(a)** `--resolve` is an OPERATOR / control-VM tier — egress-only to grafana.com, **no
+credential** (community boards are public), never run in CI/deploy (a `validate.sh` static gate greps it out of
+`deploy-stack.yml` + the workflows; pinned by `test_resolve_is_absent_from_the_install_gating_path`); **(b)** the
+install-gating leg is `--check`, **hermetic** — it re-hashes the committed board against the lock's `content_sha256`
+(the offline tamper floor) + re-greps the pinned board for its `requires_series` (the series-fit honesty guard) with
+**no network** (pinned by `test_check_is_offline`). A board is emitted only if it queries the method's series (the
+never-fake invariant, `resolve_method`'s series-fit fall-through), and a board SWAP is loud (MF-5). The pinned board
+JSON carries no id (`pin_datasource` nulls it) and no instance data (a public dashboard); P-1 clean. **Wiring (Rung
+4a-2):** a `derived: true` class's `dashboards:` block is emitted from these locks by `classify._derive_dashboards`
+and owned by `gen-class-capabilities --check` (a 3rd drift-gated capability). **INVARIANT-D:** the onboard path
+writes the offline creds-free metrics/logs floor but **NOT** a `dashboards:` block (a board rides the out-of-band
+locks, not the onboard write surface) — its write blast-radius is unchanged; a blind onboard's board is re-derived by
+the operator, and the honest `capability_gap` names an unresolved selector.
+
+**Implements:**
+- **Bearer-token auth, fail-closed.** Privileged routes require `KONTROLL_API_TOKEN`
+  (SOPS-backed at deploy, like `GUI_PASSWORD`); **unset ⇒ the privileged routes are disabled
+  (503)**, never open. The token is compared **constant-time** (`hmac.compare_digest`); a
+  bad/absent token is a 401. Read-only inquiry (search/probe/units/classify/health) needs no token.
+- **Path params resolve against the enumerated installed set (SEC-3), never a raw join.** The
+  collection-keyed read routes (`/probe`, `/units`, `/classify`) take a `{collection}` from the
+  caller; `service/units.py` (and peers) match it against the names `ansible-galaxy collection list`
+  reports and only then walk that collection's own on-disk dir — so a `../`/absent/crafted value is a
+  clean 404, never a filesystem traversal. Verified by `tests/unit/test_units.py` (the walker is made
+  to explode if a non-member name ever reaches it).
+- **The configure form (R3) is a write-free, fail-closed read surface.** An actuation unit's CURATED
+  knobs render through the one knob renderer (`configurable` kind `actuation-unit`); their submitted
+  values re-validate server-side via `POST /units/{key}/configure` → `service/units.py::validate_unit_config`,
+  which **stages nothing** (pinned `assert_read_only`; the #134 completeness gate sees no new write verb).
+  It is FAIL-CLOSED on a CLOSED allow-list (a var the descriptor doesn't declare is rejected) + the P0a
+  `_validate` guard per knob — and a **secret-typed actuation var is FORBIDDEN at the descriptor layer**
+  (`gen-actuation.validate_knobs`): there is no per-unit SOPS domain, so a unit may not carry a credential
+  (SEC-2 — secrets route through the Secrets dialog). No configure value is ever a secret; no value is logged.
+  The **Review-stage preview** (R4, `POST /units/preview` → `service/actuation.py::build_actuation_plan`) is the
+  same write-free, fail-closed read: it re-validates the values, renders the would-run play (the role wrapper /
+  FQCN run-spec + the derived access-chain header), and **stages nothing** (pinned `assert_read_only`; no new
+  write verb). The first write verb — staging `proposed/<run_id>` + the signed install — is the R5 rung.
+- **Audited, fail-closed.** Every privileged call writes an append-only, size-rotated TSV line —
+  `ts, user, ip, action, run_id, detail`, **never a credential** — and the write is **fail-closed**:
+  a mutation that cannot be audited is *refused* (503), not performed. Denied auth attempts are
+  logged. A privileged `GET /audit/log` makes the log queryable.
+- **run_id correlation.** Each privileged request mints a `kontroll_run_id` at the boundary,
+  carried in the audit line (and, when a route triggers Ansible, passed down) — one operation is
+  greppable end-to-end (docs/logging-architecture.md §3).
+- **Config-injection guard — a typed, fail-closed server-side validator (P0a, #133).** What makes the capability
+  write "data-only" is that every knob value is re-validated **server-side** against its descriptor before it can
+  reach a rendered `module.yml` block — the GUI widget is convenience; the descriptor is the contract; the server
+  is the guard. `service/_validate.validate_value` is the per-knob-`type` registry behind the shared
+  `_blockwrite.validate_params`: `enum` (a CLOSED allow-list — the original guard), `bool`, `int`
+  (`range`-bounded), `ipv4` (`ipaddress`), `hostname` (RFC-1123 labels), and `text` (a **required** `pattern`,
+  `re.fullmatch`'d so a trailing metacharacter/newline can't ride past). It is **fail-closed**: an unknown `type`,
+  or a `text` knob with no `pattern`, is rejected — so widening the GUI's widget vocabulary (Phase 3) can never
+  weaken the closed-allow-list guarantee. This is the runtime, degrade-not-crash twin of `gen-observability`'s
+  generate-time fail-closed `_validate_params` (C12) — defense in depth. Covering checks:
+  `tests/unit/test_validate.py` (each type with its injection vector) + `test_blockwrite.py`. The widened GUI
+  widgets that ride this guard are rendered from the **read-only** `service/configurable.configurable_view`
+  projection (`GET /api/configurable`, Phase 3, #137) — it stages/decrypts nothing (pinned `assert_read_only`)
+  and a secret knob it projects is NAMES-only, write-only, **never pre-filled** (C11); the write path is unchanged
+  (`/api/capability`, `/api/secrets`).
+- **Safe reconfigure — the GUI can now stage a CHANGE to a declared capability block (Phase 4a, #138).** A
+  declared telemetry/backup/logging block is no longer a wall; the dialog reads the current values, computes a
+  field-level diff, and can `upsert_into_block` (a comment-preserving line-span replace). The **anti-clobber**
+  guarantee rests on THREE controls, of which the anti-drift token is **NOT one** (M1): (1) `verify_no_drop`
+  (`service/_reconfig.py`, generalized from `keygen._verify_additive`) — the spine refuses at promote
+  (`would_drop` 409) if the write would silently drop a co-owner's declared method/param, fail-closed; (2) the
+  **human severity-confirm** — Promote is gated until the operator acknowledges a `modify`/`remove`; (3) C10's
+  **two-key promote** (the GUI only stages `proposed/<run_id>`, Semaphore promotes), unchanged. The `plan_token`
+  is **anti-drift only** — it now folds the severity decision (`token_parts += "<severity>|<sorted
+  will_overwrite>"`) so a recomputed-more-destructive promote yields a different token (no-quiet-upgrade), but a
+  token is not authorization. Every upserted value still passes the closed-allow-list `validate_params` (P0a). No
+  new write-to-`main` hole (no `promote_ref` import; `_push_target` fail-closed). (Secret-field rotation — the
+  NAMES-only `will_overwrite` + confirm M-R-B prerequisite this note named — now ships under **Secret rotation
+  (#141)** below.) Covering checks: `tests/unit/test_reconfig.py` (no-drop fail-closed), `test_diff.py`,
+  `tests/integration/test_gui_api.py` (drift-with-diff 409), `tests/e2e/test_reconfigure_flow.py` (the confirm gate).
+- **Secret rotation — the Secrets dialog can now rotate a service login (PR-1/PR-2, #141).** Reusing the existing
+  mint+stage path (`secrets.build_secret_plan`/`apply_secret_plan` → SOPS ciphertext, C10 `proposed/<run_id>`),
+  a `rotatable: true` field in `secret-forms/<domain>.yml` may be re-saved with a new value. The anti-clobber
+  guard is the **M-R-B prerequisite C9 named**: `secrets.overwrite_set` re-derives, SERVER-side, the NAMES of
+  already-set fields a save would overwrite (never client-trusted, M1), and the route/GUI **fail CLOSED**
+  (HTTP 409 / `secret-overwrite-confirm`) until the caller acks `overwrite:true`. The confirm + the audit carry
+  field NAMES only — never a value, never a before→after (C11/C12); the `secret-apply` audit gains an
+  `overwrite=` marker. Actuation does **NOT** move toward the GUI: a new value is staged, and making it LIVE is a
+  **post-promote hand-off** — `secrets.actuation_enact_commands` emits command STRINGS (`deploy-stack` recreate /
+  `grafana-cli` reset / `semaphore-admin` = recreate **then** an env-ferried `semaphore users change-by-login`)
+  the operator/Semaphore runs; the GUI/API execute nothing and mount no docker socket (the C9/C10 trust boundary
+  is unchanged — accepted-risk clarification). The `semaphore-admin` kind (PR-2) exists because Semaphore applies
+  `SEMAPHORE_ADMIN_PASSWORD` only at first-run setup — recreate-alone cannot rotate an existing admin (verified
+  live on v2.18.12); the CLI step reads login+password from the **container's own env** (set by the recreate), so
+  the value never reaches the host argv or shell history. The only residual is the value on the in-container argv
+  of one short, operator-run command (accepted; bounded to the container's own PID namespace, no stdin path in
+  the upstream CLI). A per-FIELD `rotatable` allow-list keeps rotation TRAPS off the surface
+  (`semaphore_db_password`, `semaphore_access_key_encryption` — rotating either alone breaks the running
+  service). Covering checks: `tests/unit/test_secrets_service.py` (overwrite_set NAMES-only + server-derived;
+  enact carries no value; non-rotatable & rotatable-without-actuation emit nothing; the `semaphore-admin`
+  two-step ferries by env NAME and embeds no value), `tests/integration/test_api_secrets.py` + `test_gui_api.py`
+  (409 fail-closed then ack; `overwrite=` audit marker with value absent; enact present + value-free — API/GUI
+  parity), `tests/e2e/test_secret_rotation_flow.py` (the `secret-overwrite-confirm` gate + the `secret-enact`
+  hand-off render).
+- **Heavier reconfigure — module identity + inventory host-var (Phase 4b, #139).** The GUI can now stage a
+  change to a class's **identity** (`secrets_domain`/`inventory_group`/`backend`/`role`/`status` in
+  `modules/<key>/module.yml`, via `service/identity.py` + `_blockwrite.upsert_top_level_key`) and to a host's
+  **connection vars** (`ansible_host` in the banner-owned inventory drop-in, via `service/hostvars.py` +
+  `gitio.owned_merge`). Higher blast — an identity re-point **re-homes hosts / orphans creds** — so the SAME
+  three anti-clobber controls apply, with two reinforcements: (a) the per-knob `severity` from the
+  `settings/<area>.yml` descriptor **upgrades** an identity change to a **type-to-confirm** gate
+  (`reconfig-identity-confirm` — the operator must retype the new value), re-derived server-side and folded into
+  the token's severity decision (M1, no-quiet-upgrade); (b) a proposal may change **at most one** identity-severity
+  key (so the type-to-confirm is unambiguous). `verify_no_drop` is now **load-bearing** (host-var/identity edits
+  produce real co-owner data on the same file); `owned_merge` lifts `write_inventory_host`'s silent `.update()`
+  into a reported collision. Every value still passes the closed-allow-list validator (P0a — `ipv4` for
+  `ansible_host`; a slug pattern for the identity keys). **Secrets stay out:** the host's templated cred-lookup
+  vars (`{{ lookup(…) }}`) are **read-only** (rotating a credential is the secret path — M-R-B, not this surface);
+  no secret value is read, returned, or written. No new write-to-`main` hole (the shared `_reconfig.run_promote`
+  stages `proposed/<run_id>`; no `promote_ref` import; `_push_target` fail-closed). New write verbs
+  (`owned_merge`, `run_promote`) joined `WRITE_VERBS`; the new reads are pinned read-only
+  (`tests/unit/test_reconfig.py`). Covering checks: `test_identity.py` (single-identity rule + crafted-value
+  reject), `test_hostvars.py` (the cred-lookup stays read-only + `owned_merge` collisions), `test_gui_api.py`
+  (both routes stage + server-derived-severity audit + stale-token 409), `test_reconfigure_flow.py` (the
+  type-to-confirm gate).
+- **Platform Settings EDIT — the GUI can now stage a tracked instance.yml / fleet.yml change (Phase 5, #140).**
+  The highest-blast GUI write: `mgmt_ip` (a re-IP that severs this very `:8443` listener), `domain`/`tls_mode`
+  (a re-render / plaintext flip), and `enabled_modules` removal (drops monitoring for live hosts). All ride the
+  SAME three anti-clobber controls + the descriptor-driven severity gate — `mgmt_ip` is `severity: identity`
+  (**type-to-confirm** the new IP, re-derived server-side), `domain`/`tls_mode` `redeploy`, fleet removal
+  `remove`; each carries a consequence-naming `confirm_text`. `verify_no_drop` runs over the **full** instance.yml
+  (a dropped co-owner key fails closed). Every value passes the P0a validator (`ipv4`/`hostname`/`enum`) before
+  the comment-preserving write. **FORBID (the load-bearing boundary):** `api_privileged` (the C10 arming switch —
+  a settings page that could disarm itself is a footgun), `docker/.env` (the rendered output holding decrypted
+  secrets — C11/C12), and `instance/.sops.yaml` recipiency have **no** edit route — a knob not in the
+  `settings/<area>.yml` descriptor set is a 404; the status group surfaces arming **read-only**. No secret value
+  is read, returned, or written; the page edits the INPUTS, never the `.env`. The write STAGES `proposed/<run_id>`
+  (no `promote_ref` import; `_push_target` fail-closed); `disable_in_fleet`/`enable_in_fleet` RAISE (never
+  `sys.exit` — the in-process worker survives, S-3/G9). Covering checks: `test_settings.py` (the danger knobs +
+  full-struct no-drop + the FORBID/unknown-knob boundary), `test_gui_api.py` (C10 staging + FORBID 404 +
+  stale-token 409), `test_settings_edit_flow.py` (the entry controls).
+- **Rate-limited, fail-open-on-malfunction.** A single in-process middleware (`api/ratelimit.py`) caps
+  request rate per class — **per-IP** for the open inquiry routes, **per-token-digest** (never the raw
+  token) for the privileged routes; a breach is a **429 enforced *before* auth runs** (so a flood can't
+  force probe I/O or spam the audit) with a best-effort, throttled `rate-limited` audit line. It **fails
+  open only on its own internal malfunction** — auth + audit stay fully fail-closed, so no path admits an
+  unauthenticated or unaudited mutation. Limits are a deploy-time `KONTROLL_API_RATELIMIT` knob (not a
+  secret); covering check: `tests/integration/test_api_ratelimit.py`.
+- **Deployed read-only / never WAN; frontend exposure is a per-instance mode.** A compose service
+  (`docker/services/api.yaml`) serves on the mgmt VLAN (`<mgmt-ip>:8444`) with the repo **read-only**
+  and **no token** — so only the inquiry routes serve and the privileged routes are fail-closed (503). The
+  TLS posture is **config-as-data**: `instance/instance.yml` `frontend.tls_mode` (resolver
+  `scripts/kontroll/frontend.py`, covering check `tests/unit/test_frontend.py`) selects `byo_proxy` (HTTP
+  behind the operator's reverse proxy, which owns TLS — this instance: Nginx Proxy Manager), `self_signed`
+  (uvicorn TLS from a host cert — the zero-config default), or `acme` (planned, Caddy/Let's Encrypt); an
+  unknown/empty mode fails **SAFE** to self_signed. Enabling the privileged mutations (token + a writable
+  canonical clone + the age key) is a deliberate, flag-gated least-privilege step — its boundary + posture (propose-then-promote, **no** age key) is **C10** below ([decision record](../docs/privileged-mutation-enablement.md)). mgmt-VLAN-only behind the
+  GUI/Semaphore boundary (C3) — never WAN-exposed.
+- **Metrics stack: mgmt-bound, read-only, no new secret.** Prometheus + Grafana publish on the **mgmt IP
+  only** (`<mgmt-ip>:9090` / `:3002` — C3 parity with the API, never `0.0.0.0`; reached externally via
+  NPM); `pve-exporter` publishes **no host port** (scraped only over the internal `kontroll` network). The
+  exporter reuses the **existing read-only `*.Audit` Proxmox token** (`proxmox` SOPS domain, rendered
+  `no_log` into `.env`) — a least-privilege *read* credential, never the Ansible mutate token; a leaked
+  exporter token yields read-only cluster visibility, never actuation. Exporters read — they change nothing
+  on the fleet (pull model: a scrape failure degrades a panel, not a device).
+- **Host agent (node_exporter): additive, read-only, VLAN-scoped.** The `node_exporter` role installs
+  `prometheus-node-exporter` (OS-aware: apt+systemd / apk+OpenRC) on `via: host` classes (hypervisors /
+  docker_hosts); it exposes host
+  internals (CPU/mem/disk/process) on `:9100` — **sensitive, not secret**. Reachable only on the mgmt/server
+  VLANs the control node scrapes from; **never published to WAN** (C3). It carries no credential and actuates
+  nothing (a metrics listener); install is idempotent + `--check`-first + reversible (`apt remove`). The
+  scrape target is generated; the agent is the only fleet-side state this adds.
+- **Agent-less SNMP (switch/firewall): read-only pull, scoped new secret.** `snmp_exporter` (no host port,
+  `kontroll`-net-only) SNMP-walks the **Cisco core switch + FortiGate firewall** — the highest-blast-radius
+  devices — over **SNMPv3 authPriv (SHA-1/AES-128)**, a **READ** credential: SNMP GET reads counters and
+  **actuates nothing** (a creds/reachability failure blanks a panel, not the lab). The v3 creds live in a new
+  **`snmp_observability` SOPS domain** — control + break-glass only via the `.sops.yaml` catch-all, **NOT** the
+  scoped Semaphore key (a monitoring read-cred Semaphore never needs). They are rendered `no_log` by
+  `deploy-stack` into `prometheus/exporters/snmp/snmp.yml` (mode 0600, a second on-disk secret location),
+  **gitignored / never tracked** (a `tests/validate` check enforces it; only the `snmp.yml.j2` template is
+  committed). `?target=`/`?module=`/`?auth=` are bounded to the **generated** inventory targets (no
+  caller-supplied target ⇒ no SSRF); the per-class `module` param is a **closed allow-list** (rejected if
+  unknown, never interpolated).
+- **Agent-less reachability (blackbox_exporter): read-only probe, NO credential.** `blackbox-exporter` (no host
+  port, `kontroll`-net-only, `cap_add: [NET_RAW]` for ICMP raw sockets only) ICMP/TCP/HTTP-probes the **switch +
+  firewall** for reachability — a ping/connect, **no login and no actuation**, and **no secret at all**
+  (`secret_domain: null`, unlike snmp). The `?target=` set is bounded to the **generated** inventory addresses
+  (no caller-supplied target ⇒ no SSRF); the per-class `probe` param is a **closed allow-list**. It complements
+  snmp — answering "is the device up" even when SNMP is silent, with zero device-side provisioning.
+
+**Residual (tracked):** a **static** Bearer token (no per-user identity / rotation / SSO); the frontend
+TLS posture is now a per-instance **mode** (`self_signed` default / `byo_proxy` / `acme` — see the deploy
+bullet), so "self-signed" is a *chosen mode*, not a gap. Add SSO before any wider exposure (the same gate
+as the GUI's C8 residual). Rate-limiting is now in place (above).
+Verified: no token → 503, bad/missing token → 401 (+ audited), audit-unwritable → mutation 503,
+over-limit → 429 (an audit-unwritable breach still 429, never 503).
+
+### C10 — Privileged-mutation enablement (the network service writes the canonical)  ✓ live-verified (gated; default off)
+
+Turning on live actuation from the deployed API/GUI (the C9 surface) crosses one trust boundary beyond C9's
+fail-closed token: an always-on, network-reachable service gains **write toward the local canonical**
+`/srv/kontroll.git` (the source of truth every clone + deploy trusts, C8). Posture **decided** (threat model:
+[1b](../docs/reviews/2026-06-13-roadmap/01-design-1b-privmut-security.md) rec #2; decision record:
+[docs/privileged-mutation-enablement.md](../docs/privileged-mutation-enablement.md)): **propose-then-promote,
+no key.**
+
+**`trust_mode` — who turns the second key (F3, Rung 0c — flag only).** A per-instance `trust_mode`
+(`instance/instance.yml`, [docs/trust-mode.md](../docs/trust-mode.md)) declares how a staged proposal is promoted:
+**`separated`** (a human runs the `promote-proposal` Semaphore task — prod, today's system) or **`solo`** (homelab —
+declares intent to auto-promote). It is chosen explicitly at fresh-init and **never silently defaulted** — a trust
+posture is the one setting kontroll refuses to guess (defended at three layers: `kontroll-init --fresh` refuses
+without `--trust-mode`, the template ships it commented, and `deploy-stack.yml` hard-fails an unset/invalid value).
+This release ships the **flag only**: the GUI/API trust boundary below is **byte-identical in both modes** (still
+propose-only, still AST read-only-pinned, canonical `:ro`), so the posture adds **zero new residual**. The
+auto-promoter that gives `solo` its effect — and its honest residual (a GUI RCE → auto-promoted proposal) bounded by
+a blast-tier refusal / rate / diff-size guard set — is a **separate, gated rung** (will land as control **C16** with
+its own adversary pass); until then `solo` behaves like `separated`.
+
+**Implements (flag-gated by `api_privileged`, default off — read-only stays the default):**
+- **The service only PROPOSES.** When it runs (`KONTROLL_STAGE_PUSHES=1`), `gitio.commit_and_push` pushes a
+  **staging ref** `refs/heads/proposed/<run_id>`, never `main`; the operator's CLI (no such env) still pushes
+  `main` directly (the trusted human). `kontroll promote <run_id>` fast-forwards `main` (FF-only; refuses
+  otherwise). The in-GUI follow-on is now the **`promote-proposal` Semaphore task** (item C, 2026-06-15;
+  `config/semaphore/templates/promote-proposal.yml` → `ansible/playbooks/promote.yml`) — a `run_id` survey var,
+  FF-only, **reachable only by a Semaphore admin on the mgmt VLAN, never the API token** (the promote lives
+  outside the token's reach, so a leaked token can never self-promote). A leaked token can only **park proposals
+  you can reject**, never rewrite the lab. **This propose-only guarantee held for the `local` staging push but was
+  breached by `commit_and_push`'s optional `origin` push (dogfood VM 144, 2026-07-05):** the content clone's
+  `origin` **is** the canonical (a `file://` clone), so a client `push:true` ran `git push origin HEAD`,
+  fast-forwarding canonical `main` from the network service unreviewed. **Closed structurally by `and not staging`**
+  (`gitio.py` — the origin push is dead code while staging; the operator-CLI direct-main path is unchanged). The
+  blast was FF-only because the clone is always rebased onto canonical `main` before the push
+  (`_rebase_proposal_onto_canonical`), never a force — but it advanced `main` all the same. **Defence-in-depth:**
+  the canonical carries an `update` hook (`ansible/playbooks/files/canonical-update-hook.sh`, installed by
+  `local-canonical.yml`) that refuses a receive-pack update of `refs/heads/main` from the **network-service uid
+  (1001)** — the legit mirror push (uid **0** in the installer container, or the operator uid on a host-direct run,
+  **never 1001**) and `promote_ref`'s `update-ref` (not receive-pack, so the hook never fires — a human promote is
+  untouched) keep working. Design-of-record: [docs/reviews/2026-07-05-c10-origin-push-breach/](../docs/reviews/2026-07-05-c10-origin-push-breach/).
+  **After each staged push the service resets its content clone to the
+  canonical `main`** (`_reset_content_clone_to_canonical`) so the read-back reflects the source of truth and each
+  proposal is independent off `main` — a rejected proposal can't ride along in a later one (F1, dogfood
+  2026-06-20; `tests/unit/test_staging_isolation.py`). **The promote now also runs a pin-conflict gate (FIX-M9):**
+  before the fast-forward, `kontroll-promote.py` extracts the prospective post-merge tree (`proposed/<run_id>`) and
+  runs its OWN `gen-requirements.py --conflict-check` — if two app-store units would pin one collection to
+  conflicting `==` versions (which would make the NEXT deploy's `gen-requirements` fail closed, halting the image
+  build far from the cause), it **refuses the promote** (exit 2; `--skip-conflict-check` is the documented override).
+  Read-only (extracts to a temp dir, never touches `main`); fails **open** on its own read error (the generate-time
+  fail-closed is the backstop — the gate hardens, it must never block a clean promote). `tests/unit/test_kontroll_promote.py`.
+- **Every GUI write surface rides this propose-only staging — including the Homepage editor (#136).** The
+  onboard/capability/secret/keygen writes and the new `:8443` **Homepage editor** (`POST /api/homepage` — rearrange
+  the portal tiles) all go through `gitio.commit_and_push(run_id=…)` → `proposed/<run_id>`; **none imports
+  `promote_ref`** and there is **no promote button anywhere** in the GUI (verified by the `#133` read-only AST pin
+  + the per-surface tests). The homepage editor serves no secret (its serializer can only relocate/omit existing
+  `href:` tiles — never synthesize a tile or accept a token, C11) and edits only the tracked overlay, so it adds a
+  new C10 *rider*, not a new trust boundary. The read-only Settings status panel (#135) stages nothing.
+- **The generated Homepage Fleet tiles are secret-free by construction (#130).** `scripts/gen-homepage.py` fills
+  the `# >>> kontroll fleet` span with `href:`+`description:` tiles only (one per onboarded host, derived from the
+  inventory) — it never emits a `widget:`/`{{HOMEPAGE_VAR_*}}`/credential, and fails closed if a tile value carries
+  a secret marker or a newline (C11, the no-leak property the unauthenticated `:3000` board requires). The editor
+  treats that generated span as read-only (it refuses to edit its tiles), so neither the producer nor the consumer
+  can introduce a secret into the board. The committed example span derives from `instance.example/` (TEST-NET),
+  so the shipped bundle carries no real topology (F3 doctrine; the live span lives under the stripped `instance/`).
+- **The app-store STAGE route is the newest C10 rider — the FIRST actuation write (R5).** `POST /actuation/{key}`
+  (the `actuation.apply_actuation_plan` write verb) stages a configured unit's **non-secret** values file
+  (`instance/actuation/<key>/vars.yml`) to `proposed/<run_id>` via the SAME `commit_and_push(run_id=…)` — never
+  `main`; the route NEVER imports `promote_ref` (the Semaphore-admin promote is the trusted second key). It rides a
+  **dedicated privileged prefix** (`/actuation` — token + the fail-closed audit + the per-token rate budget,
+  distinct from the write-free `/units` inquiry reads), so a leaked token can only **park a rejectable proposal**,
+  never run a play (the API actuates NOTHING — the operator promotes, then runs the unit in Semaphore). **No secret
+  rides here** (a unit may not declare a secret-typed var — SEC-2), and the `actuation-stage` audit carries
+  names/counts/run_id only, never a value. The write verb is registered in `WRITE_VERBS` **same-commit** (P0b/#134)
+  and `build_actuation_plan` stays `assert_read_only`-pinned, so the read-only-by-construction boundary holds.
+  Covered by `tests/integration/test_api_actuation.py` (401/404/propose-token/scoped-commit+audit/stale-409/
+  proposed-ref). **The GUI now mirrors the STAGE route in-process** — `POST /api/actuation/<key>` (`gui/app.py`,
+  the same propose→stage spine + `commit_and_push(run_id)`; preview `apply:false` renders the would-run play +
+  resolved non-secret vars + a token, writing nothing; stage `apply:true` writes `vars.yml` to `proposed/<run_id>`)
+  + the read-only `GET /api/actuation` **Automations index** (the registered units' derived target/pin/knob-count,
+  NEVER a value; pinned `assert_read_only`). The `unit-config-stage`/`unit-config-result`/`unit-registry` audits
+  carry names/counts/run_id only; the GUI **never** imports `promote_ref` / has no promote button. Covered by
+  `tests/integration/test_gui_api.py`. The generated runnable artifacts (the Semaphore template/wrapper) + the
+  **signed** `ansible-galaxy install` (SEC-1) are the follow-on rungs (R5 PR-B / R6).
+- **The app-store CREATE route rides the SAME C10 spine — it AUTHORS a unit descriptor.** `POST /actuation/create`
+  (the `actuation.apply_create_unit` write verb) renders an actuation `unit.yml` from a searched collection and
+  stages **only** `instance/actuation/<key>/unit.yml` to `proposed/<run_id>` via the SAME `commit_and_push(run_id=…)`
+  — never `main`, never `promote_ref` (the same dedicated `/actuation` privileged prefix + audit + rate budget). It
+  fills the empty registry the STAGE/configure/preview reads depend on. **Two security properties are load-bearing
+  here:** (1) the rendered descriptor is **validated through the SAME fail-closed `_actuation_schema.validate_unit`
+  the generator enforces BEFORE it stages** (validate-before-stage), so a GUI-authored unit can never stage a
+  malformed pin/target that the lockfile derivation would choke on; and (2) the **create-time Tier-cap** — the
+  device-class + `inventory_group` are **derived from the declaring module, not client input**, and a collection
+  whose class targets `edge_firewall`/`core_switch` is **refused (403)** because an unsigned public-Galaxy install
+  may not reach the highest-blast tier (the never-brick ∧ blast-radius refusal; see C15-a). The flow also **never
+  clobbers** an existing unit (409 on collision) and carries no secret (the `actuation-create` audit is names/counts
+  /run_id only). The write verb is registered in `WRITE_VERBS` **same-commit** (P0b/#134) and
+  `build_create_unit_plan` stays `assert_read_only`-pinned. Covered by `tests/integration/test_api_create_unit.py`
+  (401/422/403-tier-cap/409-collision/scoped-commit+audit/stale-409/proposed-ref) + `tests/unit/
+  test_create_unit_service.py`. **The GUI mirrors it in-process** — `POST /api/actuation/create` (`gui/app.py`, the
+  same propose→stage spine + `commit_and_push(run_id)` + `_audit` the other GUI write dialogs use; the GUI **never**
+  imports `promote_ref` / has no promote button) + the read-only `GET /api/units/<collection>` Pick-stage read
+  (pinned `assert_read_only`); covered by `tests/integration/test_gui_api.py`. The GUI app-store **front-end dialog**
+  (the `unit-badge` → pick → review → acknowledge → create chrome, reusing `renderCapPromote`; the Tier-cap surfaces
+  as a loud refusal pane) is built — `tests/e2e/test_unit_flow.py`.
+- **The discard route is a C10 rider that UN-STAGES, never promotes (FF-race Move 2).** `POST /api/pending/<run_id>/
+  discard` (the `discard.discard_proposal` write verb, `scripts/kontroll/service/discard.py`) deletes a **stale**
+  proposal's `proposed/<run_id>` ref from the canonical. It is C10-safe by construction: un-stage ≠ promote — it
+  removes Key-1's OWN output, so it **cannot advance `main`, enact anything, or grow the promotable set** (the GUI
+  still has no promote path / never imports `promote_ref`). The write verb lives in its OWN module so `pending.py`
+  stays `assert_read_only`-pinned, and is registered in `WRITE_VERBS` **same-commit** (P0b/#134 — the fail-closed
+  completeness gate fails CI until it is). **Three security properties are load-bearing:** (1) **SEC-B1** the
+  `run_id` validator accepts EXACTLY the two real minter shapes (`uuid4().hex[:12]`; the API
+  `YYYYMMDDTHHMMSSZ-<6hex>`) and refuses a git flag / `../` traversal / branch name, and the ref is passed after
+  `git update-ref -d --end-of-options` so a leading-`-` leaf can never be parsed as a flag; (2) **SEC-M1**
+  compare-and-delete on the tip read first — a concurrent promote/rebase that moved the ref → **409**, a
+  vanished/never-staged ref → **404**, a bad id → **400**, never a 500 or a blind unconditional delete; (3) **MF-4**
+  the delete argv is a single literal list so the completeness detector sees the `update-ref` write. Audited
+  (`pending-discard`/`pending-discard-result`: action run_id + target run_id + sha, names/sha only). **Accepted
+  residual (availability, not integrity):** an authed GUI user can delete a legit pending proposal — the SAME trust
+  tier the propose surface already grants; the control is **stale-only** + a two-step confirm (default griefing
+  target ∅), and recovery is from the **audited sha** (`git update-ref refs/heads/proposed/<id> <sha>` before gc),
+  not the reflog (a bare canonical keeps none for a deleted branch). Covered by `tests/unit/test_discard.py` +
+  `tests/integration/test_gui_api.py` + `tests/e2e/test_pending_discard.py`.
+- **No decrypting age key in the service.** Capability promotes carry no creds (telemetry/backup are data-only).
+  Onboard's `sops_set` cred-encryption is deferred to the promote step (out-of-band, a trusted runner holding
+  the scoped key) — because age can't encrypt-without-decrypt (1b §4.3), so **zero standing decrypt** sits in a
+  reachable service (1b's headline risk, eliminated).
+- **The trusted promoter (Semaphore) gets gated canonical write (item C).** The `promote-proposal` task
+  fast-forwards `main` as **gid 1001** (forced `user: "1001:1001"`; the stock image is gid 0) against the
+  canonical mounted **`:rw`** — but only when armed. **All three** network-service containers (api, onboard-gui,
+  semaphore) mount the canonical `:${KONTROLL_CANONICAL_MODE:-ro}`, which deploy-stack renders `rw` only under
+  `api_privileged`; the read-only deploy mounts it **`:ro`** on every container, so even a container RCE cannot
+  write the canonical there (the `:rw` access needed for the proposal push / the promote exists only when armed).
+  **No host root:** the promote rides the gid-1001 group-write grant + `core.sharedRepository=group`
+  (local-canonical.yml). The promoter is **Semaphore, not the API** — by design the promote lives outside the
+  token's reach. **The operator's CLI promote (`kontroll-promote`) needs the same grant** — it deletes the consumed
+  `proposed/<run_id>` ref, which fails `Permission denied` unless the operator is a member of gid 1001. The named
+  group + membership are provisioned by `local-canonical.yml` on a host-direct run, but it **skips** them inside the
+  installer container (`KONTROLL_IN_CONTAINER=1` — both deploy launchers), where a container-local group is useless.
+  So the **host floor** owns that gesture: `install-prereqs.sh` (root) creates it; the launchers ensure-or-warn
+  (shared `scripts/lib/canonical-group.sh`) — closing the published-kit F-CANON gap (`task_51334deb`).
+- **Unconditional hardening:** `receive.denyNonFastForwards` + `receive.denyDeletes` on the bare repo (guard the
+  PUSH path — operator pushes too); a **dedicated push-only clone**, never a writable mount of the canonical
+  content tree; a baked container git identity; rate-limiting (already in place). **Fail-closed coupling (item C
+  hardening):** `api/settings.from_env` REFUSES to start a token-bearing API without `KONTROLL_STAGE_PUSHES`, and
+  `gitio._push_target` RAISES if a staging service reaches a push without a `run_id` — so the propose-vs-`main`
+  gate can't silently decouple into a direct-`main` write. Token stays SOPS-backed (`dashboards` domain — control
+  + break-glass, **not** Semaphore-decryptable), constant-time, fail-closed, **mgmt-VLAN-only, never WAN** (C3).
+
+**Proves (built with the enablement):** a contract test asserts the staged push targets `proposed/*` not `main`,
+and that promote fast-forwards only; `git config -l` on the bare repo shows `denyNonFastForwards`; the deployed
+compose carries **no** age-key mount (a `validate` assertion); the C9 audit gate is unchanged. **Uniform
+staging (A2, 2026-06-15):** the GUI onboard route now also stages — it runs in-process (not the `main`-pushing
+CLI) and threads `run_id` through `commit_and_push`, pinned by `test_gui_api.py::test_onboard_apply_stages_when_armed`.
+So **every** network-surface canonical write (onboard + capability, API + GUI) proposes, with no shell-out hole.
+
+**Residual (tracked):** for the **API** (no key), a leaked token parks proposals (operator-rejectable) + cannot
+read a secret — the residual is proposal-spam (rate-limit bounds it) + denial-of-review-time. **onboard-gui is
+the with-key exception:** it mounts the scoped age key for inline device-cred encryption (`sops_set` needs
+decrypt-to-add), so a compromise of *it* (behind its own fail-closed auth, mgmt-VLAN-only) can read the
+Semaphore-scoped secrets — a **pre-existing** exposure (the device-onboard alpha always held the key), now also
+able to **stage** (bounded, rejectable) canonical-writes. The no-key property is pinned for `api.yaml` only
+(`test_privmut_no_key.py`). HTTP onboard *with creds* is incomplete until the out-of-band encrypt step lands
+(capability promotes carry no creds + are fully functional). Static token / no SSO is the C9 residual, unchanged.
+**Arming (`api_privileged`) gives every network container `:rw` on the canonical (item C honesty).** When armed,
+all three containers (api, onboard-gui, semaphore) mount `/srv/kontroll.git` `:rw` as gid 1001 against a
+group-writable bare repo — so a **container RCE** (not a leaked token; the token is still propose-only) can run
+`git update-ref` / rewrite `packed-refs` **directly**, which is **not** a push and therefore bypasses
+`receive.denyNonFastForwards`/`denyDeletes` entirely. Those hooks and the FF-only gate bound the promote
+**playbook**, **not** a compromised container: a breach of any armed container can **non-fast-forward or delete
+`main` directly** (history rewrite), a higher-impact path than "park a rejectable proposal." This is **accepted**,
+bounded by: the canonical is a **reconstructible cache** (the operator workstation + GitHub remain the source of
+truth — a rewritten canonical is re-pushed and the divergence is visible); the **dominant** residual (fleet root
+via the scoped age key onboard-gui/semaphore already hold) strictly dominates canonical-write; mgmt-VLAN +
+single-operator; and the **read-only deploy mounts `:ro` everywhere** (the default), so this exists only while
+armed. The leaked-**token** path remains strictly propose-only (the API never calls `promote_ref` / a direct
+`main` push — the `from_env` + `_push_target` fail-closed coupling enforces it). Accepted as the cost of making
+the one manual security-boundary step (promote) a GUI action.
+
+**Phase-B bake-code STRENGTHENS this residual (M7).** When a service runs baked (`-e bake_code=true`), it imports
+code from the **read-only, digest-pinned control image** at `/opt/kontroll` (`PYTHONPATH`/`working_dir`), not from
+the writable `:rw` content clone. So an **armed container RCE that writes the clone can no longer inject the code the
+service re-imports** — the in-process code-injection-persistence path that an un-baked clone-write had is moved behind
+the image digest (the RCE cannot write an image layer). Rung 1b realizes this for the **api**; **Rung 2 extends it to
+onboard-gui** — the higher-privilege surface (it holds the age key + the widest propose surface), so its in-process
+code is now read from the digest-pinned image too, and its audit log moved off the `/repo` clone to a dedicated
+`/audit` bind (M11) so the audit trail is writable under a read-only baked code root + survives the clone
+`reset --hard`. **Rung 3 (the launch-kit / canonical shrink) realizes the next step:** the minimized kit that seeds the canonical
+drops the **baked service code** (`api/ gui/`), so an armed-RCE canonical/clone rewrite has no `api`/`gui` source to
+corrupt — the services run that code only from the digest-pinned image. The shrink is **conservative** (it keeps
+`scripts/` whole, because the deploy-stack generators + the C10 promote slice + the **FIX-M9** pin-conflict gate's
+`gen-requirements.py` genuinely run *from the canonical clone* — dropping them would silently fail-open a never-brick
+gate; closure adversarially verified, design-of-record §1). **M8a** (a MUST gate): the promote slice
+(`kontroll/{__init__,gitio,paths}.py` + `kontroll-promote.py` + `gen-requirements.py`) is baked into the runner image
+**and** kept in the kit/canonical, byte-identical by construction — so the trusted `kontroll-promote` FF-gate the
+operator runs from the per-job clone can never be a *forked*, weakened copy of the AST-pinned baked code
+(`tests/unit/test_launch_kit.py`). The remaining residual — `scripts/`'s non-promote service modules still ride the
+canonical as inert (services run them only baked) — is a deferred finer strip, not a live exposure. The
+`:rw`-only-when-armed mount + the FF-only promote are unchanged either way (payload-independent).
+
+### C11 — Guided secret + key onboarding is no-leak by construction  ✓ implemented (gated; default off)
+
+The guided **secret-entry** (`/secrets/{domain}`, `secret-forms/<domain>.yml`) and **key-generation**
+(`/keygen/{role}`, `key-roles/<role>.yml`) surfaces let the operator mint service secrets and age keys through
+the GUI so they are **encrypted/generated on the box and never hand-edited or committed in plaintext** (the
+install-from-scratch "[B] security-boundary" steps). They ride the C9 auth/audit gate and the C10
+propose-then-promote staging, but add their own **no-leak / additive** properties — the reason this is a
+distinct control.
+
+**Implements:**
+- **Secret values never round-trip.** A submitted secret value flows through the service **in memory only**: it
+  is encrypted into `instance/secrets/<domain>.sops.yml` via the **stdin whole-file** sops seam
+  (`gitio.sops_write_domain` + `--filename-override` — never `sops --set`, so no value in argv / no temp-file
+  cleartext) and is **never** returned, logged, audited, or committed. The client-safe plan VIEW and the audit
+  line carry only field **NAMES** + a source label (`provided`/`generated`/`already_set`/`skipped`).
+  `generate:` fields are minted server-side (CSPRNG) on a blank submit and never echoed. Idempotent: an
+  unchanged domain re-encrypts to nothing (no canonical churn).
+- **Generated private keys are show-once and never persisted by the service.** `/keygen/{role}` mints an age
+  keypair (`gitio.age_keygen`, which prints nothing); the **private** half is returned in **exactly one**
+  response for the operator to store (offline for break-glass; at the control/Semaphore key path otherwise) and
+  is **never** written to the box, the repo, an audit line, or a log. The audit + the commit message carry only
+  the **public** recipient.
+- **`.sops.yaml` edits are additive + parse-verified.** Adding a key role writes only the **public** recipient
+  into the named `/.sops.yaml` anchor group(s) — **anchor-preserving text insertion**, **idempotent**, and
+  guarded by a **parse-verify gate** that refuses to write unless the edit is strictly additive (no existing
+  recipient dropped → no unrecoverable secret; no unexpected recipient added → no over-exposure). The
+  decrypt-needing re-wrap (`sops updatekeys`) is a **deferred operator step, never auto-run** (high blast); a
+  scoped role lands in `ops_recipients` only (network+proxmox), never the service domains.
+- **No standing decrypt key required.** Minting a keypair and adding a public recipient are **public-key**
+  operations, so the keygen surface needs **no** age key — consistent with C10's no-key posture (the
+  with-key exposure is unchanged: onboard-gui already mounts the scoped key for secret encryption).
+
+**Proves (built with the surfaces):** `tests/unit/test_secrets_service.py` + `tests/integration/test_api_secrets.py`
+(no value in any view/response/audit; missing-required 422; idempotent; no-key clean 500);
+`tests/unit/test_keygen_service.py` (private key only in the result; `.sops.yaml` edit additive + idempotent +
+anchor-scoped; the parse-verify gate rejects a dropped/smuggled recipient and writes nothing; `age_keygen`
+prints nothing) + `tests/integration/test_gui_api.py` keygen cases (show-once response, audit/commit carry only
+the public key, staged not `main`); `gitleaks` (CI) scans every commit for an `AGE-SECRET-KEY` (C6).
+
+**Residual (tracked):** a minted **private key** and submitted **secret values** traverse the mgmt-side hop in
+the response/request body — protected by the surface's TLS (GUI) or the operator's reverse proxy
+(`byo_proxy`, API), **mgmt-VLAN-only, never WAN** (C3), behind the C9 fail-closed auth. This is the **same**
+plaintext-mgmt-hop exposure already accepted for secret entry; keygen is symmetric (a value out vs. in).
+This cut ships keygen **GUI-only** (the smaller crown-jewel surface; show-once is human-interactive) — API
+parity is an easy add if wanted. The **first** control key + `GUI_PASSWORD` are a CLI bootstrap
+(`scripts/kontroll-init.py` — it writes the control private key to its canonical 0600 path, adds the public to
+`.sops.yaml` via the shared parse-verified writer, and mints the `dashboards` bootstrap secrets, showing the
+login passwords once), **not** this surface — a running GUI can't mint the key it needs to run (the keygen
+split). kontroll-init runs locally as the trusted operator (no network surface), so its one-time write of the
+control private key to disk is the legitimate exception to the never-persist rule.
+
+---
+
+### C12 — The logging pipeline is a secret surface (collector privilege, label hygiene, mgmt-only)  ◐ partial (internal stack built; deploy opt-in)
+
+The dual-purpose logging pipeline (**Vector → Loki → Grafana**; [docs/logging-architecture.md](../docs/logging-architecture.md))
+adds a **privileged reader** (Vector tails every container's stdout, host journald, and the GUI/API audit logs)
+and a **new operator-readable index** (Loki stream labels). Both are secret-adjacent: a log *line* can carry a
+credential an upstream emitter failed to redact, and a *label* is queryable plaintext that must never embed a
+secret. Logs are therefore treated as a secret surface, not telemetry. (This control lands with the **internal**
+stack; the **capability** half — device-side wiring `no_log` + a per-method `secret_domain` — extends it.)
+
+**Implements:**
+- **No secret-valued labels (the hard label rule).** Loki stream labels are a **closed, non-secret set** —
+  `source`, `host`, `service`, `level`, `run_id`, `device` — emitted at the single sink choke-point
+  (`docker/vector/config.d/sinks/loki.yaml`) and asserted in each `logging/<method>.yml` `labels:`. No label
+  value is ever a credential, token, or secret-bearing field; the set is fixed at config time, never derived
+  from a log *value*. High-cardinality / sensitive fields (IP, user, message) stay in the JSON **body**
+  (LogQL-filterable, not indexed).
+- **Collector privilege is minimal + read-only.** Vector mounts the docker socket **`:ro`**, host journald
+  **`:ro`**, and every audit/log path **`:ro`** — it reads, never writes the host, and actuates nothing on the
+  fleet (a collector, not a controller — like the C9 exporters, a tail failure blanks a panel, not a device).
+- **mgmt-VLAN-only, never WAN (C3 parity).** Loki publishes its HTTP API on the **mgmt IP only**
+  (`${KONTROLL_MGMT_IP}:3100`, fail-closed `:?`, never `0.0.0.0`); **Vector publishes only the mgmt-bound syslog
+  ingress** (`${KONTROLL_MGMT_IP}:5514/tcp`, fail-closed `:?`, never `0.0.0.0`) for the `syslog_push` method —
+  the unauthenticated Vector API (`:8686`) stays loopback-internal, and Vector reaches Loki over the internal
+  `kontroll` network; Grafana is the only query surface (mgmt-bound, NPM-fronted, C9). The existing
+  `tests/check-mgmt-port-binding.py` covers Loki's bind, and `test_compose_logging.py` pins Vector's ingress to
+  the mgmt IP + asserts the API is never published.
+- **At rest (extends C8).** The **Loki store** is a **bind mount** at `/var/lib/kontroll/loki` (`0750`/uid-10001)
+  — NOT a named volume — so the log bodies (which may carry a leaked secret) inherit the same operator-owned,
+  runner-not-mounted, never-pushed crown-jewel treatment as the backup captures. Vector buffers are memory/named-
+  volume only. `docker/vector/` config is non-secret config-as-data.
+- **Bounded retention.** Loki's compactor retention is **enabled** (off by default = infinite) with a 30-day
+  global window from `LOKI_RETENTION_PERIOD` (always set) — an empty/infinite period (unbounded disk) is the
+  failure guarded by `test_compose_logging.py`.
+- **The logging CAPABILITY (instance #3) extends the surface — config-injection + label hygiene fail-closed,
+  device-side `no_log`, per-method SOPS.** `gen-logging.py` validates every `logs:` param against the method's
+  CLOSED allow-list AND every contributed label against the canonical non-secret set — a metacharacter value or
+  a secret-bearing label exits non-zero at generate time, never reaching the Vector config
+  (`test_gen_logging.py`). The push/local methods (`journald_remote`/`syslog_push`) need **no** SOPS domain
+  (like `host_node`); a credentialed method names a **`secret_domain`** in its `logging/<method>.yml`, rendered
+  `no_log` into config at deploy, gitignored, audited by NAME only — `rest_pull`'s API token (an env), or
+  **`file_tail_ssh`'s read SSH keypair** (`logging_file_tail`, rendered to a 0600 FILE + bind-mounted RO into
+  Vector — the 3rd injection shape, never an env; see the dedicated bullet + accepted-risk row below). A
+  device-side wiring role that templates a collector credential (a future TLS-syslog mTLS client key minted from the
+  shared control-issued CA) carries `no_log` on that task — the C2 grep gate covers `ansible/roles/logging_*/**`. *(The device-side wiring roles —
+  `logging_{syslog_push,journald_remote,file_tail_ssh}` + `ansible/playbooks/wire-logging.yml` — are now built:
+  idempotent, `--check`-safe, access-chain-headed, with a `backup` rollback entrypoint and `no_log` on any
+  credential task. The operator runs them `--check --diff` FIRST per the edge-firewall/core-switch hard rule.)*
+- **The syslog ingress only listens when used + is mgmt-bound + reversible.** The published `:5514` is harmless
+  when no class declares `syslog_push` (nothing listens inside the container → connection refused); a device
+  starts shipping only after `logging_syslog_push` points it at the collector (a reversible config line —
+  `no logging host`). Plain RFC5424 syslog is **unauthenticated** (see the accepted-risk row).
+- **Remote journald PULL (`file_tail_ssh`) — a read-only forced-command key, gated custom image, mgmt-routed.**
+  Vector PULLs a remote host's journald over SSH: its `exec` source runs `ssh root@<host>`, and the host's
+  `authorized_keys` **FORCES** `journalctl -f -o json` with `no-pty` + no forwarding (`roles/logging_file_tail_ssh`),
+  so the key runs ONLY that read command — no shell, no arbitrary file read (the tightest grant). The matching
+  PRIVATE key is the **`logging_file_tail`** SOPS domain, rendered `no_log` to a `0600` file + bind-mounted **RO**
+  into Vector (the 3rd injection shape — a key FILE, not an env). Because the stock Vector image has no ssh client
+  (bench-verified), deploy-stack builds + selects a thin `kontroll/vector` image (stock + openssh-client, FROM
+  pinned in lockstep with `vector.yaml`) **ONLY when a class declares the method** — every other instance keeps the
+  stock pinned image. Host-key TOFU (`accept-new`) is mgmt-VLAN-only (see the accepted-risk row).
+  `test_file_tail_ssh.py` pins the gating, the RO key mount, and the no-shell forced command.
+- **Credentialed PULL egress (`proxmox_api`) — read-only, mgmt-routed, env-injected, never committed.** The
+  first concrete credentialed pull: Vector's `http_client` GETs the PVE `/cluster/tasks` audit history read-only,
+  authenticating with a `PVEAPIToken` in the `Authorization` header (`auth.strategy: custom`). The token
+  **reuses the EXISTING audit-scoped pve-exporter token** — no new secret; it already carries only
+  `Sys.Audit`/`PVEAuditor`, enough to READ the task history and nothing more. The token COMPOSITION is
+  **data-driven, not hand-wired** — and UNIFIED across telemetry + logging: the method declares
+  `secret_env_map: {ENV_VAR: "<str.format template over its secret_domain's SOPS field NAMES>"}` (the SAME block a
+  metrics exporter uses; a 1-field map is the degenerate `"{field}"` case of an N-field token, so ONE filter renders
+  both). `gen-secret-env.py` collects every telemetry `metrics:` + logging `logs:` method's `secret_env_map` into
+  ONE **value-free manifest** (`config/secret-env.manifest.generated.yml` — env NAMES + domain NAMES + field-NAME
+  templates, NO value), and deploy-stack composes each token into `.env` GENERICALLY: it decrypts the UNION of
+  referenced SOPS domains **by name** (`instance/secrets/<domain>.sops.yml`, via the resolver seam — read-path ==
+  the GUI onboarding write-path; fail-SOFT per domain) and runs the `kontroll_render_token` filter (`no_log`) in one
+  loop. So a NEW credentialed exporter OR log-pull is a `telemetry/<m>.yml`/`logging/<m>.yml` `secret_env_map`
+  drop-in — **zero `deploy-stack.yml` edit, no `_<domain>` lookup, no hardcoded domain map**; no method's token
+  SHAPE lives in a hub. (A new *logging* token additionally needs a one-line value-free `${VAR:-}` passthrough in
+  `vector.yaml` — compose `include` can't merge it; the telemetry path doesn't even have this.) **Platform-core
+  boundary:** the control plane's OWN intrinsic creds (`SEMAPHORE_*`/`GRAFANA_*`/`GUI_*`/`KONTROLL_API_TOKEN`) stay
+  explicit, **fail-CLOSED** `.env` lines from REQUIRED domains — they don't grow with the fleet, so they are NOT in
+  the fail-soft device loop; a generate-time guard rejects any device `secret_env_map` that would shadow one. Passed
+  to Vector as `${KONTROLL_PVE_LOG_TOKEN}`. The **generated config carries ONLY the `${ENV}` reference, never the
+  value** (pinned by `test_gen_logging.py::test_proxmox_api_pull_renders_env_only_custom_auth`,
+  `test_gen_secret_env.py` value-free + collision pins, `test_compose_logging.py`); the token is never a Loki label.
+  Read-only: an HTTP GET reads the task history and actuates NOTHING on Proxmox (blast radius: control node only).
+  **Live-proven read-only (HTTP 200, authorized); the unified render dogfood-verified end-to-end.**
+  - **Onboarding now SURFACES the `PVEAuditor` grant prerequisite** (the `provisioning:` block, read by
+    `catalog.module_provisioning`) instead of leaving it in a comment — but a role NAME is **public vendor
+    vocabulary** (already in this bullet), projected NAMES-only and **never a credential**, so no trust boundary
+    moves and no new control row. The surface is advisory/non-gating; the live drift check (C13, below) is what
+    detects an actually-wrong scope on the wire.
+
+**Proves (built with the stack):** `tests/unit/test_compose_logging.py` (Loki binds `${KONTROLL_MGMT_IP}` /
+never `0.0.0.0`; Vector publishes ONLY the mgmt-bound syslog ingress `:5514` — never `0.0.0.0`, never the API
+`:8686`; every Vector host mount is `:ro`; the store is a bind mount not a named volume; retention enabled +
+bounded; the sink labels are the canonical non-secret set); `tests/unit/test_logging_wiring.py` (every method's
+`wiring_role` is a built role with a backup entrypoint; the dispatcher + backend `configure` exist);
+`tests/check-mgmt-port-binding.py` (C3, existing) covers Loki's `:3100`; `tests/validate` gains a `vector-config`
+gate (`vector validate` over the config.d tree where the CLI is present).
+
+**Hardened (the promotion blocker):** Vector runs **NON-ROOT** (`user: "10002:10002"`, a uid distinct from Loki's
+10001 — `test_vector_uid_distinct_from_loki`) and holds **NO raw Docker socket** — its `docker_logs` source talks to
+a `docker-socket-proxy` (GET/HEAD-only, `POST=0`) that alone mounts `/var/run/docker.sock`, so a Vector RCE cannot
+`POST /containers/create` = host root. Host journald is read via `group_add: ${KONTROLL_JOURNAL_GID}` (the host
+`systemd-journal` GID, discovered by deploy-stack); the audit/run-log dirs via their `o+r` world-read — **NOT** via
+`group_add: 1001`, which would over-grant read of the `0640 1001:1001` API/GUI TLS private keys (the MF-1 catch).
+The file_tail_ssh key + its dir are rendered owned by the Vector uid (SSH demands it). Pinned by
+`test_compose_logging.py` (`test_vector_runs_non_root`, `test_vector_uses_socket_proxy_not_raw_socket`,
+`test_socket_proxy_is_read_only_filtered`, `test_vector_uid_distinct_from_loki`, the no-gid-1001 + the
+`vector-data`-is-a-10002-owned-bind guards). **✓ GATE A PASSED (scratch-VM dogfood, 2026-06-18):** non-root Vector
+(uid 10002, `group_add` the host systemd-journal GID) shipped **1822 host journald events** + container logs
+through the proxy (0 errors), and `POST /containers/create` via the proxy returned **403** (create blocked). The
+dogfood also caught that the data_dir must be a **10002-owned bind** (a named volume inits root-owned → non-root
+Vector couldn't write its checkpoint) — fixed. **Promotion unblocked.** **Residual (tracked):** Vector still ships
+**plaintext** log bodies that *may* contain a secret an upstream device logged (the stack's own logs are
+`no_log`-disciplined, C2; Loki is mgmt-only, C3). Loki has **no auth** at homelab scale (mgmt-bound, Grafana-only
+query path) — add auth before any wider exposure (residual 5, deferred).
+
+### C13 — The online-validate seam is a read-only, no-new-port reaching client  ◑ partial (built; control-VM/on-demand)
+
+The no-bespoke tenet's VALIDATE leg (`scripts/gen-validate-live.py`) reaches each enabled class's hosts to confirm
+a pinned vendor fact (TLS posture, API path, token read-scope, SNMP OID support) still matches the live device.
+Reaching the lab is the point, so the trust posture is bounded by construction:
+- **No new listening port + no new credential.** It is an OUTBOUND client (like the exporters / the Vector pull),
+  not a listener. It **reuses** the existing audit-scoped `proxmox` token (read-only, `Sys.Audit`/`PVEAuditor`) and
+  the `snmp_observability` SNMPv3 USM user — no new secret, no new SOPS domain. The token is only an `${ENV}` ref
+  resolved at the fetcher boundary; the audit line + the on-screen verdict carry the secret-domain **NAME** only,
+  never the value (C2/C12 by NAME — pinned by `test_gen_validate_live.py`).
+- **A closed read-only transport allow-list.** The reaching primitives are a TLS handshake, an HTTP **GET**, and an
+  SNMP **GETNEXT** — there is no write/POST/SET primitive, so a check **cannot** actuate a device. Machine-enforced
+  by a `tests/validate.sh` `validate-live-readonly` grep-gate (a write verb cannot be declared) — the
+  `exporter-no-host-port` idiom.
+- **Reaches only already-allowed C3 paths.** The MVP reaches proxmox `:8006` over the SAME mgmt-routed paths the
+  Vector pull + the pve-exporter already traverse daily, plus the device's own node-local apidoc (`:8006`, NO WAN
+  egress) — zero new device-reaching path, zero new egress. The high-blast firewall/switch SNMP reach is deferred
+  (its per-validator access-chain header attaches when it lands).
+- **Tier: control-VM / on-demand, never hermetic CI.** It is deliberately absent from the CI/`validate` lane (it
+  reaches the lab); its dispatch + judgement are proven hermetically via an injected fake fetcher. No trust
+  boundary moves — it reads what the daily pipeline already reads, and writes nothing.
+
+**Proves:** `tests/unit/test_gen_validate_live.py` (vendor-blind dispatch, reach-then-judge verdicts, token resolved
+from the descriptor's own env never an admin side-channel, the token value never in the audit/verdict, the
+200+empty silent-trap disambiguated, fail-closed on an unknown check); the `validate-live-readonly` grep-gate in
+`tests/validate.sh`. **A′ (the schema-permission check) LANDED** as `check_schema_permission` — reshaped after a
+live finding (`/cluster/tasks` GET is `{user: all}`, row-audit-filtered, so the original "required-permission"
+form was moot): it now pins the apidoc's permission MODEL (`expect: {user: all}`) and DRIFTs if PVE tightens the
+endpoint, a deterministic read-only apidoc GET (no role literal, MF-4; no new surface). **The heavier
+role→privilege-map A′ LANDED too** — a live apidoc probe (2026-06-17) confirmed a real perm-gated dependency:
+`/cluster/status` GET requires a hard `Sys.Audit` check (`{check: [perm, /, [Sys.Audit]]}`), exactly the permission
+the provisioning surface's **PVEAuditor** grant confers and the proxmox metrics path depends on — and nothing
+validated it (`token_scope` only exercises the `{user: all}` pull). Closed in two halves on `logging/proxmox_api.yml`:
+`schema_permission` with an `api_path` override pins that the apidoc still REQUIRES `Sys.Audit` (catches PVE
+relaxing/changing it — least-privilege drift); new **`check_grant_covers`** LIVE-reads `/cluster/status` with the
+descriptor's own `*.Audit` token (200 ⇒ the grant confers it; an UNAMBIGUOUS 403 ⇒ the grant lost coverage and the
+privileged reads break). Both judge only schema/HTTP-status — the role/permission are descriptor DATA, never a check
+literal (MF-4 preserved). This closes the loop between the onboard provisioning grant and the validate seam. Live OK
+2026-06-17.
+
+### C14 — Capture-read over the GUI is a read-only, `:ro`-mounted, redacted, audited surface  ◑ partial (built; G1–G5 cleared 2026-06-24; redacted-only MVP, not yet live-deployed)
+
+The onboard-gui gains a **read-only** per-device backup index → single-rev view → unified diff over the
+secret-bearing config-capture store (the same `0700`/uid-1001 git history C8 owns). Serving captures over HTTP is a
+new read path for crown-jewel secrets (running-config hashes, PSKs, SNMP communities), bounded **by construction**:
+- **`:ro` mount, onboard-gui ONLY.** The captures dir (`${KONTROLL_BACKUPS_DIR}`) is bound **read-only** into
+  onboard-gui at `/backups` — a GUI RCE can READ, never rewrite/`git rm` the history. Scoped to the one surface (the
+  API container does not mount it — one surface, one justification). Pinned by a compose assertion on the literal
+  `:ro` suffix (`test_backups.py::test_onboard_gui_mounts_captures_read_only`) — a bare `source:target` defaults to
+  `:rw`, so the test asserts the suffix is PRESENT, never merely that `:rw` is absent (the one silent fail-OPEN).
+- **Read-only by construction.** `service/backups.py` shells only `git log/show/diff/ls-files` — no write verb. The
+  AST pin `_readonly_pins.assert_read_only` + the argv git-verb pin `assert_no_git_write` fail CI if any mutating
+  subcommand ever appears (a `git rm` riding a subprocess arg list is caught on the verb, not just the call name).
+  No restore / rollback / prune from the GUI. Those pins fail OPEN on a verb the registry doesn't know, so a
+  **fail-CLOSED completeness gate** (`assert_write_verbs_complete`, P0b/#134) AST-scans the whole service+gitio
+  layer and breaks CI if any DIRECT mutator (write-open / git-mutating argv / SOPS write) is not in `WRITE_VERBS`
+  — keeping the pin EXHAUSTIVE (its 2026-06-24 sweep closed a real gap: `gitio.sops_write_domain`, an unpinned
+  secret-writer). This read-only-by-construction guarantee underpins the C9/C10 privileged-surface read views too.
+- **Strict input validation BEFORE any `git show`.** `rev` is a 7–40-hex SHA; `file` must be a MEMBER of the
+  store's own index allow-list (stronger than a path regex — no `..`/`/`/`-flag`/NUL can be a real capture name);
+  `--` precedes every path; subprocess is an argv list (never `shell=True`); output is byte-bounded. Path-traversal
+  + rev-injection unit tests assert a bad input never reaches `git show`.
+- **Redacted by default; redact-then-diff.** The in-browser view/diff mask known per-vendor secret token SHAPES
+  (registry `config/capture-redactions.yml`, validated against the real lab vendors) server-side before the bytes
+  leave the process; the diff runs on the redacted text so a pure-secret change shows `‹redacted› → ‹redacted›`,
+  never leaking that *a* secret changed. **Redaction is defense-in-depth, NOT the boundary** — the boundary is the
+  GUI's auth + TLS + mgmt-VLAN bind (C3) + the `:ro` mount.
+- **Inside the inherited gate, every read audited.** Behind the GUI's fail-closed Basic auth + TLS + mgmt-bind
+  (C3); every index/revisions/view/diff read writes a NAMES-only audit line (`backup-{index,revisions,view,diff}`,
+  file + rev, **never a capture value** — pinned by `test_backup_view_redacts_and_audits_no_value`).
+- **Graceful-absent, never fail-open.** A missing captures dir / `.git` → `{available:false}` (HTTP 200), never a
+  crash or empty-success; the service never `sys.exit`s the worker. The feature is *inert*, not broken, on a node
+  without the mount.
+
+**Proves:** the compose `:ro`-suffix assertion; the AST + argv read-only-git pins; a redaction regression over
+**real lab vendor token shapes** (Cisco type-7/9 + SNMP + key-string, FortiGate `set <k> ENC`, OPNsense
+`<password>`, RouterOS `radius-password=`/`wpa2-pre-shared-key=`) with an over-redaction guard; the
+audit-no-capture-value route test; path-traversal / rev-injection unit tests; the absent-store → 200 test.
+
+**Residual (tracked):** Redaction is pattern-based and **best-effort** — a novel vendor secret token shape (a new
+FortiGate `ENC` field, an unseen `$<n>$` hash form) can LEAK into the in-browser view. Line-oriented redaction also
+**structurally cannot mask a MULTI-LINE secret body** (a PEM private-key block — its base64 body lines carry no
+keyword); the registry flags the `-----BEGIN … KEY-----` opener best-effort, but the only vendor that emits
+multi-line PEM bodies in captures (FortiGate) is history-EXCLUDED → never rendered (below), so this limit is latent.
+The shipped surface narrows the residual concretely: the secret-densest, history-EXCLUDED vendor (**FortiGate** — its full-config export re-serialises
+~570 lines/fetch and is `exclude_from_history`, capture-exceptions.yml) is **listed but NEVER rendered** by the
+viewer (the MVP serves TRACKED history only — its on-disk-only blob never reaches the wire), so the leak is bounded
+to a novel token shape inside a *tracked* capture, behind fail-closed auth + TLS + mgmt-VLAN-only (C3, never WAN).
+The marginal exposure is dominated by the existing onboard-gui-holds-the-age-key residual (C10 — a GUI compromise
+already owns fleet root, so capture-read is additive-within-maximal-compromise, not a new pivot). The raw
+(unredacted) download path is **deferred** (C2 — its own audit + UI confirm + security pass). **Ship gate (G1–G5):
+G1** `:ro` compose-pinned · **G2** traversal/injection closed before `git show` · **G3** registry validated vs real
+captures + this FortiGate residual named · **G4** no capture value audited · **G5** a HUMAN security sign-off on
+this control + the mount (this build is the first pass; the operator sign-off is the second). The G5 signer should
+accept, eyes-open, the two named residuals: redaction is **best-effort** (a novel single-line token shape can leak)
+and **line-oriented** (it cannot mask a multi-line PEM body — latent, since the multi-line vendor FortiGate is
+never rendered). The 2026-06-24 adversarial review (`docs/reviews/2026-06-24-backup-viewer-c1-review/`) confirmed
+G1–G4 hold in code and the FortiGate "listed-but-never-rendered" claim is true at both the GUI gate and the service
+layer (an excluded on-disk file has no commit, so `git show <rev>:<file>` cannot serve it). **G5 GIVEN 2026-06-24**
+— the operator signed off on this control + the `:ro` mount, accepting the two residuals (best-effort single-line
++ line-oriented redaction) eyes-open. All five gate items pass; the redacted-only MVP is cleared to ship (raw
+download stays deferred to C2; the surface is inert until a node mounts the captures store).
+
+---
+
+### C15-a — Supply-chain install is NEVER-BRICK: adaptive pinning + checksum, signature-where-served  ◑ partial (built 2026-06-25: the trust sidecar + descriptor Tier-cap + offline generator + the I-1 bootstrap AND I-2 runner-image install wrappers, keyring-gated + the I-1≡I-2 no-drift gate; **the L2b recorded-sha256 re-verify now binds on the control node** — pre-fetch→verify→`--offline`, TOFU lock, fail-closed on mismatch; keyring auto-provisioning remains the inert next rung)
+
+A novice's bootstrap / runner-image build / deploy **must never fail because some upstream publisher didn't sign a
+collection.** Live-confirmed (2026-06-25): public `galaxy.ansible.com` serves **zero** GPG signatures for all six
+fleet collections and a `sha256` for every one — so a fail-on-absence (`+`-prefixed) signature flag would brick
+100% of the fleet. The control is a three-layer posture (design of record: `docs/reviews/2026-06-25-never-brick-supply-chain/`):
+
+- **L1 (unconditional) — exact `==` pin** where a unit declares it; the resolved set rides the generated lockfile.
+- **L2 (unconditional, brick-proof) — checksum.** `ansible-galaxy` verifies every file vs `FILES.json` for free
+  (L2a — internal consistency only; a self-consistent full repackage passes it). **L2b — the whole-artifact digest
+  floor** (built, control node): the install wrapper pre-fetches each tarball over cert-validated HTTPS, computes
+  its `sha256`, and TOFU-binds it in a gitignored per-node lock (`instance/trust/observed-digests.yml`) keyed by
+  exact `name==version` — **first install records, a later mismatch fails closed** — then installs from the verified
+  local file with `--offline` so the bytes verified ARE the bytes installed (MF-2). The digest is recorded by the
+  **install wrapper at first install, never fetched by the generator** (synthesis Decision R1: a network GET in an
+  install-gating, hermetic generator would itself brick on a Galaxy blip / air-gap). **L2b engages only where its
+  persistent lock can live** — `instance/trust/` on the control node (I-1 bootstrap); the runner image (I-2, no
+  `instance/`) falls back to the plain L2a install. The gate is loud (a green install never implies L2b bound when
+  it didn't).
+- **L3 (adaptive) — GPG signature.** Installs run `--required-valid-signature-count all
+  --ignore-signature-status-codes NO_PUBKEY NODATA` against an auto-provisioned keyring: a signature that
+  **verifies** is honored; one that is **absent** or whose **key is unknown** is tolerated (install proceeds,
+  recorded "unsigned source"); one that **exists but fails to verify** (BADSIG/ERRSIG/REVKEYSIG) **fails closed.**
+  The ignore-list is fixed at `{NO_PUBKEY, NODATA}` and **never** widens to a tamper code.
+
+**Never-brick invariant.** Absence of a signature never halts an install; only **positive evidence of tampering**
+(a signature that fails to verify, or a recorded checksum that mismatches) does. The default (`adaptive`) needs
+**no novice configuration**; `required` (fail-on-absence) is an opt-in ratchet. **Tier-cap:** a downloaded unit
+with unverified provenance (`signature != required`) may **not** target `edge_firewall`/`core_switch` —
+`gen-actuation.py` rejects the combination fail-closed at generate (never on plain absence), and the **app-store
+CREATE seam** (`POST /actuation/create`) refuses it earlier still, at author time (**403**), keying off the
+module-DERIVED `inventory_group` (not the operator's blast label) so a downgraded blast can't smuggle an unsigned
+install onto the high-blast tier — see the C10 create rider.
+
+**Built so far:** (1) **the data foundation** — `scripts/gen-requirements.py` emits the trust sidecar
+(`ansible/collections/trust.generated.yml`, gitignored) with `default_signature_policy: adaptive` + per-collection
+policy + `sha256` placeholders, staying **offline**; `scripts/gen-actuation.py` adds the `adaptive` enum default +
+keyring/`sha256` shape validation + the Tier-cap. (2) **the I-1 (bootstrap) install wrapper** —
+`scripts/install-collections.py` replaces the raw flat `ansible-galaxy collection install` at `bootstrap.yml`: it is
+**keyring-gated** so **no keyring on disk ⇒ a plain `-r` install, byte-identical to the prior behaviour** (the
+current all-unsigned fleet has zero behaviour change / zero brick risk), and a keyring present ⇒ the adaptive L3
+flags (`--required-valid-signature-count all --ignore-signature-status-codes NO_PUBKEY NODATA`, **never** a
+`+`-prefixed count). It prints a loud, names/counts-only provenance summary. (3) **the I-2 (runner-image) install
+wrapper** — `docker/semaphore-runner/Dockerfile` installs via the **same** `scripts/install-collections.py`
+(env-parameterized for the semaphore-venv `ansible-galaxy` + the `-p /usr/share/ansible/collections` target) and
+COPYs the trust sidecar (BRICK-2), with a `test_dockerfile_installs_via_the_same_wrapper` **no-drift gate** pinning
+that both seams use the identical wrapper (no `+`-flag can slip onto one path only). (4) **the L2b recorded-sha256
+re-verify** — the wrapper now diffs the lockfile against what is installed (`collection list --format json`, local,
+so a present pinned set does **no** fetch: air-gap-safe + idempotent), pre-fetches only the to-install subset,
+TOFU-records/re-verifies each tarball's `sha256` against `instance/trust/observed-digests.yml` (fail-closed on
+mismatch), and installs `--offline` from the verified files. `instance/trust/keys/.gitkeep` keeps the trust dir
+present (FIX-KEYS). (5) **the MF-5 provenance surface (no verification theatre)** — `service/provenance.fleet_provenance`
+(read-only) classifies each collection `unsigned-pinned` (amber — verified by pin + checksum only, no signature) or
+`signed` (green — policy `required` AND a keyring held), surfaced in the GUI Index 'Supply chain' section
+(`GET /api/provenance`, audited counts-by-class) so a green 'installed' never implies a signature was checked. **Next
+rung (inert until a signing-enabled source exists):** keyring auto-provisioning so a *signed* collection actually
+verifies (today's fleet serves zero signatures, so the L3 keyring path stays dormant).
+
+**Proves:** `tests/unit/test_actuation_registry.py` (the sidecar defaults every module collection to `adaptive` +
+null `sha256`; the Tier-cap rejects unverified high-blast incl. on absent signature; a low-blast `adaptive` unit is
+valid; the **BRICK-1 no-network source pin**); `tests/unit/test_install_collections.py` (no keyring ⇒ plain install;
+a keyring ⇒ the adaptive flags; **never a `+` count**; the ignore-list is EXACTLY `{NO_PUBKEY, NODATA}`, never a
+tamper code; an install failure propagates fail-closed; **L2b: the present-set re-run does no fetch (air-gap/idempotent),
+a fresh install records the tarball `sha256` then installs `--offline`, and a recorded-digest mismatch fails closed
+WITHOUT installing**); `tests/unit/test_bootstrap_requirements.py` (bootstrap
+installs via the wrapper, not the raw flat command); `tests/validate` `gen-requirements --check` (hermetic staleness
+gate, the only `gen-*` that lacked one) + `gen-actuation --check`.
+
+**Residual (R-NB-1, accepted — the conscious never-brick trade):** on public Galaxy the fleet is verified by `==`
+pin + `sha256` only — no publisher-identity proof, because the ecosystem serves nothing more. L2b closes
+**whole-artifact swap of an already-recorded `name==version`**; it does **not** close **version-bump on a `>=`
+floor** (a malicious *newer* release resolves, installs, and TOFU-records as a *new* entry) — that is closed only by
+an exact `==` pin, so the floor's version-bump stays the accepted residual until the operator pins `==`. The
+first-install of a not-yet-recorded pin is a **TOFU window** (R-NB-2), bounded by cert-validated HTTPS + the
+human-add `modules/` gate + the Tier-cap. Bounded overall by the pin, the recorded checksum, the Tier-cap (no
+edge/core), and loud surfacing.
+**Un-defer trigger:** a signing-enabled source (Automation Hub / a self-signed mirror) becomes available → ratchet
+`signature_policy: required` against it.
+
+---
+
+### C16 — The compose-native installer is an ephemeral, host-bind, host-root-trusted surface  ◑ partial (Phase 1 built; fresh-VM dogfood pending)
+
+Phase 1 of the compose-native install (docs/reviews/2026-06-29-compose-native-install/) moves the install
+*compute* into an ephemeral container (`docker/installer/Dockerfile` + `docker/services/installer.yaml`, launched
+by `scripts/kontroll-installer.sh`) that runs the unchanged bootstrap/local-canonical/deploy-stack playbooks. It is
+**host-root-equivalent for the run's duration** (a `:rw` docker socket = the host daemon), so the floor is:
+
+- **No secret in an image layer or a named volume.** The age key, the C10 canonical, and the rendered `.env` 0600
+  are **host bind** files — a named volume is docker-socket-readable (strictly wider than a 0600 host file), so it
+  is forbidden. The image bakes **no** secret / age key / `instance/`; the repo-root `.dockerignore` is the guard.
+- **Ephemeral, CLI-only, portless.** `run --rm`, no `restart:`, no `ports:` — the socket grant exists only while
+  the one-shot installer runs, never as a standing surface.
+- **`SOPS_AGE_KEY_FILE`, never the literal `SOPS_AGE_KEY`** (no private key value in `docker inspect` / the env).
+- **No keygen at build** (the control key is a host gesture, minted through a runtime `:rw` bind, never an image).
+- **Operator identity is injected** (`KONTROLL_OPERATOR_{USER,UID,GID,HOME}`) so the root-in-container run chowns the
+  canonical + renders `.env` to the real operator — a non-root `compose up` can then read it; the canonical isn't
+  left root-owned (the F-CANON break). On a host-direct run those env vars are absent ⇒ byte-identical to before.
+
+Covering check: [tests/unit/test_installer_phase1.py](../tests/unit/test_installer_phase1.py) (named-volume
+prohibition, ephemeral+portless, `SOPS_AGE_KEY_FILE`-not-literal, no build-time keygen, the `.dockerignore` guard,
+the MF-1/MF-6 parameterizations) + the storage-chown guard's narrow installer-root exemption
+([tests/check-storage-chown.py](../tests/check-storage-chown.py)). The installer's blast radius **equals** today's
+host-ansible (it does the same things, with a *narrower* dependency surface — a pinned image vs the unpinned host
+toolchain that caused the fix(install) bug class). See [docker/installer/README.md](../docker/installer/README.md).
+
+**Phase-B extension — the CONTROL image is now a published CODE surface (the bake).** Phase B bakes the immutable
+kontroll code + data registries (`api/ gui/ scripts/ ansible/` + the registries) into the control image at
+`/opt/kontroll` (`chmod -R a-w`), so a baked deploy runs them from the image instead of a host `/repo` clone
+(`docs/reviews/2026-06-29-phase-b-baked-code/`). This makes the **published, world-pullable** control image a
+code-bearing surface — so the *same* no-secret-in-an-image floor above now governs it, with three added guards: **(M9)**
+the build context must CONTAIN `api/ gui/ scripts/` (no silent un-bake) and EXCLUDE `instance/`, `local/`, the
+age-key/secret patterns, and the `*.generated.*`-bearing config dirs (`prometheus/ dashboards/ config/`) — pinned by
+`test_publish_images.py` against `.dockerignore`; **(M5)** the read-only-by-construction AST pin runs as a `gate` job
+the publish `needs:`, so a tag can never publish code the pin hasn't cleared on that commit (baking moves the
+read-only guarantee off the running clone onto the digest-pinned image); **(M6)** the baked importable package
+`scripts/kontroll/` has a committed, per-file sha256 **recorded floor** (`docker/code-manifest.lock.yml`, the "L2b for
+code" analogue of the image-digest byte floor + the L2b collection-tarball floor) — `gen-code-manifest.py --check`
+runs in `validate` **and** the publish `gate` (so the world-pullable image's code can never silently drift from the
+committed, reviewed manifest), and `gen-code-manifest.py --verify <tree>` re-checks a materialized baked tree
+(`/opt/kontroll`) fail-closed for an audit. The age key / `instance/` are **never** in
+the COPY set (the strip holds); the bake adds no secret to the layer. Covering check:
+[tests/unit/test_code_manifest.py](../tests/unit/test_code_manifest.py) (in-sync floor, no-omission coverage,
+fail-closed on a changed/added file). The top-level promote slice is covered separately by **M8a** byte-identity
+(`test_launch_kit.py`); the whole image by its sha256 digest (C0/C1).
+
+### C18 — Passive discovery is a read-only, cred-reusing, untrusted-response surface  ◑ partial (Rungs 1a–3 + IPv6 + OpenWrt SSH + OUI hint built: read spine + GUI inbox + pre-fill + vendor DHCP siblings + the SNMP-ARP transport + dual-stack `neighbors_snmp` (v6) + the OpenWrt forced-command SSH lease read + the pinned IEEE OUI→vendor display-hint; live-dogfooded on a real FortiGate + a net-snmp responder)
+
+> **IPv6 dual-stack read guard (SEE-ONLY, IPv6 rung).** The `neighbors_snmp` method walks the RFC-4293 dual-stack
+> ipNetToPhysicalTable, so a v6 neighbour can now become a candidate. This widened the discovery read KEY only:
+> `service/discovery._clean_ip` asks for a NEW dual-stack `ip` validator (`_v_ip` = `_v_ipv4` OR `_v_ipv6`, each
+> keeping its config-injection + never-a-host rejections; `_v_ipv6` also drops link-local). The config-plane danger
+> knobs (`mgmt_ip` / `ansible_host`, `type: ipv4`) are **untouched** — `_v_ipv4` is never widened, so onboard/reconfigure
+> keep their v4-only guard. The read-only AST pin stays green (a wider read validator adds no write verb). **SEE-ONLY:**
+> a v6 candidate surfaces + pre-fills `field-host`, but onboard validates `ansible_host` as v4 — so a v6 host is
+> *surfaced for awareness*, not *onboardable*, until that knob is a deliberate, separate config-plane decision (its own
+> `--check` + dogfood). Design-of-record: `docs/reviews/2026-07-03-discovery-corpus-growth/99-synthesis.md`.
+
+(C17 is the **homelab** edition's control number — solo auto-promote, on the `homelab` branch; C18 is reserved for
+this **edition-neutral** control so the two tines' control numbers never collide when `homelab` rebases onto `main`.)
+
+The discovery inbox reads an already-onboarded device's OWN DHCP-lease / neighbour view read-only
+(`scripts/kontroll-discover.py` → the git-ignored `local/discovery-inbox.generated.json` →
+`service/discovery.read_inbox`), diffs it against onboarded inventory, and surfaces the un-onboarded delta so the
+operator can onboard it — a human still turns every key (the Rung-1b pre-fill reuses the EXISTING
+onboard→stage→promote; there is **no auto-onboard**). Bounded by construction:
+- **Passive + read-only, never a scan (across ALL THREE transports).** The sweep's fetchers are EXACTLY three
+  read-only device primitives: a hard-wired HTTP **GET** (the DHCP-lease methods), an SNMPv3 **`snmpbulkwalk`** (a
+  read-only GETBULK of an L3 switch's ARP/neighbour view — the SNMP methods, Rung 3 + IPv6), and a **forced-command
+  `ssh`** read (the OpenWrt DHCP-lease method — a byte-capped read of an AP's own dnsmasq lease file). None has a
+  write/POST/SET/transfer primitive and there is no CIDR expansion, so each reaches ONLY an onboarded device's own
+  address (`:161` for SNMP), never the network. The SNMP walk and the SSH read are **byte-bounded at the TRANSPORT**
+  — a streamed, killed-on-overflow read of the child (the analogue of the HTTP socket cap), so a hostile/huge ARP
+  table or lease file cannot OOM the control VM. The SSH read is **read-only by construction**: the client sends NO
+  command word (the argv ends at `<user>@<host>`), so the AP's `authorized_keys` **forced command** (`cat
+  /tmp/dhcp.leases`, host-key-pinned, `BatchMode`/no-TOFU) is the ONLY thing that can run. Machine-enforced by the
+  `discovery-passive-only` grep-gate in `tests/validate.sh` — a NEGATIVE leg (no SNMP SET/raw socket/CIDR/POST) plus,
+  for SSH, a case-SENSITIVE POSITIVE leg that forbids every write/tunnel/remote-exec construct (scp/sftp, the
+  `Command`/`Forward` option families, ProxyJump/Tunnel/Subsystem, the `-F`/`Include=` config-indirection, and the
+  `os.system`/`os.popen`/`pty`/`paramiko`/`os.exec*` alternate-spawn primitives) — plus the in-code twins
+  `test_fetchers_expose_only_read_only_primitives` (the surface is EXACTLY `[http_get, snmp_walk, ssh_read]`, all
+  read-only) and `test_ssh_read_is_forced_command_read_only` (an argv-AST proof of "no client command word after
+  `user@host`", the property a grep can't see) + `test_actor_has_no_shell_true_and_no_extra_ssh_spawn`.
+- **Zero new authority (the read-only pin stays green UNCHANGED).** The device reach + the artifact WRITE live in a
+  TOP-LEVEL actor (`scripts/kontroll-discover.py`), OUTSIDE the pinned service layer (like `gen-validate-live.py`);
+  `service/discovery.read_inbox` is a PURE read — no `WRITE_VERBS`, no write-open, no device reach —
+  `assert_read_only`-pinned + covered by the fail-closed completeness gate. That the read-only AST pin is unchanged
+  IS the proof this feature adds no promote/actuate path. (An `open(cache,'w')` inside `service/*.py` would trip the
+  completeness gate — which is exactly why the sweep + its cache write are out-of-band.)
+- **Credential reuse, as-scoped.** A credentialed source reuses the class's EXISTING read cred from its declared
+  SOPS domain (the JSON DHCP methods → the `network` domain; the SNMP methods → the shared read-only `kontroll_ro`
+  SNMPv3 user of the `snmp_observability` domain, the same monitoring GET cred the snmp_exporter already uses; the
+  OpenWrt SSH lease method → a **DEDICATED forced-command** read key in the `network` domain
+  (`openwrt_discovery_ssh_private_key`), **never** the full-shell Ansible root key), never widened; the value is only
+  an `${ENV}` ref resolved at the fetcher boundary. The operator EXPORTS `KONTROLL_SNMP_V3_*` (decrypted from
+  `snmp_observability`) or, for OpenWrt, decrypts the read key to an ephemeral `0600` file and EXPORTS its PATH +
+  the operator-pinned known_hosts PATH (`KONTROLL_OPENWRT_DISCOVERY_KEYFILE`/`_KNOWN_HOSTS`) before the on-demand
+  sweep — NOT deploy-provisioned into a `.env` (exactly as for `gen-validate-live`); unset ⇒ the source is
+  `no-creds`, fail-closed, never an unauthenticated/TOFU fallback. The audit line + the artifact carry the class/method/status/count NAMES only — never a
+  credential, never a discovered identifier (C2/C12). Residual: net-snmp's `-A`/`-X` put the v3 passphrases on the
+  child argv (visible to a local `ps`/`/proc` reader for the walk's lifetime) — accepted under **C3** (single-operator
+  mgmt VLAN); a raised error is cred-free (`rc=<n>` only, stderr discarded).
+- **A discovered lease is UNTRUSTED DATA, not code.** Byte-capped at the socket + row-count-capped at parse (the
+  flood cap) before it is written; every field is re-validated on the pure READ side through the SAME closed
+  `_validate` guards the config plane uses (a bad IP dropped, a bad hostname/MAC → None), so no un-normalized device
+  byte reaches the service result. The GUI (Rung 1b) additionally renders every device byte via `ET`/`textContent`
+  — a lease is attacker-influenceable, so a `<script>` hostname renders as literal text (F6, e2e-proven) — defense
+  in depth, not the boundary. The `GET /api/discovery` route is a thin pure passthrough of `read_inbox` (mirroring
+  `/api/pending`); the inbox's "Onboard this" only PRE-FILLS the discovered host into the EXISTING onboard form (the
+  human picks the class + fills creds + Runs — discovery reaches no onboard/stage/promote path of its own).
+- **The OUI vendor hint is OUR committed data + a DISPLAY HINT, never a class guess (F8).** The candidate's `vendor`
+  is looked up (pure, offline, longest-prefix) from the pinned IEEE OUI registry (`oui/`, derive→pin→`--check`,
+  gen-oui.py; the network `--refresh` is operator-only, grep-gated out of every install path — BRICK-1) keyed by the
+  already-`_clean_mac`-validated MAC — so it is not a device byte, adds NO device reach and NO new authority (the
+  read-only AST pin stays green; `_load_oui`/`_vendor_for` are pure reads). It is rendered `textContent` and read by
+  NO code that selects a class: it aids the human's class-pick, it never makes it (an e2e asserts "Onboard this"
+  pre-fills only the host, no class pre-picked). A MAC's OUI is a *manufacturer*, not an Ansible *collection* — the
+  class-guess F8 deliberately cut stays cut.
+- **No live identifiers in committed data (P-1).** The runtime artifact is git-ignored under `local/`; committed
+  fixtures/goldens use documentation identifiers only (RFC-5737 IPs, RFC-7042 MACs), enforced by the
+  `discovery-p1-fixtures` grep-gate.
+- **Tier: control-VM / on-demand, never hermetic CI or an install-gating path** (it reaches the lab — the BRICK-1
+  discipline; deliberately absent from `validate`/bootstrap). Its dispatch/parse is proven hermetically via an
+  injected fake fetcher.
+
+**Proves:** `tests/unit/test_discovery.py` (the declared offer reaches opnsense while a `{plugin: httpapi}` facts
+predicate would not; the fetcher is GET-only; a hostile body is tolerated; the IP-diff hides an onboarded host; the
+flood cap bounds rows; hostile fields are dropped/normalized; `read_inbox` is `assert_read_only`-green) + the
+`discovery-passive-only` + `discovery-p1-fixtures` grep-gates in `tests/validate.sh`; the `/api/discovery` route
+(`tests/integration/test_gui_api.py`: auth-gated 401 / pure passthrough / degrade-never-crash 500) + the GUI e2e
+(`tests/e2e/test_discovery_flow.py`: the panel renders, a `<script>` hostname renders as literal text and never
+executes, the "Onboard this" pre-fill lands the discovered host in `field-host` with `apply` unchecked).
+Design-of-record: `docs/reviews/2026-07-03-discovery-inbox-scope/99-synthesis.md`. Accepted-risk row **R-DISC-1**.
+
+### C21 — The shippable tree carries no identifier of a real deployment  ✔ implemented (2026-10-08, the public split)
+
+**Threat:** the tool is developed against a real homelab; an address, hostname, domain, MAC, key
+or operator path pasted into a doc, a fixture or a CHANGELOG entry describes that lab's attack
+surface to anyone who reads the public repository — and the earlier guards *embedded the very names
+they blocked*, so publishing them would have published the denylist.
+**Implements:** `tests/_leak_guard.py`, one scanner run from three places — `tests/validate.sh` step
+`pii-guard`, the required check *No leaked personal identifiers* (`.github/workflows/pii-guard.yml`),
+and the pytest twin `tests/unit/test_leak_guard.py`. Layer 1 is **structural** (public, always on):
+any RFC-1918 address in dotted/dashed/underscored form, a non-documentation MAC or global IPv6, a
+real-length age recipient / `AGE-SECRET-KEY`, the maintainer's personal e-mail, an operator-machine
+user-profile path; RFC-5737 TEST-NET, RFC-7042 MACs and `2001:db8::/32` are the sanctioned examples.
+Layer 2 is the **instance-token list** — this deployment's hostnames/domain/users/subnets/VLANs as
+regexes in `instance/leak-tokens.txt` (private overlay; the public CI gets the same list as the
+repository secret `KONTROLL_LEAK_TOKENS`; a public checkout runs the shipped canaries in
+`instance.example/leak-tokens.example.txt`), reported by index + digest only. The scope is every
+git-tracked file minus the private strip set (`instance/`, `docs/reviews/`, `local/`); a line that
+must hold a private address carries `pii-guard: allow <reason>`. `kontroll.paths.resolve()` reads
+the shipped `instance.example/` on a checkout with no `instance/`, so the public tree passes its own
+gates with no overlay present; writers (`keygen`, `enable_in_fleet`, `kontroll-init`) pass
+`write=True` and can never target the example.
+**Proves:** `tests/unit/test_leak_guard.py` (dashed/dotted/underscored RFC-1918 caught; TEST-NET,
+OIDs and version strings never; a planted canary fires and is reported without its value; the whole
+shippable tree scans clean), `tests/unit/test_paths_overlay.py` (the example tier is read-only and
+off once `instance/` exists), the PII-guard workflow's path assertion (no tracked `instance/` path in
+a tree whose `.gitignore` excludes the overlay). Design-of-record and the full sweep:
+`docs/reviews/2026-10-08-public-split-pii-sweep/`; operator runbook `docs/public-split.md`.
+
+---
+
+## Accepted risks / known limitations
+
+| Item | Risk | Accepted? | Rationale |
+|---|---|---|---|
+| Single operator, no RBAC beyond Semaphore | Anyone with control-VM access controls the fleet | Yes | Single-user homelab; Semaphore adds per-user RBAC for the UI layer in Phase 3 |
+| age key loss | Encrypted secrets become unrecoverable | Yes | Mitigated: every secret is encrypted to an offline **break-glass** second recipient, so loss of the VM key is recoverable; secrets are also low-volume and re-enterable |
+| API rate-limit counters in-process | Counters reset on restart + are per-process (wrong if the API is ever run multi-worker / multi-replica) | Yes | One uvicorn container today (mgmt-only, single-operator); the store is a swappable seam → move to a shared backend (Redis) the moment the API scales horizontally |
+| API rate-limit `X-Forwarded-For` trust | A spoofed XFF could shift an inquiry IP bucket | Yes | mgmt-VLAN-only; any fronting proxy is operator-controlled. When SSO/proxy lands (cluster 2c), trust XFF only from the known proxy hop |
+| Private git remote holds encrypted secrets | Push exposes ciphertext | Yes | SOPS ciphertext is safe to host; the age key is never pushed |
+| Control VM on a hypervisor it also manages | A bad play against that node could affect the controller | Partial | Snapshot + git + offline key; avoid self-targeting the controller's node in risky plays |
+| Current edge is FortiGate/Cisco (pre-cutover) | Edge creds + API differ from the post-cutover target | Yes | Functional groups isolate the churn to one inventory block |
+| `host_key_checking = False` (TOFU) | MITM on a device's *first* connect isn't detected | Yes | Known fleet on the trusted mgmt VLAN; the alternative is a manual per-host `ssh-keyscan` that breaks hands-off setup. Key *changes* after first contact still surface via the recorded known_hosts. |
+| Prometheus `--web.enable-lifecycle` (item F) | Anyone reaching `:9090` can `POST /-/reload` (benign) **or** `/-/quit` (stop Prometheus — a DoS) | Yes | Enables the no-docker-socket `reload-observability` enact task (HTTP reload, no host root). `:9090` is **mgmt-bound** (C3, never WAN) — the same boundary that already gates the whole control plane; `/-/quit` only stops a restart-`unless-stopped` container (no data loss). Net: a clean Tier-1 enact for a mgmt-only DoS surface. |
+| Device config captures are not encrypted at rest | A backup capability with `destination: offsite` would move secret-bearing captures (running-config hashes/PSKs) outside the local `0700`/uid-1001 store with no encryption-at-rest story | Yes (deferred) | The backup-capability ships `destination: local` only — captures stay `0700`, git **never pushed** (C8). The dialog now exposes a `destination` knob (#123) that **offers** `offsite` for discoverability but **refuses it at propose** (`backup.build_plan` → `bad_param`, fail-closed with the C8 reason), so no offsite copy can be promoted until an encryption-at-rest design closes this. `retention` is likewise declared/carried (`kontroll_backup_retention`) and its prune **enforcement** is now LIVE (#125 — a fail-closed, default-safe history rewrite of the local captures repo only; see C8). C1's `kontroll_backup_deploy` backs up the **encrypted repo**, not device captures. |
+| Captures are READABLE over the GUI backup viewer (C14) | An authenticated mgmt-VLAN operator — or a GUI-process compromise (which already holds the age key → fleet root, C10) — can read device running-configs (hashes/PSKs/communities) over HTTP, **redacted-by-default but best-effort** (a novel vendor token shape can leak into the view) | Yes (compensated; **gated ship** G1–G5 incl. human sign-off) | **`:ro` mount** (no write-back, compose-pinned on the `:ro` suffix), **read-only git only** (no actuation/rewrite — AST + argv pins), **rev/file validated before any `git show`** (traversal/injection closed), **redacted-by-default + redact-then-diff** (defense-in-depth, not the boundary), behind the GUI's **fail-closed auth + TLS + mgmt-VLAN bind** (C3), **every read audited NAMES-only**. The secret-densest vendor (FortiGate, history-excluded) is **listed but never rendered** (its on-disk blob stays off the wire). Captures stay `0700`/uid-1001 at rest, history **local-only, never pushed** (C8 unchanged). Marginal exposure dominated by the existing onboard-gui-with-key residual (C10). Raw download **deferred** (C2). See [C14](#c14--capture-read-over-the-gui-is-a-read-only-romounted-redacted-audited-surface). |
+| The network API/GUI becomes a canonical-writer (C10) | A compromised/leaked-token service could push to the source of truth every clone + deploy trusts | Yes (compensated) | **Propose-then-promote**: the service only pushes a `proposed/<run_id>` staging ref — a trusted promote step fast-forwards `main`, so a leaked token can only park rejectable proposals, never enact. **No age key** is mounted (no standing decrypt). `receive.denyNonFastForwards`/`denyDeletes` + a push-only clone + rate-limit + mgmt-VLAN-only (C3) bound it. **Corrected 2026-07-05:** the "only parks rejectable proposals" property held for `push:false` but was **breached by `push:true`** — the content clone's `origin` **is** the canonical, so `commit_and_push`'s optional `git push origin HEAD` advanced `main`. Closed by the `and not staging` guard (`gitio.py`) + a uid-1001 canonical `update` hook. The property is structurally true again ([docs/reviews/2026-07-05-c10-origin-push-breach/](../docs/reviews/2026-07-05-c10-origin-push-breach/)). See [C10](#c10--privileged-mutation-enablement-the-network-service-writes-the-canonical) + [docs/privileged-mutation-enablement.md](../docs/privileged-mutation-enablement.md). |
+| Arming (`api_privileged`) gives every network container `:rw` on the canonical (C10, item C) | A **container RCE** (api/onboard-gui/semaphore) can `update-ref`/rewrite/delete `main` **directly** — `update-ref` is not a push, so deny* + the FF-only gate (which bound the promote *playbook*) do **not** constrain it; a breach can non-FF/delete main, not just stage | Yes (compensated) | Gated on `api_privileged` — the **read-only deploy mounts `:ro` everywhere** (default), so this exists only when armed. The leaked-**token** path stays strictly propose-only (`from_env`+`_push_target` fail-closed coupling). Bounded: the canonical is a **reconstructible cache** (operator workstation + GitHub are truth — re-pushable, divergence visible), and the **dominant** residual (fleet root via the scoped age key onboard-gui/semaphore already hold) strictly dominates canonical-write; mgmt-VLAN + single-operator. The alternative (Semaphore SSH-to-host + sudo) is strictly worse (host root). **Narrowed 2026-07-05:** the C10 `update` hook now refuses a uid-1001 receive-pack **push** to `main`, so a container-RCE that shells a *push* to main is caught by the canonical. The residual is now specifically a uid-1001 RCE using `git update-ref`/`packed-refs` rewrite **directly** (not a push — the hook only fires on receive-pack) — unchanged, still bounded by the reconstructible-cache + offsite-mirror-fsck follow-on. |
+| Secret values + a minted private key cross the mgmt-side hop (C11) | A submitted secret / a show-once private key travels in the request/response body | Yes | TLS (GUI) or the operator's reverse proxy (`byo_proxy`, API) protects it; **mgmt-VLAN-only, never WAN** (C3), behind C9 fail-closed auth. Symmetric to the already-accepted secret-entry exposure. The private key is **show-once** and never persisted; `.sops.yaml` edits are additive + parse-verified. See [C11](#c11--guided-secret--key-onboarding-is-no-leak-by-construction). |
+| ~~Vector runs root with a `:ro` docker socket~~ → **HARDENED: non-root + socket-proxy** (C12) | A Vector RCE could `POST /containers/create` = host root (the raw socket is root-equivalent even `:ro`) | **No — closed (GATE A passed)** | Vector now runs **non-root** (uid 10002) and holds **no raw socket** — `docker_logs` targets a `docker-socket-proxy` (`POST=0`, GET/HEAD-only); journald via the discovered `systemd-journal` GID; audit dirs via `o+r` (never `group_add:1001` — it would leak the TLS keys). A Vector RCE is now an unprivileged log-reader. **GATE A dogfood (2026-06-18): PASSED** — non-root Vector shipped 1822 journald events + container logs through the proxy; `POST` → 403. **Promotion unblocked.** See [C12](#c12--the-logging-pipeline-is-a-secret-surface-collector-privilege-label-hygiene-mgmt-only). |
+| Loki stores plaintext log bodies + has no auth (C12) | A log line may carry a secret an upstream device failed to redact; Loki itself is unauthenticated | Yes | The store is `0750`/uid-10001 at rest (C8 boundary), mgmt-VLAN-only (C3), queryable only through Grafana (`access: proxy` — the browser never touches Loki); the stack's own logs are `no_log`-clean (C2). **The hardening is an opt-in basic-auth reverse-proxy gateway** — a gated Caddy `loki_auth` service, OFF by default; Loki stays single-tenant `auth_enabled:false` behind it; Grafana + the Vector sink carry the cred from a `logging_loki_auth` SOPS domain — **not** Loki's own `auth_enabled` (that is X-Scope-OrgID *tenancy, not authentication*, and breaks the `fake`-tenant store). `loki_auth: off` is a strict no-op. **Un-defer trigger:** Loki `:3100` reachable beyond the single-operator mgmt VLAN, OR the C9 GUI/API SSO residual closes — whichever first (this is the FIRST of the three to un-defer). Blueprint: `docs/reviews/2026-06-18-logging-ingress-hardening/99-synthesis.md`. |
+| The syslog ingress (`:5514`) is unauthenticated + mgmt-bound (C12) | A host on the mgmt VLAN could send forged/spoofed log lines into Loki | Yes | Plain RFC5424 syslog has no auth by design; the port is **mgmt-VLAN-only** (`${KONTROLL_MGMT_IP}`, never WAN, fail-closed `:?`), TCP, and **only listens when a class declares `syslog_push`** (else nothing binds inside the container). Forged lines are labeled `source=capability` + the device key (never trusted as audit). **The hardening is mTLS over a shared control-issued CA** — Vector's `syslog` source has **no PSK mode**; mTLS client certs are the only auth it offers (`verify_certificate: true` ⇒ OpenSSL `PEER|FAIL_IF_NO_PEER_CERT`, so the handshake aborts for any sender without a CA-issued client cert and forged lines are rejected *before* Loki). **Opt-in per class** (a class declares a TLS-syslog method; plaintext stays for classes that can't speak it) with a **fail-closed-at-generate** contract (an incomplete TLS declaration stops the build, never silently downgrades to plaintext). **Un-defer trigger:** the syslog ingress becomes reachable beyond the single-operator mgmt VLAN (a cross-VLAN/WAN sender). Blueprint (+ the per-vendor framing dogfood, e.g. FortiGate RFC6587 octet vs Vector field-parse): `docs/reviews/2026-06-18-logging-ingress-hardening/99-synthesis.md`. |
+| The journald-upload receiver (`:19532`) is unauthenticated + mgmt-bound + runs root (C12) | A host on the mgmt VLAN could upload forged journal entries; `systemd-journal-remote` runs as root | Yes | `systemd-journal-upload` has no auth by design; `roles/logging_journald_receiver` binds the receiver to the **mgmt IP only** via `--listen-http={{ logging_collector_host }}:19532` (a specific IP, never `0.0.0.0` — pinned by `tests/unit/test_journald_receiver.py`), and it is **only provisioned when a class declares `journald_remote`** (deploy-stack gates on the rendered drop-in). Uploads are labeled `source=capability` (not trusted as audit). **The root half is CLOSED:** the receiver now runs as the **non-root `systemd-journal-remote`** user (`Group=systemd-journal`, `NoNewPrivileges`, `ProtectSystem=strict`; `test_journald_receiver.py`). The remaining **unauthenticated** half is **BLOCKED ON UPSTREAM, not merely deferred:** `systemd-journal-remote` with `--listen-https` + `TrustedCertificateFile` **neither requires nor verifies client certs** (systemd#4092, OPEN in 2026) — TLS would negotiate but authenticate nothing; additionally, Debian-family dropped the `--trust=` client-CA option moving journal-remote off GnuTLS. There is **no upstream-supported authenticated journald-upload on Debian.** **Un-defer trigger:** systemd ships OpenSSL client-cert verification for `journal-remote`. **Interim:** for a Linux host that needs authenticated upload, prefer the TLS-syslog path (a local rsyslog/syslog-ng client with a CA-issued cert), which *is* authenticatable. Blueprint: `docs/reviews/2026-06-18-logging-ingress-hardening/99-synthesis.md`. |
+| `proxmox_api` defaults to `verify_certificate: false` for PVE's self-signed cert (C12) | Vector accepts the PVE host's self-signed cert, so a mgmt-VLAN MITM could impersonate the PVE API to Vector | Yes (default) / **hardenable** | The posture is **no longer a bespoke hardcode** — it's DERIVED from the device-class vendor fact (`modules/proxmox` `vendor_defaults.tls_posture: self_signed`, captured-from-public + pinned) via `scripts/kontroll/endpoints.py`, the SAME fact the pve-exporter derives from (no drift). The poll is **read-only** (a forged response could at worst inject false log lines labeled `source=capability`, never actuate), **mgmt-VLAN-only**, and uses an **audit-scoped read-only token**. **Hardening is fully wired end-to-end, not a TODO:** set `device_trust.proxmox.tls_ca_file` (a repo-relative HOST path to your PUBLIC CA PEM) in `instance.yml` → deploy-stack assembles ONE CA bundle and BOTH consumers verify against it — the Vector pull (`source.tls.ca_file` → the mounted bundle) AND the pve-exporter (`REQUESTS_CA_BUNDLE` + a `:ro` mount; `PVE_VERIFY_SSL` is bool-only). No per-class hub edit; the instance trust DECISION is distinct from the vendor fact. Pinned by `tests/unit/test_endpoints.py` + `test_gen_logging.py` + `test_gen_exporters.py`. |
+| `file_tail_ssh` mounts a read SSH private key into Vector (C12) — **host-key TOFU now CLOSED** | A Vector RCE could read the SSH private key and `journalctl -f` the targeted hosts (the read is forced-command-locked) | Yes (key) / **No (TOFU closed)** | The key is a **dedicated forced-command** key (`journalctl -f -o json` only — no shell, no arbitrary file read; the tightest possible grant), `0600` owned by the **non-root Vector uid** (10002, not root), mounted **RO**, and **only present when a class declares `file_tail_ssh`** (else an empty placeholder). The forced read can at worst expose the target's own journal to a compromised collector — never actuate. **The host-key TOFU is closed:** the exec ssh now uses `StrictHostKeyChecking=yes` against an **operator-pinned, read-only** `known_hosts` (assembled from `device_trust.<key>.ssh_known_hosts_file`, like the device-CA bundle) — an unpinned/changed key makes ssh REFUSE (fail-closed, the stream blanks; deploy warns), never a silent MITM-accept. Pinned by `tests/unit/test_file_tail_ssh.py` (`test_exec_ssh_pins_host_key_no_tofu`, `…_bind_mounts_the_pinned_known_hosts_ro`, `…_assembles_known_hosts_always_written`). |
+| The device admin SSH **private** key is materialized to an ephemeral `0600` file at fleet-play time (C12 — the unified password-OR-key onboard seam, G6) | A key-auth host's private key (SOPS-encrypted at rest) is decrypted + written to a `0600` file in the runner's per-run dir so `ansible_ssh_private_key_file` can use it; a runner compromise *during* a fleet run could read it | Yes | The key never touches git / the inventory drop-in / a `--check --diff` / the Semaphore job log — SOPS-encrypted at rest (C1), pasted via the GUI + written via sops' **STDIN** (never argv), then materialized `no_log` to a `0600`, run-uid-owned, per-run dir **OUTSIDE the repo clone** (`_render-ssh-keys.yml`) and removed by `_cleanup-ssh-keys.yml` (a hard-aborted run leaves one `0600` key in a per-run dir until the next run/reboot — accepted). Pinned by `tests/unit/test_onboard_ssh_key.py` (PEM-via-stdin-not-argv; render-task-`no_log`; the password-only backward-compat golden; the loud-fail-on-undecryptable). **Scope decision (B):** the scoped Semaphore key is **NOT** widened to `compute`, so a `docker_host` SSH key is **control-node-only** — a key-auth host whose domain the runner can't decrypt **fails LOUDLY** (the `_render-ssh-keys.yml` assert), never a silent no-key. **`file_tail_ssh`** keeps its dedicated forced-command read key (key-only by necessity — `BatchMode`, no `sshpass`, and a password would break the no-shell forced command): a deliberate least-privilege exception to the seam, which scopes the device ADMIN/connection credential only. |
+| **R-NB-1** — the fleet supply chain is verified by `==` pin + `sha256` only when a signature is absent (C15-a) | On public Galaxy **100% of the fleet's collections serve no signature** (verified 2026-06-25); the novice default installs on the `==`+`sha256` floor with **no publisher-identity proof** — a malicious upload at the *pinned name+version* whose tarball matches its own manifest would pass | **Yes (the conscious never-brick trade)** | The alternative — fail-closed on absence — **bricks 100% of novice deploys** (the operator-stated invariant forbids it); public Galaxy serves nothing more, permanently. The floor is real + unconditional: the exact `==` pin closes silent version-bump (`resolve_pins`, `gen-requirements.py`), the recorded `sha256` closes tarball-swap of the pinned artifact (wrapper L2b, fail-closed on mismatch — next rung). The residual is **narrowed** by the pin, the human-added `modules/` gate (fleet), the **Tier-cap** for downloaded units against high-blast targets (`gen-actuation.py`), and the loud `unsigned-source` surfacing so it's never silent. **Un-defer trigger:** a signing-enabled source (Automation Hub / self-signed mirror) becomes the default → ratchet `signature_policy: required` against it. mgmt-VLAN, single-operator (C3). See [C15-a](#c15a--supply-chain-install-is-never-brick-adaptive-pinning--checksum-signature-where-served). |
+| **R-INST-1** — the compose-native installer holds a `:rw` docker socket = host root for the run's duration (C16) | The ephemeral installer can do anything the host daemon can (create privileged containers, read any host file) while `scripts/kontroll-installer.sh <verb>` runs | Yes (compensated) | Its blast radius **equals** today's host-ansible install (which already runs as the operator with sudo + writes the same crown jewels), with a **narrower** dependency surface — a pinned image vs the unpinned host toolchain that caused the fix(install) bug class. **Ephemeral** (`run --rm`, no `restart:`, no `ports:`) so the grant is not a standing surface; **no secret in any image layer / named volume** (host binds only); mgmt-VLAN, single-operator (C3). The Phase-1 image is a **local build** (trusted == today's host toolchain); **C1 now publishes a digest-pinned installer image** (Docker verifies the `@sha256:` on pull = image-world L2b, R-IMG-1), pulled by `scripts/kontroll.sh` from a launch kit instead of built on the node. See [C16](#c16--the-compose-native-installer-is-an-ephemeral-host-bind-host-root-trusted-surface). |
+| **R-IMG-1** — pulling the PRIVATE published images adds a `ghcr.io` read credential to the control node (C0/C1) | Under `use_published_images=true` the control node does `docker login ghcr.io` with a `read:packages` PAT to pull `kontroll-{control,vector,installer}` — a host credential the local-build path didn't need | Yes (opt-in; compensated) | **Opt-in + additive:** default `use_published_images=false` keeps the local build with no registry credential at all. The token is **read-only, package-scoped** (no code/repo write); CI pushes with the built-in `GITHUB_TOKEN` (no long-lived push secret). Every image is pinned by `@sha256:` in `docker/images.lock.yml` and **Docker verifies the digest on every pull** — the image-world L2b (the bytes CI recorded are the bytes that run; a registry-side swap fails the pull). C1 publishes the **installer** image too; the `scripts/kontroll.sh` bundle launcher pulls it the same digest-verified way, and the launch kit's `images.env` carries only public `@sha256:` digests — never a secret. Packages inherit the repo's PRIVATE visibility; mgmt-VLAN, single-operator (C3). The air-gap alternative (`docker save` in the bundle) needs no host token. Cosign *verification* is the deferred opt-in rung (mirrors the never-brick keyring). See [docker/README.md](../docker/README.md). |
+| **R-DISC-1** — passive discovery reaches an onboarded device with its read cred + surfaces an untrusted lease / neighbour table (C18) | The discovery sweep reads a firewall/router/switch's own view with the class's read cred — a DHCP-lease API over an HTTP **GET** (the `network` domain) OR an ARP/neighbour table over an SNMPv3 read-only **`snmpbulkwalk`** (the shared `snmp_observability` v3 user); a compromised sweep host could read those, and a hostile/spoofed device could return a crafted lease/ARP table into the inbox | Yes (compensated) | **Read-only + passive by construction** — a byte-capped GET or a byte-bounded, killed-on-overflow SNMP WALK, no write/scan/CIDR/SET primitive (grep-gated), each reaching ONLY an onboarded device's own address; the cred is reused **as-scoped** from an existing SOPS domain, `${ENV}`-only at the boundary (operator-exported for SNMP, not deploy-provisioned), audited by NAME. The lease/ARP row is **untrusted DATA**: byte+row capped, every field re-validated on the pure read side (`_validate` — a bad IP dropped, a bad/null MAC → None, incomplete-ARP noise dropped), rendered `textContent` (Rung 1b). **No new authority** — the sweep is a top-level actor OUTSIDE the pinned layer; `read_inbox` is `assert_read_only`-green, so discovery gains **no** promote/actuate path, and a human still onboards+promotes every surfaced host (C10 unchanged; no auto-onboard). Control-VM/on-demand, never an install-gating path (BRICK-1); mgmt-VLAN, single-operator (C3 — which also covers the net-snmp `-A`/`-X` argv-passphrase residual). The runtime artifact is git-ignored; committed fixtures are documentation-only (P-1, OID-aware grep-gated). See [C18](#c18--passive-discovery-is-a-read-only-cred-reusing-untrusted-response-surface). |
+| **R-DISC-2** — passive discovery reads an OpenWrt AP's dnsmasq lease file over an SSH forced-command read (C18) | The discovery sweep authorizes a dedicated SSH key on each `wireless_ap` host and reads `/tmp/dhcp.leases` over it — a new SSH grant on the AP; a compromised sweep host could use it, and a hostile/spoofed AP could return a crafted lease file into the inbox | Yes (compensated) | **Read-only + passive by construction** — the key is FORCED to `cat /tmp/dhcp.leases` (no shell, no arbitrary file read, no port/agent/X11 forwarding, no tty — the tightest grant, the `logging_file_tail_ssh` least-privilege precedent), a **DEDICATED** key (never the full-shell `ansible_ed25519` root key on `wireless_ap`), and the client SSH sends **no** command word (the AP's forced command is the only thing that runs). Host-key **PINNED** — `StrictHostKeyChecking=yes` against an operator-pinned read-only `known_hosts` (NO TOFU; a changed key makes ssh REFUSE, the source blanks fail-closed, never a silent MITM-accept), `BatchMode=yes`/`IdentitiesOnly=yes` (no password/agent fallback). A write/tunnel/remote-command SSH is **un-expressible**: the `discovery-passive-only` positive gate forbids the write/tunnel/indirection/spawn constructs, and `test_ssh_read_is_forced_command_read_only` (an argv-AST twin) proves no client command word follows `user@host` (what a grep can't see). The lease row is **untrusted DATA** — byte-capped at the transport (streamed, killed-on-overflow), row-count-capped at parse, every field re-validated on the pure read side (`_validate` — bad IP dropped, bad hostname/MAC → None), rendered `textContent` (Rung 1b). The private key is the **`network`** SOPS domain, `${ENV}`-PATH-only at the boundary (operator decrypts to an ephemeral `0600` file + exports the path at invocation — the `gen-validate-live`/C12 onboard-key precedent, never deploy-provisioned, never a job log). **No new authority** — the sweep is a top-level actor OUTSIDE the pinned layer; `read_inbox` stays `assert_read_only`-green (no promote/actuate path), a human still onboards+promotes (C10). Control-VM/on-demand, never an install-gating path (BRICK-1); mgmt-VLAN, single-operator (C3). Committed fixtures are documentation-only (P-1; the dnsmasq client-id column is `*`). See [C18](#c18--passive-discovery-is-a-read-only-cred-reusing-untrusted-response-surface) + the `openwrt_discovery_key` role. |
+
+---
+
+## Update this document when…
+
+- A new credential field or secret domain is added to `instance/secrets/`.
+- A new managed device class (and its creds path) is added.
+- A firewall rule for the control VM is added or widened.
+- The trust boundary changes (e.g. exposing any UI beyond the mgmt VLAN).
+- A new privileged surface (UI or API) is added, or its auth/audit/exposure changes.
+- A new log source, collector, or log-label schema is added (the logging pipeline is a secret surface — C12).
+- A dependency with security relevance (SOPS, age, a collection that handles
+  creds) is added or changed.
+- The control plane's binding/exposure (NPM, ports) changes.

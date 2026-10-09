@@ -1,0 +1,69 @@
+---
+# Apply ONE logging WIRING role to ONE onboarded device class — the device-side half of the logging capability
+# (the ENACT step logsvc.logging_enact_commands emits for a PUSH method). ONE thin dispatcher fans every wiring
+# role (logging_syslog_push / logging_journald_remote / logging_file_tail_ssh); the per-method config lives in
+# the role, never here (no per-method playbook proliferation, no per-vendor branching — CLAUDE.md).
+#
+#   dry-run first (CLAUDE.md):  ansible-playbook playbooks/wire-logging.yml -e role=<r> -e target=<key> --check --diff
+#   then apply:                 the same command without --check --diff
+#   collector override:         add -e collector_host=<ip>  (else instance/instance.yml mgmt_ip)
+#
+# Access chain used:   control VM (mgmt VLAN) -> the target class's inventory_group (per the method's role)
+# May break:           per the dispatched role's access-chain header (e.g. a device's syslog config only)
+# Fallback required:   per the dispatched role (console for edge_firewall/core_switch)
+# Blast radius:        the targeted class's hosts only (the dispatched role is idempotent + --check-safe)
+
+- name: Fleet preamble — stamp the run id + materialize per-host SSH keys
+  ansible.builtin.import_playbook: _fleet-preamble.yml
+
+- name: Validate the wiring request + resolve the target group and collector (control-side, no device contact)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Require the role + target extra-vars
+      ansible.builtin.assert:
+        that:
+          - role | default('') | length > 0
+          - target | default('') | length > 0
+        fail_msg: "wire-logging.yml needs -e role=<wiring_role> -e target=<module_key>"
+        quiet: true
+
+    - name: Require the wiring role to exist (never dispatch a phantom role)
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../roles/{{ role }}/tasks/main.yml"
+      register: _role_stat
+
+    - name: Fail if the wiring role is missing
+      ansible.builtin.assert:
+        that:
+          - _role_stat.stat.exists
+        fail_msg: "wiring role '{{ role }}' has no ansible/roles/{{ role }}/tasks/main.yml"
+        quiet: true
+
+    - name: Resolve the target class's inventory group + the collector host
+      ansible.builtin.set_fact:
+        _wire_group: >-
+          {{ (lookup('file', playbook_dir ~ '/../../modules/' ~ target ~ '/module.yml')
+             | from_yaml).inventory_group }}
+        _wire_collector: >-
+          {{ collector_host | default((lookup('file', playbook_dir ~ '/../../instance/instance.yml')
+             | from_yaml).mgmt_ip, true) }}
+
+- name: Wire the logging method onto the target device class
+  # A non-empty sentinel default so --syntax-check (which never runs the localhost play that sets _wire_group)
+  # resolves to a pattern that matches NO host (a clean no-op) — `hosts:` rejects an EMPTY value outright, and
+  # an undefined fact would error; at runtime play 1 always sets _wire_group, so the default is never used.
+  hosts: "{{ hostvars['localhost']._wire_group | default('__no_target__') }}"
+  gather_facts: false             # the wiring roles need no host facts (cli_config / lineinfile / systemd)
+  ignore_unreachable: true        # a down host is tolerated, not fatal (CLAUDE.md hard rule)
+  tasks:
+    - name: Apply the dispatched logging wiring role (collector resolved control-side)
+      ansible.builtin.include_role:
+        name: "{{ role }}"
+      vars:
+        logging_collector_host: "{{ hostvars['localhost']._wire_collector }}"
+
+# Post-run: remove the per-run ephemeral SSH key dir (imported LAST — after the fleet connections; MF-4).
+- name: Clean up the per-run ephemeral SSH key dir
+  ansible.builtin.import_playbook: _cleanup-ssh-keys.yml

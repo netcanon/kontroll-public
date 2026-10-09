@@ -1,0 +1,165 @@
+# kontroll test suite
+
+kontroll is a *composed* control plane, so it has two test halves:
+
+- **The IaC half** — the test pyramid below (lint → syntax → live-smoke →
+  idempotence), distilled from the NetConfig project's four-layer suite.
+- **The code half** — a `pytest` suite over the real Python surfaces
+  (`scripts/galaxy.py` + the `gui/` Flask app). See [Code-half pytest](#code-half-pytest).
+
+Full rationale: [../docs/engineering-standards.md](../docs/engineering-standards.md) §1
+and [../docs/qa-and-release-pipeline.md](../docs/qa-and-release-pipeline.md) §1. The binding
+test-doc + data-testid + test-after-change discipline is
+[../docs/testing-standards.md](../docs/testing-standards.md); the GUI selector inventory is
+[testid_reference.md](testid_reference.md).
+
+## The pyramid (IaC half)
+
+| Layer | What | Tooling | When |
+|---|---|---|---|
+| **L1 lint** | YAML/Ansible/compose/Prometheus syntax + secret hygiene | `validate.ps1` / `validate.sh` | every commit (pre-commit + CI) |
+| **L2 validate** | playbooks parse against a mock inventory; role logic in containers | `--syntax-check`, Molecule | on change, CI |
+| **L2 pytest** | `galaxy.py` + GUI logic, shell-outs mocked (no lab) | `pytest` (`unit/` + `integration/`) | on change, CI |
+| **L3 GUI e2e** | the GUI in a headless browser over the real booted app | Playwright (`tests/e2e/`, `e2e` marker) | a dedicated CI job |
+| **L3 live smoke** | real fleet reachable; services respond | `playbooks/ping.yml`, post-deploy asserts | manual / Semaphore schedule |
+| **L4 idempotence** | second apply = `0 changed` | re-run the role; Molecule `idempotence` | per role |
+
+## Running
+
+```powershell
+# Windows workstation (runs whatever tools are installed; skips the rest)
+pwsh tests/validate.ps1
+```
+```bash
+# Linux control VM / CI (use --strict so missing tools fail the run)
+bash tests/validate.sh --strict
+```
+```bash
+# L2 dry-run a playbook against fake hosts (no real device touched)
+ansible-playbook -i tests/mock-inventory.yml ../ansible/playbooks/backup-configs.yml --check --diff
+
+# L2 containerized role test (when molecule is installed)
+cd tests/molecule/default && molecule test
+```
+
+## Isolation (per layer)
+
+| Layer | Isolation mechanism |
+|---|---|
+| L1 | none needed — pure static analysis of files |
+| L2 | `mock-inventory.yml` with `ansible_connection: local` + RFC-5737 doc IPs — the single seam for real↔fake (our `FakeCollector`) |
+| L3 | runs against the live fleet; read-only plays only unless gated |
+| L4 | a throwaway Molecule container, destroyed after |
+
+## The single mock seam
+
+Mirroring NetConfig's rule ("patch `get_collector`, never `ConnectHandler`"):
+tests never hard-code a real device. They target `tests/mock-inventory.yml`,
+whose hosts dispatch through the same `device_role` seam as production. To swap
+real ↔ fake you change the inventory, nothing else.
+
+## Adding tests
+
+1. **L1**: nothing to add — new YAML is linted automatically. Keep it valid.
+2. **L2 syntax**: a new playbook is picked up by `validate` automatically.
+3. **L2 pytest**: drop a `test_*.py` under `unit/` (pure logic) or `integration/`
+   (a command driven as a black box). Mark it `@pytest.mark.unit`/`integration`.
+4. **L2 Molecule**: copy `molecule/default` to `molecule/<role>` and point it at
+   the role; assert converge + idempotence.
+5. **L3 smoke**: add a read-only assertion play (service responds / target `up`)
+   under `ansible/playbooks/` and tag it `smoke`.
+
+## Code-half pytest
+
+`scripts/galaxy.py` (a thin CLI over the `scripts/kontroll/` **service package** — the pure
+logic, probers, sources, and repo-mutators, one `service/<domain>.py` per verb), `gui/app.py`
+(the Flask shell), and `api/` (the typed FastAPI over the same service layer) are real code, tested
+with `pytest`. The suite is **fully offline** — it touches
+no ansible, no network, and no lab — because the I/O seams are mocked **in their home modules**
+(patch there, not on `galaxy`):
+
+| Surface | I/O seam (the mock point) | What it shells to |
+|---|---|---|
+| deep probe | `kontroll.probe._ad`, `kontroll.probe.deep_probe` | `ansible-doc` |
+| shallow local probe | `kontroll.probe.shallow_from_local`, `kontroll.catalog.local_shallow` | the installed collection's files (`plugins/` walk + `MANIFEST.json`) — no `ansible-doc` |
+| local list | `kontroll.catalog.local_installed` | `ansible-galaxy collection list` |
+| Galaxy search | `kontroll.catalog.galaxy_search` | `galaxy.ansible.com` (urllib) |
+| repo mutation | `kontroll.gitio._run` | `git` / `sops` |
+| `gui/app.py` onboard | service seams (`build_onboard_plan`/`apply_onboard_plan` + `kontroll.gitio._run`) | in-process, mirrors `api/routes/onboard.py` — search/classify/onboard are ALL in-process now (`run_galaxy` retired) |
+
+The core (`eval_pred`/`eval_vector`/`classify`/`build_record`/`derive_*`/
+`classify_endpoints`, now in `kontroll.predicate`/`record`/`service.openapi` and re-exported
+off `galaxy` for call-style tests) is **pure dict→dict** and tested directly against the real
+`vectors/*.yml` + `ansible/backends/*/backend.yml`. The file-mutating paths
+(`enable_in_fleet`, onboard `--apply`) run against a throwaway repo (`tmp_repo`
+repoints `kontroll.paths.ROOT`), so they never touch the real tree, and credentials are
+omitted so the SOPS shell-out is never invoked.
+
+```
+tests/unit/          # pure functions, no I/O
+  test_predicate_engine.py   # three-valued eval_pred/eval_vector truth tables
+  test_classify.py           # backend dispatch from synthetic facts
+  test_build_record.py       # record schema + overrides (incl. YAML yes/no→state)
+  test_telemetry_vector.py   # the telemetry capability vector (4th vector): 3-state + depth-stable
+  test_telemetry_suggest.py  # suggest_telemetry + declared_metrics_methods (detected/declared bridge)
+  test_fleet_edit.py         # enable_in_fleet idempotent, comment-preserving
+  test_openapi.py            # derive_auth/derive_server/classify_endpoints heuristics
+  test_service_layer.py      # service_* return structured data directly (no stdout-parsing)
+  test_units.py              # runnable-unit prober + service_units resolver + SEC-3 traversal guard + validate_unit_config (R3 configure gate)
+  test_actuation_registry.py # actuation/ registry: resolve_pins (exact-wins/fail-closed) + gen-actuation validation (incl. R3 curated knobs) + overlay loader
+  test_actuation_service.py  # R4 preview + R5 write verb: build_actuation_plan render/staging-metadata (read-only) + apply_actuation_plan (idempotent write) + stage_plan drift gate
+  test_discovery.py          # discovery inbox (Rung 1a/2/3): registry load + declared offers reach opnsense/fortigate/routeros/cisco_ios + json_rows (results-key & bare-array, Bearer/Basic) + snmp arp_table (transport dispatch, snmp_walk byte-cap, MAC/suffix parse) + read-only 2-primitive fetcher surface + sweep parse/cap + read_inbox IP-diff/normalize + read-only-pin canary
+tests/integration/   # galaxy.py / gui as black boxes, shell-outs mocked
+  test_onboard_dryrun.py     # dry-run plans nothing; --apply mutates tmp repo idempotently
+  test_search_local.py       # source→record→filter pipeline + --vector filter
+  test_gui_api.py            # Flask test client: auth gate (401s) + /api/* passthrough
+  test_api.py                # the FastAPI read-only routes via TestClient (service seams mocked)
+  test_capture_exception_e2e.py  # the capture-exception add subcommand (dry-run/--commit)
+tests/e2e/           # GUI in a headless browser over the REAL booted Flask app (opt-in: e2e marker)
+  conftest.py                # boots gui/app.py in a thread, service seams mocked, http_credentials
+  test_onboard_flow.py       # search → result card → fill form → dry-run → plan renders (Playwright)
+```
+
+```bash
+pip install -r tests/requirements-dev.txt          # tiny: pytest + pyyaml + flask
+pytest -m "not e2e and not slow"                   # the hermetic default (CI runs this)
+pytest --cov=scripts --cov=gui --cov-report=term-missing
+```
+
+`validate` runs this as its L2 step automatically when `pytest` is installed (it
+skips gracefully on a box without it); CI runs it as a dedicated matrix job
+(py3.11–3.13). `e2e`/`slow` are excluded from the default — the live lab and any
+Playwright GUI flow are never in the hermetic gate.
+
+## Identifier-leak gate (`tests/_leak_guard.py`)
+
+`validate` step `pii-guard` (and the PII-guard workflow, and the pytest twin
+`tests/unit/test_leak_guard.py`) scans every git-tracked file outside the private strip set
+(`instance/`, `docs/reviews/`, `local/`) for anything that identifies a real deployment: an
+RFC-1918 address in any spelling (dotted, dashed as capture filenames spell it, underscored),
+a non-documentation MAC or global IPv6, a real-length age key, a personal e-mail or an
+operator-machine path — plus the instance's own names from `instance/leak-tokens.txt` (never
+shipped; the shipped `instance.example/leak-tokens.example.txt` holds canaries so the layer is
+always exercised). Fixtures and docs use the documentation ranges — `192.0.2.x`,
+`198.51.100.x`, `203.0.113.x`, `00:00:5e:00:53:xx`, `2001:db8::/32`, `example.com`. A test that
+*must* hold a private address marks the line `pii-guard: allow <reason>`. SECURITY.md C21.
+
+## Secret-hygiene gate
+
+`validate` fails if any `instance/secrets/*.sops.yml` is not encrypted, or if a
+key artifact (`keys.txt`, `*.agekey`, `*.dec`) is staged. This is the
+config-as-code analog of NetConfig's `test_logging_config.py` credential
+guarantee.
+
+## Read-only-by-construction gate (`tests/unit/_readonly_pins.py`)
+
+The shared AST pins guard the read-only / C10 two-key guarantee in CI: `assert_read_only`
+(a named read function calls no write/actuation verb, #133) + `assert_no_git_write`
+(a service that shells git picks a read-only subcommand on every argv, #131). Both check
+calls against `WRITE_VERBS`, so they fail **OPEN** — a mutator the registry doesn't know
+is invisible. `assert_write_verbs_complete` (P0b/#134) closes that: it scans the whole
+service+gitio layer and fails CI if any **direct** mutator (write-open / git-mutating argv /
+SOPS write) isn't in `WRITE_VERBS` — so registering a new write verb in the same commit is an
+enforced gate, not a convention (`test_readonly_completeness.py`, proven against planted
+violations). Add a new read view? Add its `assert_read_only` test. Add a new writer? CI tells
+you to register it.

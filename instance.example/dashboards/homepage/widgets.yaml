@@ -1,0 +1,11 @@
+# Top-of-page info widgets (resources, search, datetime). Service tiles are in
+# services.yaml; this is only the header strip.
+- resources:
+    cpu: true
+    memory: true
+    disk: /
+- search:
+    provider: duckduckgo
+    target: _blank
+- datetime:
+    format: { dateStyle: short, timeStyle: short, hour12: false }

@@ -1,0 +1,59 @@
+---
+# Generic config backup for bespoke SSH devices — captures the output of a
+# device-supplied command (backend_backup_command, e.g. `uci export`) over raw SSH.
+# The catch-all backend for things with no collection. A device class points here
+# by declaring `role: backend_raw_ssh` + backend_backup_command.
+#
+# Access chain used:   control node -> device (raw SSH)
+# May break:           none (read-only — runs only the capture command)
+# Fallback required:   no
+# Blast radius:        none — pure read (caller must supply a read-only command)
+# Idempotence:         capture file overwritten each run; no device state changes
+# no_log:              the captured config may carry secrets (PSKs, passwords)
+
+- name: Record skip when this class is not backup-capable
+  ansible.builtin.set_fact:
+    kontroll_backup_result: "skipped — class not backup-capable"
+  when: not (backup_capable | default(true) | bool)
+
+- name: Record skip when no backup command is configured
+  ansible.builtin.set_fact:
+    kontroll_backup_result: "skipped — raw_ssh backend needs backend_backup_command"
+  when:
+    - backup_capable | default(true) | bool
+    - backend_backup_command is not defined
+
+- name: Capture config (raw SSH, generic)
+  when:
+    - backup_capable | default(true) | bool
+    - backend_backup_command is defined
+    - not (molecule_test | default(false) | bool)
+  block:
+    - name: Ensure the capture dir exists (backend is self-sufficient)
+      ansible.builtin.file:
+        path: "{{ config_backup_dir }}"
+        state: directory
+        mode: "0750"
+      delegate_to: localhost
+
+    - name: Resolve capture filename
+      ansible.builtin.set_fact:
+        _backup_file: "{{ backend_backup_label | default(device_role) }}_{{ ansible_host | replace('.', '-') }}.cfg"
+
+    - name: Pull config via raw command
+      ansible.builtin.raw: "{{ backend_backup_command }}"
+      register: _cfg
+      changed_when: false
+      no_log: true
+
+    - name: Write capture
+      ansible.builtin.copy:
+        content: "{{ _cfg.stdout }}"
+        dest: "{{ config_backup_dir }}/{{ _backup_file }}"
+        mode: "0640"
+      delegate_to: localhost
+      no_log: true
+
+    - name: Record successful capture
+      ansible.builtin.set_fact:
+        kontroll_backup_result: "captured -> {{ _backup_file }}"

@@ -1,0 +1,51 @@
+---
+# Backup entrypoint for the docker_host device class.
+# This class is NOT backup-capable by default (see defaults/main.yml): a docker
+# host has no single uniform "device config" — its real state is per-app appdata
+# and compose files managed outside this seam. So the default path is a clean,
+# logged skip, NOT a forced empty capture.
+#
+# If you set `backup_capable: true` on a specific host (host_vars/<host>.yml),
+# the capable branch below captures a lightweight CONTAINER/STACK MANIFEST
+# (what's deployed), which is a useful inventory but not a full config restore.
+# Add that host's deeper, app-specific capture here behind the same gate.
+#
+# Access chain used:   control VM (mgmt VLAN) -> docker host (SSH, root key)
+# May break:           none (read-only `docker ...`)
+# Fallback required:   no
+# Blast radius:        none — pure read
+# Idempotence:         capture file overwritten each run; no host state changes
+
+- name: Record skip when this class is not backup-capable
+  ansible.builtin.set_fact:
+    kontroll_backup_result: "skipped — not backup-capable (docker state is app-managed; opt in per host)"
+  when: not (backup_capable | default(false) | bool)
+
+- name: Capture container/stack manifest (opt-in hosts only)
+  when:
+    - backup_capable | default(false) | bool
+    - not (molecule_test | default(false) | bool)
+  block:
+    - name: Resolve capture filename
+      ansible.builtin.set_fact:
+        _backup_file: "Docker_{{ inventory_hostname }}_manifest.txt"
+
+    - name: Gather container + stack manifest (read-only, brace-free output)
+      ansible.builtin.shell: |
+        echo "### docker version";   docker version 2>/dev/null
+        echo "### containers";       docker ps -a 2>/dev/null
+        echo "### images";           docker images 2>/dev/null
+        echo "### compose stacks";   docker compose ls --all 2>/dev/null
+      register: dkr
+      changed_when: false
+
+    - name: Write capture
+      ansible.builtin.copy:
+        content: "{{ dkr.stdout }}\n"
+        dest: "{{ config_backup_dir }}/{{ _backup_file }}"
+        mode: "0640"
+      delegate_to: localhost
+
+    - name: Record successful capture
+      ansible.builtin.set_fact:
+        kontroll_backup_result: "captured -> {{ _backup_file }} (manifest)"

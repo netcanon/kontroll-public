@@ -1,0 +1,52 @@
+# Discovery method: read an OpenWrt AP's OWN dnsmasq DHCP lease file (/tmp/dhcp.leases) read-only over a
+# forced-command SSH key, surfacing un-onboarded hosts into the onboard inbox. OpenWrt has NO read-only lease GET
+# (its ubus/LuCI RPC surfaces are HTTP POST — banned by the passive-only gate, and `file read` would grant a WIDER
+# arbitrary-file read, not a narrower one); the ground-truth lease view is the dnsmasq file, and the tightest read of
+# it is a forced-command `cat` — the one-shot twin of logging/file_tail_ssh's `journalctl -f` grant. PASSIVE by
+# construction: the sweep reads the lease file the AP already keeps; it NEVER scans the network. SECURITY C18.
+#
+# TRANSPORT (openwrt rung): source.transport: ssh -> the sweep's _run_ssh invokes the read-only ssh_read fetcher.
+# The client sends NO command (the argv ends at <user>@<host>), so the AP's authorized_keys FORCES `cat
+# /tmp/dhcp.leases` — the key can do nothing else. Host-key PINNED (StrictHostKeyChecking=yes + an operator-pinned
+# UserKnownHostsFile, NO TOFU); BatchMode=yes (no password fallback). There is NO url/endpoint and NO client-sent
+# path — the host is passed positionally (<user>@<host>) and the read target is fixed by the forced command, so a
+# tampered descriptor cannot widen the read. One read yields the lease-file text; parse.shape `lease_file` splits it.
+#
+# Auth/cred flow (C12): a DEDICATED forced-command SSH read key (NOT the full-shell ansible root key on the AP) from
+# the EXISTING `network` SOPS domain (openwrt's declared secrets_domain), reused AS-SCOPED (read-only, forced to one
+# read command; never widened). CREDS ARE OPERATOR-EXPORTED at sweep time (there is deliberately NO secret_env_map:
+# gen-secret-env renders .env from metrics:/logs: only, never discovery:). The operator decrypts the key to an
+# ephemeral 0600 file and exports KONTROLL_OPENWRT_DISCOVERY_KEYFILE (its PATH) + KONTROLL_OPENWRT_DISCOVERY_KNOWN_HOSTS
+# (the operator-pinned host-keys PATH), then runs the on-demand sweep ON THE MACHINE that runs kontroll-discover.py
+# (the worked example is in discovery/README.md § Extending). ANY unset => `no-creds`, skipped (no password/TOFU
+# fallback). The PATHS enter ONLY at the fetcher boundary (list argv); the audit carries class/method/status/count only.
+#
+# F11 (dogfood-confirmed-not-CI-confirmed): the /tmp/dhcp.leases column order is the documented dnsmasq format
+# (<expiry-epoch> <mac> <ip> <hostname> <clientid>); CI pins the parser against a golden
+# (tests/fixtures/discovery/openwrt_dhcp_leases.txt, doc-only RFC-5737 IPs + RFC-7042 MACs). A live-openwrt dogfood
+# confirms/corrects it with a 1-line edit. A lease with hostname `*` (dnsmasq's "no name") degrades hostname->None on
+# the read side. IPv6 (dhcp.leases6 / a DUID line) is out of scope — the IPv4 lease file is the read.
+name: dhcp_leases_openwrt
+label: OpenWrt DHCP leases (read the AP's own dnsmasq lease file, read-only over forced-command SSH)
+order: 25
+source:
+  transport: ssh                               # the sweep dispatches this NAME to _run_ssh (default is http)
+  user: root                                   # the forced-command key is authorized for this user on the AP
+  # NB NO `path` key is sent — the read target is fixed by the AP's forced command (`cat /tmp/dhcp.leases`), so a
+  # tampered descriptor cannot widen the read. The path is shown here for the READER only, never sent to the AP.
+  auth:
+    strategy: ssh_forced_command               # a read-only, forced-command SSH key (no shell, no client command)
+    keyfile_env: KONTROLL_OPENWRT_DISCOVERY_KEYFILE          # env NAME the operator exports (decrypted key path)
+    known_hosts_env: KONTROLL_OPENWRT_DISCOVERY_KNOWN_HOSTS  # operator-pinned host keys (no TOFU)
+parse:
+  shape: lease_file                            # dnsmasq /tmp/dhcp.leases columns -> {ip, mac, hostname}
+secret_domain: network                         # REUSE the network domain's OpenWrt forced-command read key; C12 NAMES.
+wiring_role: openwrt_discovery_key             # roles/openwrt_discovery_key authorizes the read PUBLIC key on the AP,
+                                               # FORCED to `cat /tmp/dhcp.leases`. The matching PRIVATE key is the
+                                               # `network` SOPS domain; the operator provisions it out-of-band.
+# NO applies_when -> DECLARED-only (opt-in per class, like the SNMP methods): opt in via a `discovery:` block.
+access_chain:
+  chain: "control node -> ssh_read (read-only forced-command key) -> `cat /tmp/dhcp.leases` on <openwrt> (read-only)"
+  may_break: nothing — a read-only forced-command file read; a creds/reach failure records no-creds/unreachable
+  fallback: "no"
+  blast_radius: control node only (the forced-command key can only cat the lease file; actuates NOTHING on the AP)

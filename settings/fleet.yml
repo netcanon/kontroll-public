@@ -1,0 +1,20 @@
+# settings/fleet.yml — the fleet-enablement reconfigure metadata for instance/fleet.yml's enabled_modules (Phase
+# 5, #140). REMOVAL ONLY: the Settings page may DISABLE (remove) a module behind a consequence-naming confirm
+# (severity remove → reconfig-remove-confirm) — the dangerous direction, since it silently drops monitoring/log
+# pipelines for live hosts of that class and triggers a collection re-gen at bootstrap. ADDING a module is left to
+# the Onboard flow (so the #124 module-reuse detection is never bypassed) — there is no add knob here. A repo-level
+# descriptor; carries NO values. The writer is _blockwrite.disable_in_fleet (comment-preserving line removal,
+# RAISES never sys.exit — the G9 fix).
+area: fleet
+file: "config/fleet.yml"
+knobs:
+  - key: enabled_modules
+    writer: fleet_disable
+    reconfigurable: true
+    severity: remove
+    blast_radius: drop-monitoring
+    help: "The active device-class modules. Disabling one removes it from the fleet (add via Onboard, not here)."
+    confirm_text: >-
+      Disabling this module removes it from the fleet: its Prometheus scrape targets and log pipelines stop for
+      any LIVE hosts of that class, and a collection re-gen runs at the next bootstrap. This only STAGES the
+      removal; an admin promotes it and re-runs bootstrap + deploy-stack.

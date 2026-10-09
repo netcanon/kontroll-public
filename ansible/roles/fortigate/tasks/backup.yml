@@ -1,0 +1,20 @@
+---
+# Config backup for the FortiGate class — delegates to the generic `api` backend
+# (plain REST `uri` driven by the `fortios` recipe). No vendor module: this is the
+# proof that the api backend captures a real REST device just like the old
+# hand-written fortios capture — and folds FortiGate-likes into per-API data.
+#
+# Access chain used:   control VM (localhost) -> FortiGate mgmt <firewall-mgmt-ip>:443 (REST)
+# May break:           none (read-only GET)
+# Fallback required:   no
+# Blast radius:        none — pure read
+# Idempotence:         capture file overwritten each run; no device state changes
+# no_log:              handled inside the backend (token + returned config are secret)
+# noqa: var-naming[no-role-prefix] — backend_* are shared cross-backend contract
+# params (uniform regardless of backend); prefixing would break the contract.
+- name: Capture full-configuration via the api backend (fortios recipe)  # noqa: var-naming[no-role-prefix]
+  ansible.builtin.include_role:
+    name: backend_api
+    tasks_from: backup
+  vars:
+    backend_api_recipe: fortios

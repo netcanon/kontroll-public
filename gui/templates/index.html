@@ -1,0 +1,1806 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kontroll — onboard a device</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --line:#30363d; --fg:#c9d1d9; --muted:#8b949e;
+          --accent:#2f81f7; --ok:#3fb950; --no:#f85149; --maybe:#d29922; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 system-ui,sans-serif; }
+  header { padding:18px 24px; border-bottom:1px solid var(--line); }
+  header h1 { margin:0; font-size:18px; } header p { margin:4px 0 0; color:var(--muted); }
+  main { max-width:920px; margin:0 auto; padding:24px; }
+  .bar { display:flex; gap:8px; }
+  input, select, button { font:inherit; color:var(--fg); background:var(--panel);
+          border:1px solid var(--line); border-radius:6px; padding:8px 10px; }
+  input:focus, select:focus { outline:1px solid var(--accent); }
+  .bar input { flex:1; } button { cursor:pointer; }
+  button.go { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .hint { color:var(--muted); font-size:12px; margin:8px 2px; }
+  .card { border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin:12px 0; background:var(--panel); }
+  .card h3 { margin:0 0 4px; font-size:15px; } .card .meta { color:var(--muted); font-size:12px; }
+  h3.section { margin:14px 0 6px; font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
+  .card.muted { opacity:.55; }
+  .badges { margin:8px 0; display:flex; gap:6px; flex-wrap:wrap; }
+  .badge { font-size:12px; padding:2px 8px; border-radius:12px; border:1px solid var(--line); }
+  .badge.yes { color:var(--ok); border-color:var(--ok); } .badge.no { color:var(--no); }
+  .badge.maybe { color:var(--maybe); border-color:var(--maybe); }
+  .badge.backend { color:var(--accent); border-color:var(--accent); }
+  form.onb { margin-top:10px; padding-top:10px; border-top:1px dashed var(--line);
+             display:none; grid-template-columns:1fr 1fr; gap:8px; }
+  form.onb.open { display:grid; } form.onb label { font-size:12px; color:var(--muted); display:block; }
+  form.onb .full { grid-column:1 / -1; } form.onb .row { display:flex; gap:8px; align-items:center; }
+  form.onb .cred-grid { display:grid; gap:6px; margin-top:4px; } form.onb .cred-grid .row { align-items:baseline; }
+  form.onb fieldset.auth-set { border:1px solid var(--line); border-radius:6px; margin:4px 0; padding:6px 10px 8px;
+    display:grid; gap:6px; } form.onb fieldset.auth-set legend { color:var(--muted); font-size:11px;
+    text-transform:uppercase; letter-spacing:.04em; padding:0 4px; }
+  pre.out { white-space:pre-wrap; background:#0a0d12; border:1px solid var(--line); border-radius:6px;
+            padding:12px; font:12px/1.45 ui-monospace,monospace; max-height:420px; overflow:auto; }
+  .warn { color:var(--maybe); font-size:12px; }
+  .spin { color:var(--muted); }
+  .badge.cap-open { cursor:pointer; } .badge.cap-open:hover { border-color:var(--accent); }
+  .capov { position:fixed; inset:0; background:rgba(0,0,0,.6); display:flex; align-items:flex-start;
+           justify-content:center; padding:40px 16px; overflow:auto; z-index:50; }
+  .capdlg { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+            width:100%; max-width:640px; }
+  .caphd { display:flex; justify-content:space-between; align-items:center; padding:12px 16px;
+           border-bottom:1px solid var(--line); }
+  .capx { background:none; border:none; font-size:18px; color:var(--muted); cursor:pointer; }
+  .capbody { padding:14px 16px; display:flex; flex-direction:column; gap:10px; }
+  .capbody .row { display:flex; gap:8px; align-items:center; }
+  .capbody label { font-size:12px; color:var(--muted); min-width:64px; }
+  /* C14 backup viewer — single-config view + unified diff (structural coloring only; no syntax highlighter) */
+  pre[data-testid=backup-view], pre.diff { background:#0b0e13; border:1px solid var(--line); border-radius:6px;
+    padding:8px 10px; margin:6px 0; max-height:60vh; overflow:auto; font-size:12px; line-height:1.45; }
+  .vl { display:flex; gap:8px; } .vl .gutter { color:var(--muted); user-select:none; min-width:38px; text-align:right; }
+  .vl .vtext, .dl { white-space:pre-wrap; word-break:break-all; }
+  .dl.add { color:var(--ok); } .dl.del { color:var(--no); } .dl.ctx { color:var(--fg); } .dl.hunk { color:var(--accent); }
+  select[data-testid=backup-base], select[data-testid=backup-compare] { max-width:100%; }
+</style>
+</head>
+<body>
+<header>
+  <h1>kontroll · onboard a device</h1>
+  <p>Search Ansible Galaxy + local content → see what it can do → onboard. The only
+     inputs are your selection and the connection details; everything else is automated.</p>
+</header>
+<main>
+  <div class="bar">
+    <input id="q" data-testid="search-input" placeholder="e.g.  cisco ios   ·   arista   ·   mikrotik" autofocus>
+    <button class="go" onclick="search()" data-testid="search-btn">Search</button>
+    <label class="row" title="Deep-probe local matches (slower; resolves ? cells)"><input type="checkbox" id="deep" data-testid="search-deep"> deep</label>
+    <button data-testid="fleet-open" onclick="openFleetPanel()" title="Index — the control-plane services + what you've onboarded; jump to each class's dialogs">Index</button>
+    <button data-testid="pending-open" onclick="openPendingPanel()" title="Proposals staged and awaiting promotion — copy a run_id into the Semaphore promote-proposal task">Pending</button>
+    <button data-testid="discovery-open" onclick="openDiscoveryPanel()" title="Devices the network sees but you haven't onboarded — click Onboard this to pre-fill the host into the onboard form">Discovery</button>
+    <button data-testid="backup-open" onclick="openBackupPanel()" title="View + diff device config backups (read-only; secrets masked best-effort)">Backups</button>
+    <button data-testid="secrets-open" onclick="openSecretsPicker()" title="Enter service/infra secrets (encrypted to SOPS, staged)">Secrets</button>
+    <button data-testid="keygen-open" onclick="openKeygenPicker()" title="Generate an age key (break-glass / Semaphore / control rotation) — private shown once">Keys</button>
+    <button data-testid="settings-open" onclick="openSettingsPanel()" title="Platform settings — your instance's identity, fleet, backup, and status (read-only)">Settings</button>
+    <button data-testid="homepage-open" onclick="openHomepagePanel()" title="Homepage — choose which control-plane tiles appear and reorder the portal sections">Homepage</button>
+  </div>
+  <div class="hint">Badges: <b>A</b> actuate · <b>B</b> backup · <b>L</b> bespoke/local · <b>T</b> telemetry (scrapable)
+    · → suggested backend. ✓ confirmed, ? unknown at this depth.</div>
+  <!-- Set by "Onboard this" in the Discovery panel: stashes the discovered host so the NEXT onboard form the
+       operator opens (after picking the device class via search) has its host field pre-filled. A visible,
+       clearable indicator — never a silent stash. Device bytes (ip/hostname) are painted via ET/textContent (F6). -->
+  <div id="discovery-prefill" class="hint" data-testid="discovery-prefill-banner"
+       style="display:none;border-left:3px solid #4a90d9;padding-left:8px"></div>
+  <div id="results" data-testid="results"></div>
+</main>
+<script>
+const HAS_REMOTE = {{ (has_remote | default(false)) | tojson }};   // server: an OFFSITE git remote exists; gates the "push origin" box
+// E(tag, class, html, testid) — testid (optional) sets data-testid so JS-built nodes are
+// test-addressable exactly like static elements (testing-standards.md §3, the data-testid SOP).
+const E = (t, c, h, tid) => { const e=document.createElement(t); if(c)e.className=c; if(h!=null)e.innerHTML=h; if(tid)e.dataset.testid=tid; return e; };
+// ET(tag, class, text, testid) — like E() but sets textContent (NEVER innerHTML). Use it for any DEVICE-controlled
+// byte (a capture filename/label, an ansible_host) so a `<…>` in store/inventory data can never execute in the
+// operator's authenticated session. The C14 backup viewer paints EVERY device byte (headers + line bodies) via ET.
+const ET = (t, c, text, tid) => { const e=E(t, c, null, tid); if(text!=null)e.textContent=text; return e; };
+const SYM = {actuate:'A', backup:'B', bespoke:'L', telemetry:'T'};
+// Secondary capabilities with a standalone post-onboard dialog (telemetry/backup/logging all live). Their badge
+// is clickable → openCapabilityDialog. A render hint (like SYM), extended by a one-line edit per new capability.
+const CAP_DIALOGS = ['telemetry', 'backup', 'logging'];
+// Set by the Discovery panel's "Onboard this" (onboardFromDiscovery): the discovered host an inbox row stashed, so
+// the NEXT onboard form built (after the operator searches + picks the device class — discovery can't guess it,
+// Rung 1) has its host field pre-filled. Cleared by the banner's "clear" or a fresh stash. A form-field value only
+// — discovery never onboards/stages (C10); the human still fills key/group/creds and clicks Run.
+let pendingOnboardHost = null;
+let pendingOnboardHostName = null;   // the discovered hostname (device byte) an inbox row stashed; pre-fills field-host-name
+
+async function search() {
+  const q = document.getElementById('q').value.trim();
+  const box = document.getElementById('results');
+  box.innerHTML = ''; if (!q) return;
+  box.appendChild(E('div','spin','Searching…','search-loading'));
+  let data;
+  const deep = document.getElementById('deep').checked ? '&deep=true' : '';
+  try { data = await (await fetch('/api/search?q='+encodeURIComponent(q)+deep)).json(); }
+  catch(e){ box.innerHTML=''; box.appendChild(E('div','warn','search error','search-error')); return; }
+  box.innerHTML='';
+  if (data.error){ box.appendChild(E('div','warn', data.error, 'search-api-error')); return; }
+  if (!data.length){ box.appendChild(E('div','spin','no results','no-results')); return; }
+  data.forEach(rec => box.appendChild(card(rec)));
+}
+
+function card(rec) {
+  const c = E('div','card'); c.dataset.testid='card'; c.dataset.collection=rec.collection;
+  c.appendChild(E('h3', null, rec.collection + ' <span class="meta">v'+(rec.version||'?')+
+    ' · '+rec.origin+'/'+rec.depth+(rec.meta && rec.meta.certified?' · certified':'')+'</span>', 'result-title'));
+  if (rec.meta && (rec.meta.note || rec.meta.description))
+    c.appendChild(E('div','meta', rec.meta.note || rec.meta.description, 'result-meta'));
+  const b = E('div','badges', null, 'result-badges');
+  Object.keys(rec.capabilities||{}).forEach(k => {
+    const cap = rec.capabilities[k]; const st = cap.state;
+    const m = st==='yes'?'✓':(st==='no'?'✗':'?');
+    const bd = E('span','badge '+st, (SYM[k]||k)+' '+m + (cap.confidence?' '+cap.confidence:''), 'capability-badge');
+    bd.dataset.cap = k; bd.dataset.state = st;   // address a specific capability + its state, no class/text parsing
+    if (CAP_DIALOGS.includes(k)) {               // a secondary capability: its badge opens the standalone dialog
+      bd.classList.add('cap-open'); bd.title = 'configure '+k+' for this class';
+      const okey = rec.collection.replace(/[^a-z0-9]/gi,'_').toLowerCase();
+      bd.onclick = () => openCapabilityDialog(k, okey, {collection: rec.collection});
+    }
+    b.appendChild(bd);
+  });
+  if (rec.suggested_backend) b.appendChild(E('span','badge backend','→ '+rec.suggested_backend, 'suggested-backend-badge'));
+  // ⚙ Automations — the app-store unit badge (sibling of the capability/backend badges): opens openUnitDialog to
+  // create a version-pinned, runnable actuation unit from this collection. `collection` is data, never a per-unit
+  // testid (the capability/secret-dialog doctrine). The dialog degrades honestly if the collection ships no units.
+  const ub = E('span','badge cap-open','⚙ Automations','unit-badge'); ub.dataset.collection = rec.collection;
+  ub.title = 'create a version-pinned, runnable app-store unit from this collection';
+  ub.onclick = () => openUnitDialog(rec.collection, rec.version);
+  b.appendChild(ub);
+  c.appendChild(b);
+  const btn = E('button',null,'Onboard this'); btn.dataset.testid='onboard-toggle';
+  const form = onboardForm(rec);
+  const refresh = () => { const open = form.classList.contains('open');
+    btn.textContent = open ? 'Collapse' : 'Onboard this';
+    // gate: only collapse a form you're "just looking at" — disabled while it holds entered text / ticked boxes,
+    // so a peek can be dismissed but real input is never silently dropped.
+    btn.disabled = open && !onbPristine(form);
+    btn.title = btn.disabled ? 'Run it, or clear the fields, to collapse' : (open ? 'collapse this form' : ''); };
+  btn.onclick = () => { form.classList.toggle('open');
+    if (form.classList.contains('open') && !form.dataset.credsLoaded) {   // lazy: derive the per-backend cred fields on first open
+      form.dataset.credsLoaded = '1';
+      loadCredFields(form, rec.suggested_backend, (form.querySelector('[name=secrets]') || {}).value || 'network',
+                     rec.collection);
+    }
+    refresh(); };   // disabled when open+dirty ⇒ only opens, or collapses a pristine form
+  form.addEventListener('input', refresh);   // re-evaluate the collapse gate as the user types / ticks boxes
+  c.appendChild(btn); c.appendChild(form);
+  return c;
+}
+
+function onbPristine(f) {
+  // "just looking": no user-entered field holds text and no box is ticked. group/host plus EVERY derived
+  // credential widget ([data-field], whatever this backend declared — F1) are scanned STRUCTURALLY, so a newly
+  // derived per-backend field can never silently escape the collapse gate. key/secrets carry defaults → excluded.
+  const named = ['group','host','host_name'].map(n => f.querySelector('[name='+n+']'));
+  const cred = [...f.querySelectorAll('[data-field]')];
+  const txt = [...named, ...cred].some(el => el && (el.value || '').trim() !== '');
+  const box = [...f.querySelectorAll('input[type=checkbox]')].some(b => b.checked);
+  return !txt && !box;
+}
+
+function onboardForm(rec) {
+  const f = E('form','onb',null,'onboard-form'); const key = rec.collection.replace(/[^a-z0-9]/gi,'_').toLowerCase();
+  f.innerHTML = `
+    <div><label>device-class key</label><input name="key" data-testid="field-key" value="${key}"></div>
+    <div><label>inventory group</label><input name="group" data-testid="field-group" placeholder="e.g. core_switch"></div>
+    <div><label>host (mgmt IP/name)</label><input name="host" data-testid="field-host" placeholder="192.0.2.x"></div>
+    <div><label>hostname (inventory name)</label><input name="host_name" data-testid="field-host-name" placeholder="optional — auto-named from the class if blank"></div>
+    <div><label>secrets domain</label><input name="secrets" data-testid="field-secrets" value="network"></div>
+    <div class="full"><label>credentials (derived for this device’s backend)</label>
+      <div class="cred-grid" data-testid="cred-fields"></div></div>
+    <div class="full row" data-testid="onboard-flags">
+      <label class="row"><input type="checkbox" name="apply" data-testid="field-apply"> apply (write + encrypt + stage proposal)</label>
+      ${HAS_REMOTE ? '<label class="row"><input type="checkbox" name="push" data-testid="field-push"> also push origin (offsite backup)</label>' : ''}
+      <label class="row"><input type="checkbox" name="bootstrap" data-testid="field-bootstrap"> install + verify (after promote)</label>
+    </div>
+    <div class="full"><button type="button" class="go" data-testid="run">Run</button>
+      <span class="warn">Leave “apply” unchecked for a dry-run plan first.</span></div>
+    <pre class="out full" data-testid="output" style="display:none"></pre>
+    <pre class="out full" data-testid="onboard-capability-gap" style="display:none"></pre>
+    <pre class="out full" data-testid="onboard-provisioning" style="display:none"></pre>`;
+  f.querySelector('button.go').onclick = () => submit(f, rec.collection, rec.suggested_backend);
+  // Discovery pre-fill: if the operator picked a host from the Discovery inbox, seed this form's host field with it
+  // (the server-validated address — never a device byte that could inject). key/group/creds stay the human's (the
+  // machine doesn't guess the class in Rung 1). The banner stays visible as the indicator until cleared/onboarded.
+  if (pendingOnboardHost) f.querySelector('[name=host]').value = pendingOnboardHost;
+  // The discovered hostname (a device byte) pre-fills the inventory name as a FORM VALUE only — input.value is
+  // text (no HTML parse) and the server validates host_name on submit; the operator still reviews/edits it.
+  if (pendingOnboardHostName) f.querySelector('[name=host_name]').value = pendingOnboardHostName;
+  return f;
+}
+
+// F1 (self-describing auth): render the DERIVED per-backend credential fields into `container`. Each CredField →
+// the EXISTING secret-form widget (renderSecretKnob: multiline PEM / masked secret / plain identity, keyed by
+// data-field, write-only — a value is never pre-filled), stamped with a stable field-cred-<field> testid. ZERO new
+// widget code — renderSecretKnob is the contract. The point: the onboard form now shows the RIGHT fields for the
+// picked device (no dead SSH box on a REST device, no token box on a switch). A `fallback` source — a backend that
+// declares no auth shape — shows the generic union plus an explanatory banner, so onboarding is never blocked.
+function renderCredFields(container, fields, source) {
+  container.innerHTML = '';
+  if (source === 'fallback') {
+    container.appendChild(E('div', 'meta warn', 'generic credential fields — this device class declares no '
+      + 'specific auth shape, so the standard set is shown', 'cred-fallback-banner'));
+  }
+  // ONE field → the EXISTING secret-form widget (renderSecretKnob: multiline PEM / masked secret / plain identity,
+  // data-field, write-only), stamped field-cred-<field>. ZERO new widget code.
+  const renderInto = (parent, cf) => {
+    const knob = { key: cf.field, label: cf.label || cf.field, secret: !!cf.secret,
+                   required: !!cf.required, multiline: cf.kind === 'ssh_key', help: cf.help || '' };
+    const row = renderSecretKnob(knob);
+    const w = row.querySelector('[data-field]');
+    if (w) w.setAttribute('data-testid', 'field-cred-' + cf.field);
+    parent.appendChild(row);
+  };
+  // F1 seam S1: fields sharing an `auth_set` are ONE coherent credential (e.g. a proxmox API token's
+  // user+id+secret, all-required-together) — render them inside a single <fieldset> with a legend, so the blind
+  // user sees one credential WITH PARTS, not loose mysterious boxes. Ungrouped fields render flat as before.
+  const groups = {};
+  (fields || []).forEach(cf => {
+    if (cf.auth_set) {
+      let fs = groups[cf.auth_set];
+      if (!fs) {
+        fs = document.createElement('fieldset');
+        fs.className = 'auth-set';
+        fs.setAttribute('data-testid', 'auth-set-' + cf.auth_set);
+        const lg = document.createElement('legend');
+        lg.textContent = cf.auth_set.replace(/_/g, ' ') + ' — all required together';
+        fs.appendChild(lg);
+        groups[cf.auth_set] = fs;
+        container.appendChild(fs);
+      }
+      renderInto(fs, cf);
+    } else {
+      renderInto(container, cf);
+    }
+  });
+  container.appendChild(E('div', 'meta', source === 'fallback'
+    ? 'fields: the generic union (no per-backend shape)'
+    : 'fields derived for this device’s backend', 'cred-derivation-source'));
+}
+// Fetch the derived cred-field SHAPE for `backend` (read-only, NAMES only) and render it into the form. Best-effort:
+// a fetch failure leaves an honest note, never blocks onboarding (INVARIANT D*). secrets only stamps the domain the
+// server re-derives at submit, so a later secrets-domain change doesn't need a re-fetch (the server is the truth).
+async function loadCredFields(f, backend, secrets, collection) {
+  const box = f.querySelector('[data-testid=cred-fields]');
+  if (!box) return;
+  box.textContent = 'deriving credential fields…';
+  try {
+    // collection lets the server prefer a curated class's OWN auth set (proxmox's grouped api-token fields) over the
+    // generic per-backend shape (F1 seam S1) — so the blind user sees the RIGHT grouped fields before any plan.
+    // deep=true asks the server to SHARPEN to the EXACT argument_spec fields (F1 TIER-B); it is install-confined
+    // server-side (a not-installed collection stays on the coarse shape at no cost), so we always request it.
+    const q = '/api/onboard/cred-fields?backend=' + encodeURIComponent(backend || '')
+            + '&secrets=' + encodeURIComponent(secrets || 'network')
+            + (collection ? '&collection=' + encodeURIComponent(collection) + '&deep=true' : '');
+    const r = await (await fetch(q)).json();
+    renderCredFields(box, r.cred_fields, r.cred_source);
+  } catch (e) { box.textContent = 'could not derive credential fields (enter them after onboarding)'; }
+}
+
+async function submit(f, collection, backend, overwrite=false) {
+  const g = n => f.querySelector('[name='+n+']');
+  // F1: harvest the DERIVED per-backend credential widgets by data-field → a {field: value} map. The raw value
+  // is sent (a PEM's internal whitespace is meaningful; the server normalizes CRLF + trailing newline); only the
+  // emptiness test trims, so a blank field is simply omitted (never written / never overwrites a prior secret).
+  const creds = {};
+  f.querySelectorAll('[data-field]').forEach(w => { if ((w.value || '').trim() !== '') creds[w.dataset.field] = w.value; });
+  const hostName = g('host_name').value.trim();
+  const body = { collection, backend,
+    key:g('key').value, group:g('group').value, host:g('host').value, secrets:g('secrets').value,
+    creds,
+    apply:g('apply').checked, push:(g('push') ? g('push').checked : false), bootstrap:g('bootstrap').checked,
+    overwrite };
+  if (hostName) body.host_name = hostName;   // optional inventory name; blank ⇒ the server auto-names <key>-N
+  const out = f.querySelector('[data-testid=output]'); out.style.display='block'; out.textContent='Running…';
+  const prov = f.querySelector('[data-testid=onboard-provisioning]'); prov.style.display='none'; prov.textContent='';
+  const gap = f.querySelector('[data-testid=onboard-capability-gap]'); gap.style.display='none'; gap.textContent='';
+  const oldBtn = f.querySelector('[data-testid=onboard-overwrite]'); if (oldBtn) oldBtn.remove();   // clear a stale one
+  try {
+    const r = await (await fetch('/api/onboard',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+    out.textContent = renderOnboard(r);          // writes the OUTPUT pre only — the provisioning/gap siblings survive (own nodes)
+    renderProvisioning(prov, r);
+    renderCapabilityGap(gap, r);
+    if (r.conflict) {                            // a divergent drop-in exists — offer the explicit overwrite (loud)
+      const ob = E('button','go warn','⚠ Overwrite the existing file','onboard-overwrite');
+      ob.title = 'replace the divergent drop-in with this onboard (your deliberate choice)';
+      ob.onclick = () => {
+        // Loud warning (#124): Overwrite REPLACES a curated class — it can strip its metrics:/backup:/logs:
+        // blocks. Onboarding a device of an EXISTING class normally REUSES it (no conflict); a conflict here
+        // means a DIFFERENT class collides on this key, so confirm the destructive replace.
+        if (window.confirm('Overwrite REPLACES the existing module/host file. If this key matches a curated '
+          + 'device-class, its metrics/backup/logs capabilities will be lost. Prefer a new key unless you mean '
+          + 'to replace it. Continue?')) submit(f, collection, backend, true);
+      };
+      out.parentNode.insertBefore(ob, out);      // sits just above the output pane
+    }
+  } catch(e){ out.textContent = 'request failed'; }
+}
+// The credential-provisioning surface — ADVISORY + strictly NON-GATING (INVARIANT D*): the Run button stays
+// enabled, the operator can onboard with a wrong/absent scope, and the validate seam's token-scope check catches
+// it on the wire later. It exists so a blind operator never has to hunt a doc for the manual cred step beyond
+// IP+creds (the blind-joe constraint): the device class declares its prereqs as shipped data, surfaced here.
+// `grant` is the structured role NAME (server sends names only, never a cred); `note` is rendered VERBATIM.
+function renderProvisioning(prov, r){
+  const items = (r.plan && r.plan.provisioning) || [];   // present on the dry-run plan, where the operator plans first
+  if (!items.length){ prov.style.display='none'; return; }
+  prov.style.display='block';
+  prov.textContent = 'CREDENTIAL PREREQUISITES for this device class (grant BEFORE this works — advisory, not enforced):\n'
+    + items.map(p => '  • ['+p.grant+'] '+(p.note||'')+(p.docs_url ? ('\n      '+p.docs_url) : '')).join('\n');
+}
+// The F2 capability-GAP surface — ADVISORY + strictly NON-GATING (INVARIANT D*), the de-bespoke sibling of
+// renderProvisioning: a blind onboard auto-derives the universal monitoring/logging FLOOR (shown in the dry-run
+// text), and this pane names the curated richness it could NOT derive (a vendor exporter, a credentialed log pull)
+// + how to add it — so the operator is told what's missing, never a silent blank. Empty for a full-parity / reused
+// class. `method`/`capability`/`why` are server-sent NAMES only (never a cred).
+function renderCapabilityGap(gap, r){
+  const items = (r.plan && r.plan.capability_gap) || [];
+  if (!items.length){ gap.style.display='none'; return; }
+  gap.style.display='block';
+  gap.textContent = 'CAPABILITY GAP — auto-monitored at the universal floor; this curated richness is NOT derivable '
+    + '(declare it to add — advisory, not enforced):\n'
+    + items.map(g => '  • ['+g.capability+'/'+g.method+'] '+(g.why||'')).join('\n');
+}
+// The F2 auto-derived monitoring FLOOR a blind onboard pins into the new module (the `derived: true`-marked
+// metrics/logs entries) — summarized in the dry-run so the operator sees the device is monitored + log-shippable on
+// day one. Empty for a reused curated class (nothing newly derived).
+function autoFloor(p){
+  const m = (p && p.module) || {};
+  const mets = (m.metrics||[]).filter(e=>e.derived).map(e=>e.method);
+  const logs = (m.logs||[]).filter(e=>e.derived).map(e=>e.method);
+  const parts = [];
+  if (mets.length) parts.push('metrics ['+mets.join(', ')+']');
+  if (logs.length) parts.push('logs ['+logs.join(', ')+']');
+  return parts.join('  ');
+}
+// Render the in-process onboard response (mirrors the API contract): dry-run plan, or the applied result —
+// STAGED proposal (proposed/<run_id>, C10) vs direct main. Creds appear only as var NAMES (server never sends values).
+function renderOnboard(r){
+  if (r.error) return 'ERROR: '+r.error;
+  if (!r.applied){
+    const p=r.plan;
+    return 'DRY-RUN plan — nothing written (run_id '+r.run_id+')\n'
+      +'backend: '+p.backend+'   role: '+p.role+'   host: '+p.host_name+'\n'
+      +(p.module_reuse ? 'class '+p.key+' already exists — REUSING it (curated module kept; adding host only)\n' : '')
+      +'writes: '+(p.module_reuse ? '(module reused) ' : p.paths.module+', ')+p.paths.inventory+', instance/fleet.yml\n'
+      +'creds to encrypt: '+(p.creds.length? p.creds.join(', ') : '(none)')+'\n'
+      +(autoFloor(p) ? 'auto-derived monitoring (zero curation): '+autoFloor(p)+'\n' : '')
+      +(r.bootstrap_requested? 'bootstrap: deferred to a Semaphore task after promote\n':'')
+      +'\nTick “apply” to write + stage the proposal.';
+  }
+  if (!r.changed) return 'No change — '+r.host_name+' already onboarded (run_id '+r.run_id+').';
+  return (r.staged? 'STAGED proposal '+r.target_ref : 'committed to main')+' (run_id '+r.run_id+')\n'
+    +'host: '+r.host_name+'   pushed_canonical: '+r.pushed_canonical+'   pushed_origin: '+r.pushed_origin+'\n'
+    +'next: '+r.next;
+}
+// --- the standalone secondary-capability dialog (telemetry = instance #1; backup joins at Phase 8) ------
+// ONE shell for every capability: cap is data, not a branch. suggest (read-only) → pick method/params →
+// propose (pure plan + anti-drift token) → promote (token-gated write). The API runs no play — the plan
+// hands back the enact commands the operator runs to make it live. INVARIANT D*: strictly after onboarding.
+// --- the ONE knob renderer (Phase 3, #137): a declarative type→widget table generalizing the old enum-only
+// capParamsUI, fed by service/configurable's uniform knob model. Every widened widget stays SERVER-validated
+// (service/_validate, P0a) — the widget is convenience, the descriptor is the contract, the server is the guard.
+// Top-level + pure so a page.evaluate() e2e can assert the rendered widget set from a synthetic knob (no write).
+function renderKnob(knob) {                                    // one NON-secret knob -> a [data-param] widget
+  const row = E('div', 'row knob', null, 'knob-' + knob.key);
+  row.appendChild(E('label', null, knob.label || knob.key));
+  let w;
+  switch (knob.type || 'text') {
+    case 'enum':
+      w = E('select'); w.dataset.param = knob.key;
+      (knob.allowed || []).forEach(v => { const o = E('option', null, v); o.value = v;
+        if (v === knob.default) o.selected = true; w.appendChild(o); });
+      break;
+    case 'bool':
+      w = E('input'); w.type = 'checkbox'; w.dataset.param = knob.key; if (knob.default) w.checked = true; break;
+    case 'int':
+      w = E('input'); w.type = 'number'; w.dataset.param = knob.key;
+      if (knob.range) { if (knob.range.min != null) w.min = knob.range.min;
+        if (knob.range.max != null) w.max = knob.range.max; if (knob.range.step != null) w.step = knob.range.step; }
+      if (knob.default != null) w.value = knob.default; break;
+    case 'secret':                                            // a secret knob in a non-fields group: write-only, never pre-filled (C11)
+      w = E('input'); w.type = 'password'; w.dataset.param = knob.key;
+      w.placeholder = knob.already_set ? '•••• (set — leave blank to keep)' : ''; break;
+    case 'text': default:
+      w = E('input'); w.type = 'text'; w.dataset.param = knob.key;
+      if (knob.pattern) w.pattern = knob.pattern; if (knob.default != null) w.value = knob.default; break;
+  }
+  row.appendChild(w);
+  if (knob.help) row.appendChild(E('div', 'meta', knob.help));
+  return row;
+}
+// A SECRET-form knob (the `fields` source) — the existing secret widget EXTRACTED verbatim so the secrets dialog
+// converges onto this renderer with ZERO change to its safety contract: write-only (password)/multiline(textarea)
+// /non-secret(text+default) input keyed by `data-field` (what secretApply reads), the `gen` button that CLEARS
+// the field so the SERVER mints it, and the NAMES-only `already_set` hint. A secret value is NEVER pre-filled.
+function renderSecretKnob(knob) {
+  const set = knob.already_set ? ' <span class="meta">(set — blank keeps it)</span>' : '';
+  const row = E('div', 'row');
+  row.appendChild(E('label', null, knob.label + (knob.required ? ' *' : '') + set)).title = knob.help || '';
+  let field;
+  if (knob.multiline) {                                       // a multi-line secret (e.g. a PEM key) — a single line can't hold it
+    field = E('textarea', null, null, 'secret-field'); field.rows = 6; field.spellcheck = false;
+  } else {
+    field = E('input', null, null, 'secret-field'); field.type = knob.secret ? 'password' : 'text';
+    if (!knob.secret && knob.default && !knob.already_set) field.value = knob.default;   // non-secret default ONLY
+  }
+  field.setAttribute('autocomplete', 'off'); field.dataset.field = knob.key; row.appendChild(field);
+  if (knob.generate) {                                        // 'gen' MARKS the field for re-mint (sent in `regenerate`) + clears it
+    const g = E('button', null, 'gen', 'secret-generate'); g.dataset.gen = knob.key;
+    g.title = 'auto-generate on the box';
+    // #141: mark for EXPLICIT regeneration so the server re-mints it; a blank field WITHOUT this mark is KEPT (an
+    // already-set generated secret is never silently re-minted by an unrelated save). Typing a value clears the mark.
+    g.onclick = () => { field.value = ''; field.placeholder = '(auto-generated on save)'; field.dataset.regen = '1'; };
+    field.addEventListener('input', () => { if (field.value) delete field.dataset.regen; });
+    row.appendChild(g);
+  }
+  return row;
+}
+function renderChip(knob) {                                   // a Stage-3 curated_list selection (data-chip; folded into `dashboards`)
+  const row = E('div', 'row knob', null, 'knob-' + knob.key);
+  const cb = E('input'); cb.type = 'checkbox'; cb.dataset.param = knob.key; cb.dataset.chip = '1';
+  if (knob.default) cb.checked = true;
+  row.appendChild(cb); row.appendChild(E('label', null, knob.label || knob.key));
+  return row;
+}
+// The render-table dispatcher (closes the specced-but-unbuilt Stage-3 gap, testid_reference §Stage-3): one tier
+// of knobs into the group's descriptor-supplied testid container, keyed by source_kind. `none` renders nothing;
+// `curated_list` with no items today (suggested_dashboards is a later phase) shows an honest empty state.
+function renderKnobGroup(dlg, group) {
+  if (!group || !group.testid) return;
+  const wrap = dlg.querySelector('[data-testid=' + group.testid + ']');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  const knobs = group.knobs || [];
+  switch (group.source_kind) {
+    // 'unit' = an app-store unit's CURATED configure knobs (R3): non-secret, _validate-checked — renders through
+    // renderKnob exactly like a capability's params (the worked-extraction MVP: curated knobs, not argspec).
+    case 'params': case 'policy_fields': case 'unit': knobs.forEach(k => wrap.appendChild(renderKnob(k))); break;
+    case 'fields': knobs.forEach(k => wrap.appendChild(renderSecretKnob(k))); break;
+    case 'curated_list':
+      if (!knobs.length) wrap.appendChild(E('div', 'meta', 'no curated items offered yet (lands with the hybrid-dashboard phase)', 'knob-empty'));
+      else knobs.forEach(k => wrap.appendChild(renderChip(k)));
+      break;
+    case 'none': default: break;                              // descriptor data only — render nothing
+  }
+}
+// Harvest the dialog's widget values by data-param (the propose/promote payload). checkbox→bool, number→Number,
+// blank input OMITTED (leave-blank-to-keep). A Stage-3 curated_list chip is EXCLUDED — selecting/writing curated
+// dashboards is a deferred feature (lands with suggested_dashboards, with its own server-side allow-list check),
+// so no `dashboards` field reaches the server yet and {method, params} is byte-identical to the old capSelection.
+function knobSelection(dlg) {
+  const method = (dlg.querySelector('[data-testid=cap-method]') || {}).value;
+  const params = {};
+  dlg.querySelectorAll('[data-param]').forEach(w => {
+    const k = w.dataset.param;
+    if (w.dataset.chip != null) return;          // a Stage-3 chip — deferred; never folded into the payload
+    if (w.type === 'checkbox') params[k] = w.checked;
+    else if (w.value !== '') params[k] = (w.type === 'number') ? Number(w.value) : w.value;
+    // a blank secret/text input is OMITTED — the server treats absence as "unchanged"
+  });
+  const sel = { method };
+  if (Object.keys(params).length) sel.params = params;
+  return sel;
+}
+// Render the selected method's Stage-1 params group + the Stage-3 resource group + the cred prereq. Replaces the
+// enum-only capParamsUI; the groups come projected from /api/configurable (server-side, one home — no JS re-projection).
+function capRenderKnobs(dlg) {
+  // A method/knob change invalidates any prior plan+token+diff — clear the reconfigure gate so a re-Propose is
+  // required (the new value must be diffed + re-confirmed before it can stage).
+  dlg.querySelectorAll('[data-testid=reconfig-diff], [data-testid=reconfig-confirm-row]').forEach(n => n.remove());
+  const pb = dlg.querySelector('[data-testid=cap-promote]'); if (pb) pb.disabled = true;
+  const method = dlg.querySelector('[data-testid=cap-method]').value;
+  const m = (dlg._methods || []).find(x => x.name === method);
+  renderKnobGroup(dlg, (m && m.group) || { testid: 'cap-params', source_kind: 'params', knobs: [] });
+  if (dlg._stage && dlg._stage.source_kind !== 'none') renderKnobGroup(dlg, dlg._stage);
+  capCredPrereq(dlg, m);     // G3: advisory credential prerequisite for the selected method
+}
+// Mirror the onboard `provisioning:` pane (renderProvisioning): if the selected method names a secret_domain, tell
+// the operator a SOPS credential is needed BEFORE this goes live — advisory, NOT enforced (propose/promote write
+// config only; the cred is consumed at the deploy/enact step). Offers a one-click jump to the Secrets dialog.
+function capCredPrereq(dlg, m) {
+  const prereq = dlg.querySelector('[data-testid=cap-cred-prereq]');
+  const dom = m && m.secret_domain;
+  if (!dom) { prereq.style.display = 'none'; prereq.innerHTML = ''; return; }
+  prereq.style.display = 'block';
+  prereq.innerHTML = '⚠ needs the <b>'+dom+'</b> credential before it goes live (advisory, not enforced) — '+
+    '<button class="link" data-testid="cap-cred-open">supply it in Secrets</button>';
+  prereq.querySelector('[data-testid=cap-cred-open]').onclick = () => openSecretDialog(dom);
+}
+function capSelection(dlg) { return knobSelection(dlg); }   // harvest by data-param (widened) — same {method, params} payload
+// Capability LINKS — a generic plan field (telemetry → Grafana deep-links, #122; any capability may emit them).
+// Rendered as clickable anchors so the operator jumps straight to the device's dashboard after onboarding.
+function capRenderLinks(dlg, links) {
+  dlg.querySelectorAll('[data-testid=cap-links]').forEach(n => n.remove());   // one block; refresh on each render
+  if (!links || !links.length) return;
+  const box = E('div', 'caplinks', null, 'cap-links');
+  box.innerHTML = '🔗 ' + links.map(l =>
+    '<a href="'+l.url+'" target="_blank" rel="noopener noreferrer">'+l.label+' ↗</a>').join(' · ');
+  dlg.querySelector('.capbody').appendChild(box);
+}
+async function openCapabilityDialog(cap, key, opts) {
+  document.querySelectorAll('[data-testid=cap-overlay]').forEach(n => n.remove());
+  const ov = E('div', 'capov', null, 'cap-overlay');
+  const dlg = E('div', 'capdlg', null, 'cap-dialog'); dlg.dataset.cap = cap; dlg.dataset.key = key;
+  dlg.innerHTML = '<div class="caphd"><span><b>'+cap+'</b> · '+key+'</span>'+
+    '<button class="capx" data-testid="cap-close">×</button></div>'+
+    '<div class="capbody" data-testid="cap-body"><div class="spin">Detecting…</div></div>';
+  ov.appendChild(dlg); document.body.appendChild(ov);
+  dlg.querySelector('[data-testid=cap-close]').onclick = () => ov.remove();
+  let view;
+  // The uniform projection (Phase 3): one renderer over server-projected knob GROUPS (methods' params + Stage-3),
+  // not the old enum-only inline loop. propose/promote still POST /api/capability/<cap> (the write spine is unchanged).
+  try { view = await (await fetch('/api/configurable?kind=capability:'+encodeURIComponent(cap)+
+        '&id='+encodeURIComponent(key))).json(); }
+  catch(e) { dlg.querySelector('.capbody').innerHTML = '<div class="warn">request failed</div>'; return; }
+  const body = dlg.querySelector('.capbody');
+  if (view.error) { body.innerHTML = '<div class="warn" data-testid="cap-error">'+view.error+'</div>'; return; }
+  dlg._methods = view.methods || [];
+  dlg._stage = view.resource_stage || null;
+  const declared = (view.declared || []).flatMap(d => d.methods);
+  const moptions = dlg._methods.map(m =>   // declared methods are RECONFIGURE (pre-filled + diffed); the rest are ADD
+    '<option value="'+m.name+'">'+m.label+(m.declared ? ' · declared (reconfigure)' : '')+'</option>').join('');
+  // A Stage-3 container ONLY when the descriptor's source_kind renders (curated_list/policy_fields) — `none`
+  // (backup/logging: all knobs ride Stage-1) renders no container, matching testid_reference §Stage-3.
+  const stageBox = (dlg._stage && dlg._stage.source_kind !== 'none' && dlg._stage.testid)
+    ? '<div class="section">'+(dlg._stage.label || 'resources')+'</div><div data-testid="'+dlg._stage.testid+'"></div>'
+    : '';
+  body.innerHTML =
+    '<div class="meta">'+((view.suggestion && view.suggestion.note) || '')+'</div>'+
+    (declared.length ? '<div class="meta">already monitored via: '+declared.join(', ')+'</div>' : '')+
+    '<div class="row"><label>method</label><select data-testid="cap-method">'+
+      (moptions || '<option value="">(none to add)</option>')+'</select></div>'+
+    '<div data-testid="cap-params"></div>'+ stageBox +
+    '<div class="warn" data-testid="cap-cred-prereq" style="display:none"></div>'+
+    '<div class="row"><button class="go" data-testid="cap-propose">Propose</button>'+
+      '<button data-testid="cap-promote" disabled>Promote</button></div>'+
+    '<pre class="out" data-testid="cap-plan" style="display:none"></pre>';
+  body.querySelector('[data-testid=cap-method]').onchange = () => capRenderKnobs(dlg);
+  capRenderKnobs(dlg);
+  body.querySelector('[data-testid=cap-propose]').onclick = () => capPropose(dlg);
+  body.querySelector('[data-testid=cap-promote]').onclick = () => capPromote(dlg);
+}
+async function capPropose(dlg) {
+  const out = dlg.querySelector('[data-testid=cap-plan]'); out.style.display = 'block'; out.textContent = 'Proposing…';
+  let r;
+  try { r = await (await fetch('/api/capability/'+dlg.dataset.cap, {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({key: dlg.dataset.key, selection: capSelection(dlg)})})).json(); }
+  catch(e) { out.textContent = 'request failed'; return; }
+  if (r.error) { out.textContent = 'ERROR: '+r.error+(r.detail ? '\n'+r.detail : ''); return; }
+  dlg._token = r.token;
+  out.textContent = 'PLAN — writes nothing yet:\n  paths: '+(r.paths||[]).join(', ')+
+    '\n\nenact (run AFTER promote to make it live; ▶ = a one-click Semaphore task, $ = a control-node command):\n'+
+    (r.enact||[]).map(c => (c.kind === 'semaphore'
+        ? '  ▶ Semaphore task: '+c.task+(c.args ? ' '+JSON.stringify(c.args) : '')+'\n      # '+c.why
+        : '  $ '+c.cmd+'\n      # '+c.why)).join('\n');
+  capRenderLinks(dlg, r.links);                    // preview the Grafana deep-links (live after promote+enact)
+  capReconfigGate(dlg, r);                          // Phase 4a: render the diff + gate Promote behind the severity confirm
+}
+// Render the reconfigure change-set into a compact, value-aware text (top-level, pure, page.evaluate-testable).
+// Keys off the EFFECTIVE severity (c.severity || c.kind) so an identity/redeploy upgrade (Phase 4b) shows its
+// own glyph. NAMES + values only for the NON-secret surfaces (capability params / identity keys / host vars carry
+// no secret value).
+function reconfigSev(c){ return c.severity || c.kind; }
+function renderReconfigDiff(changes){
+  if (!changes || !changes.length) return '';
+  const J = v => JSON.stringify(v);
+  const lines = changes.map(c => {
+    const s = reconfigSev(c);
+    if (s === 'identity') return '  ⚑ '+c.path+' : '+J(c.before)+' → '+J(c.after)+'   (IDENTITY — re-classifies the object'+(c.blast_radius?', '+c.blast_radius:'')+')';
+    if (s === 'redeploy') return '  ↻ '+c.path+' : '+J(c.before)+' → '+J(c.after)+'   (redeploy — live only after deploy-stack)';
+    if (c.kind === 'modify') return '  ~ '+c.path+' : '+J(c.before)+' → '+J(c.after)+'   (modify — OVERWRITES a current value)';
+    if (c.kind === 'remove') return '  - '+c.path+'   (remove — DROPS a declared value)';
+    return '  + '+c.path+'   (add)';
+  });
+  const clobber = changes.filter(c => c.kind !== 'add').length;
+  return 'RECONFIGURE — review before staging (writes nothing yet):\n'+lines.join('\n')+
+    (clobber ? '\nthis changes '+clobber+' existing value'+(clobber>1?'s':'')+' — confirm below before Promote.' : '');
+}
+// The SHARED severity GATE (Phase 4b — used by the capability dialog AND the reconfigure dialog). A clobber keeps
+// `promote` DISABLED until the operator acknowledges the RIGHT-WEIGHT confirm for the strongest severity in the
+// change-set: modify→reconfig-overwrite-confirm (click), remove→reconfig-remove-confirm (click), redeploy→
+// reconfig-redeploy-confirm (ack), identity→reconfig-identity-confirm (TYPE-TO-CONFIRM the new value). A pure add
+// / no-op needs no confirm. The machine anti-clobber (verify_no_drop) + the C10 two-key promote are the real
+// boundaries; this human confirm guards the honest operator (M1).
+const _SEV_ORDER = { add:0, modify:1, remove:2, redeploy:3, identity:4 };
+function reconfigGate(dlg, changes, promote, consequence){
+  dlg.querySelectorAll('[data-testid=reconfig-consequence], [data-testid=reconfig-diff], [data-testid=reconfig-confirm-row]').forEach(n => n.remove());
+  // The consequence-naming warning (design 23 §4.2): a settings GUARD knob carries the descriptor's confirm_text
+  // (the re-IP-disconnect / per-tls-mode / drop-monitoring text). Rendered ABOVE the diff so the operator reads
+  // the blast BEFORE confirming. Part of the gate (not the propose handler) so it is page.evaluate-testable.
+  if (consequence){
+    const c = E('div','warn',null,'reconfig-consequence'); c.textContent = '⚠ '+consequence;
+    dlg.querySelector('.capbody').appendChild(c);
+  }
+  if (changes && changes.length){
+    const pane = E('pre','out',null,'reconfig-diff'); pane.textContent = renderReconfigDiff(changes);
+    dlg.querySelector('.capbody').appendChild(pane);
+  }
+  const gated = (changes || []).filter(c => reconfigSev(c) !== 'add');
+  if (!gated.length){ promote.disabled = false; return; }     // add-only / no-op — no confirm
+  promote.disabled = true;
+  const top = gated.reduce((a,c) => _SEV_ORDER[reconfigSev(c)] > _SEV_ORDER[reconfigSev(a)] ? c : a, gated[0]);
+  const s = reconfigSev(top);
+  const row = E('div','row',null,'reconfig-confirm-row');
+  if (s === 'identity'){                                       // type-to-confirm the new identity value (mirrors mgmt-IP)
+    const want = String(top.after);
+    row.appendChild(E('label', null, '⚑ re-classify '+top.path+' — type the new value to confirm: '));
+    const inp = E('input', null, null, 'reconfig-identity-confirm'); inp.type = 'text'; inp.placeholder = want;
+    inp.oninput = () => { promote.disabled = (inp.value !== want); };
+    row.appendChild(inp);
+    row.appendChild(E('div','meta', (top.blast_radius ? top.blast_radius+' — ' : '')+'changing this re-homes/re-classifies the object ('+JSON.stringify(top.before)+' → '+JSON.stringify(top.after)+'). It only STAGES; promote in Semaphore + re-run the enact steps.'));
+  } else {
+    const tid = s === 'remove' ? 'reconfig-remove-confirm'
+              : s === 'redeploy' ? 'reconfig-redeploy-confirm' : 'reconfig-overwrite-confirm';
+    const label = s === 'remove' ? 'Confirm — drop '+gated.length+' value'+(gated.length>1?'s':'')
+                : s === 'redeploy' ? 'Acknowledge — takes effect only after promote + deploy-stack'
+                : 'Confirm — replace '+gated.length+' value'+(gated.length>1?'s':'');
+    const btn = E('button','go', label, tid);
+    btn.onclick = () => { promote.disabled = false; btn.disabled = true; btn.textContent = '✓ confirmed — Promote enabled'; };
+    row.appendChild(btn);
+  }
+  dlg.querySelector('.capbody').appendChild(row);
+}
+// The capability dialog's gate is the shared gate over cap-promote — kept as a thin wrapper so capPropose is
+// unchanged (and the modify/remove confirm testids are byte-identical to Phase 4a).
+function capReconfigGate(dlg, r){ reconfigGate(dlg, r.changes, dlg.querySelector('[data-testid=cap-promote]')); }
+// Render a capability promote result, mirroring renderOnboard's staged/run_id line (#126). A promote STAGES
+// proposed/<run_id> (C10) EXACTLY like onboarding, so the operator needs the run_id (and the staged ref) to drive
+// Semaphore's promote-proposal survey. The old render printed only "PROMOTED + committed: <paths>" — dropping BOTH
+// the run_id and the staged ref, so the operator had no way to find the id to complete the promote (the live
+// "where do I get the run_id" blocker). The server already returns run_id/target_ref/staged (gui/app.py); this
+// just surfaces them. Kept a top-level (global) function so it renders identically to onboard and is unit-testable.
+function renderCapPromote(r){
+  if (r.error) return 'ERROR: '+r.error;
+  if (!r.changed) return r.note || 'already declared — nothing to promote.';
+  return (r.staged? 'STAGED proposal '+r.target_ref : 'committed to main')+' (run_id '+r.run_id+')\n'
+    +'paths: '+(r.paths||[]).join(', ')+'\n'
+    +(r.staged
+        ? 'promote it: enter run_id '+r.run_id+' in the Semaphore promote-proposal task, then run the enact commands above.'
+        : 'NOT LIVE until you run the enact commands above.');
+}
+async function capPromote(dlg) {
+  const out = dlg.querySelector('[data-testid=cap-plan]'); out.textContent += '\n\nPromoting…';
+  let r;
+  try { r = await (await fetch('/api/capability/'+dlg.dataset.cap, {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({key: dlg.dataset.key, apply:true, token: dlg._token, selection: capSelection(dlg)})})).json(); }
+  catch(e) { out.textContent += '\nrequest failed'; return; }
+  const res = E('pre', 'out', null, 'cap-result');
+  // On a drift/would_drop 409 the server returns the change-set (G6) — show 'here is what moved under you', not opaque.
+  res.textContent = renderCapPromote(r) + ((r.error && r.changes && r.changes.length) ? '\n\n'+renderReconfigDiff(r.changes) : '');
+  dlg.querySelector('.capbody').appendChild(res);
+  capRenderLinks(dlg, r.links);                    // surface the Grafana deep-link after a successful promote (#122)
+}
+// --- the app-store UNIT dialog (create-unit): search a collection's runnable units, then AUTHOR a version-pinned
+// actuation unit (instance/actuation/<key>/unit.yml) STAGED proposed/<run_id> (C10). Reuses the modal lifecycle +
+// renderCapPromote VERBATIM; mounts the create-unit substrate (gui/app.py api_units + api_actuation_create). The
+// GUI NEVER promotes (no promote button — C10 two-key). MVP = the CREATE flow: pick a runnable unit → review the
+// derived target/pin/provenance (+ the create-time Tier-cap refusal) → acknowledge → create. `collection` is data,
+// never a per-unit testid (the capability/secret-dialog doctrine). Secret/configure-knob stages are zero-knob MVP.
+const UNIT_BLAST = ['this-device', 'VLAN', 'LAN', 'WAN', 'all'];
+
+async function openUnitDialog(collection, version) {
+  document.querySelectorAll('[data-testid=unit-overlay]').forEach(n => n.remove());   // one modal at a time
+  const ov = E('div', 'capov', null, 'unit-overlay');
+  const dlg = E('div', 'capdlg', null, 'unit-dialog'); dlg.dataset.collection = collection;
+  dlg._collection = collection; dlg._version = version || '';
+  dlg.innerHTML = '<div class="caphd"><span>⚙ Automations · <b></b></span>'+
+    '<button class="capx" data-testid="unit-close">×</button></div>'+
+    '<div class="capbody" data-testid="unit-body"><div class="spin">Loading units…</div></div>';
+  dlg.querySelector('.caphd b').textContent = collection;        // device byte → textContent (never innerHTML)
+  ov.appendChild(dlg); document.body.appendChild(ov);
+  dlg.querySelector('[data-testid=unit-close]').onclick = () => ov.remove();
+  const body = dlg.querySelector('[data-testid=unit-body]');
+  let res;
+  try { res = await (await fetch('/api/units/'+encodeURIComponent(collection))).json(); }
+  catch(e) { body.innerHTML = ''; body.appendChild(E('div','warn','request failed','unit-list-error')); return; }
+  if (res.error) { body.innerHTML = ''; body.appendChild(ET('div','warn', res.error, 'unit-list-error')); return; }
+  const units = res.units || [];
+  body.innerHTML = '';
+  if (!units.length) {
+    body.appendChild(E('div','meta','this collection ships no runnable units (it provides modules only).',
+      'unit-list-empty'));
+    return;
+  }
+  body.appendChild(E('div','meta','pick a runnable unit to create a version-pinned app-store unit:'));
+  const list = E('div', null, null, 'unit-list');
+  units.forEach(u => {
+    const row = E('div', 'row', null, 'unit-row'); row.dataset.unit = u.name; row.dataset.kind = u.kind;
+    row.appendChild(ET('span', 'b', u.name));                    // unit name → textContent (semi-trusted file name)
+    row.appendChild(ET('span', 'meta', ' · ' + u.kind));
+    const pick = E('button', null, 'Select', 'unit-pick');
+    pick.onclick = () => unitReviewPane(dlg, u);
+    row.appendChild(pick);
+    list.appendChild(row);
+  });
+  body.appendChild(list);
+}
+
+// Stage ③/⑤ — the picked unit's blast-radius choice + the Review (propose) trigger. The propose RENDERS the
+// derived target/pin/provenance (writes nothing); the create-time Tier-cap surfaces as a refusal here.
+function unitReviewPane(dlg, unit) {
+  const body = dlg.querySelector('[data-testid=unit-body]');
+  body.innerHTML = '';
+  dlg._unit = unit;
+  body.appendChild(ET('div','meta','unit: ' + unit.name + ' (' + unit.kind + ')  ·  collection ' + dlg._collection
+    + '  ·  v' + (dlg._version || '?')));
+  const brow = E('div', 'row', '<label>blast radius</label>');
+  brow.appendChild(E('select', null,
+    UNIT_BLAST.map(x => '<option' + (x === 'LAN' ? ' selected' : '') + '>' + x + '</option>').join(''), 'unit-blast'));
+  body.appendChild(brow);
+  const rbtn = E('button', 'go', 'Review', 'unit-review');
+  rbtn.onclick = () => unitPropose(dlg);
+  const back = E('button', null, '‹ units'); back.title = 'back to the unit list';
+  back.onclick = () => openUnitDialog(dlg._collection, dlg._version);
+  const row = E('div','row'); row.appendChild(rbtn); row.appendChild(back); body.appendChild(row);
+}
+
+async function unitPropose(dlg) {
+  const body = dlg.querySelector('[data-testid=unit-body]');
+  body.querySelectorAll('[data-testid=unit-provenance], [data-testid=unit-tier-cap], [data-testid=unit-review-error],'
+    + ' [data-testid=unit-ack-row], [data-testid=unit-create-row], [data-testid=unit-result], [data-testid=unit-enact]')
+    .forEach(n => n.remove());
+  const inputs = {collection: dlg._collection, kind: dlg._unit.kind, name: dlg._unit.name,
+    version: dlg._version, blast_radius: dlg.querySelector('[data-testid=unit-blast]').value};
+  dlg._inputs = inputs;
+  let r;
+  try { r = await (await fetch('/api/actuation/create', {method:'POST',
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify(inputs)})).json(); }
+  catch(e) { body.appendChild(E('div','warn','request failed','unit-review-error')); return; }
+  if (r.error === 'tier_cap') {                                   // fail-closed at the Tier-cap — NO Create offered
+    body.appendChild(ET('div','warn', '⛔ ' + (r.detail || 'refused: the highest-blast tier needs a signed source'),
+      'unit-tier-cap'));
+    return;
+  }
+  if (r.error) {
+    body.appendChild(ET('div','warn', 'ERROR: '
+      + (typeof r.detail === 'string' ? r.detail : JSON.stringify(r.detail || r.error)), 'unit-review-error'));
+    return;
+  }
+  dlg._token = r.token; dlg._key = r.key;
+  const prov = ET('pre','out',
+    'WILL CREATE app-store unit (writes nothing yet):\n'
+    + '  key:            ' + r.key + '\n'
+    + '  device-class:   ' + r.device_class + '   (inventory_group ' + r.inventory_group + ')\n'
+    + '  pin:            ' + dlg._collection + ' ' + r.version + '   (source galaxy · signature adaptive)\n'
+    + '  blast radius:   ' + r.blast_radius + '\n'
+    + '  stages:         ' + (r.paths || []).join(', ') + ' → proposed/<run_id> (you promote in Semaphore)',
+    'unit-provenance');
+  prov.dataset.pin = dlg._collection + r.version;                // unit-pin info as data (the exact == pin)
+  body.appendChild(prov);
+  // the content-trust + blast acknowledge gate — Create stays DISABLED until the operator acks (the one new gate,
+  // report 24 §2 Stage ⑤; a click-ack here — the machine Tier-cap is the real boundary, this guards the honest op).
+  const create = E('button', null, 'Create (stage proposal)', 'unit-create'); create.disabled = true;
+  const ack = E('button','go','I understand — this pins third-party content into the runner','unit-blast-ack');
+  ack.dataset.blast = r.inventory_group || '';
+  ack.onclick = () => { create.disabled = false; ack.disabled = true; ack.textContent = '✓ acknowledged'; };
+  const ackRow = E('div','row',null,'unit-ack-row'); ackRow.appendChild(ack); body.appendChild(ackRow);
+  const cRow = E('div','row',null,'unit-create-row'); cRow.appendChild(create); body.appendChild(cRow);
+  create.onclick = () => unitCreate(dlg);
+}
+
+async function unitCreate(dlg) {
+  const body = dlg.querySelector('[data-testid=unit-body]');
+  body.querySelectorAll('[data-testid=unit-result], [data-testid=unit-enact]').forEach(n => n.remove());
+  let r;
+  try { r = await (await fetch('/api/actuation/create', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(Object.assign({}, dlg._inputs, {apply: true, token: dlg._token}))})).json(); }
+  catch(e) { body.appendChild(E('div','warn','request failed','unit-result')); return; }
+  body.appendChild(ET('pre','out', renderCapPromote(r), 'unit-result'));   // reuse the staged-ref + run_id renderer
+  if (!r.error && r.changed) {                                    // the post-promote hand-off (enact)
+    body.appendChild(ET('pre','out',
+      'next (after you promote run_id ' + r.run_id + ' in Semaphore):\n'
+      + '  1. configure the unit’s curated knobs (if any) + review the would-run play\n'
+      + '  2. the FIRST run is a --check --diff dry-run — review it before the apply run', 'unit-enact'));
+  }
+}
+
+// --- the app-store CONFIGURE dialog: set a REGISTERED unit's curated knob values → preview the would-run play →
+// stage instance/actuation/<key>/vars.yml proposed/<run_id> (C10). Opened from the Index panel's Automations
+// section (an existing unit, NOT the create flow). The knob group is the SAME read-only /api/configurable?kind=
+// actuation-unit projection rendered by the SAME renderKnobGroup (the `unit` source_kind) — zero new renderer
+// code; the preview/stage write is the GUI's own POST /api/actuation/<key> (mirrors api/routes/actuation.py::stage).
+// A zero-knob unit still previews + stages (the play review is the value). The GUI NEVER promotes (C10 two-key).
+async function openUnitConfigDialog(key) {
+  document.querySelectorAll('[data-testid=unit-config-overlay]').forEach(n => n.remove());   // one at a time
+  const ov = E('div', 'capov', null, 'unit-config-overlay');
+  const dlg = E('div', 'capdlg', null, 'unit-config-dialog'); dlg.dataset.key = key; dlg._key = key;
+  dlg.innerHTML = '<div class="caphd"><span>⚙ Configure · <b></b></span>'+
+    '<button class="capx" data-testid="unit-config-close">×</button></div>'+
+    '<div class="capbody" data-testid="unit-config-body"><div class="spin">Loading knobs…</div></div>';
+  dlg.querySelector('.caphd b').textContent = key;               // device byte → textContent (never innerHTML)
+  ov.appendChild(dlg); document.body.appendChild(ov);
+  dlg.querySelector('[data-testid=unit-config-close]').onclick = () => ov.remove();
+  const body = dlg.querySelector('[data-testid=unit-config-body]');
+  let view;
+  try { view = await (await fetch('/api/configurable?kind=actuation-unit&id='+encodeURIComponent(key))).json(); }
+  catch(e) { body.innerHTML = ''; body.appendChild(E('div','warn','request failed','unit-config-error')); return; }
+  if (view.error) { body.innerHTML = ''; body.appendChild(ET('div','warn', view.error, 'unit-config-error')); return; }
+  const group = (view.groups || [])[0] || { testid: 'unit-config-fields', source_kind: 'unit', knobs: [] };
+  body.innerHTML = '<div class="meta">set the unit’s curated knobs, then Preview the would-run play before staging:'
+    + '</div><div data-testid="unit-config-fields"></div>';
+  renderKnobGroup(dlg, group);                                   // the SAME renderer the capability/reconfigure forms use
+  if (!(group.knobs || []).length)                              // a zero-knob unit: nothing to set, still previewable
+    body.appendChild(E('div','meta','this unit has no curated knobs — Preview the would-run play, then Stage it.',
+      'unit-config-noknobs'));
+  // a knob edit invalidates a prior preview+token (the value moved → re-Preview before staging; mirrors capRenderKnobs)
+  body.querySelectorAll('[data-param]').forEach(w => w.addEventListener('input', () => unitConfigInvalidate(dlg)));
+  const prev = E('button', 'go', 'Preview', 'unit-config-preview');
+  prev.onclick = () => unitConfigPreview(dlg);
+  const row = E('div','row',null,'unit-config-preview-row'); row.appendChild(prev); body.appendChild(row);
+}
+
+function unitConfigInvalidate(dlg) {
+  dlg._token = null;                                            // the staged token no longer matches the new values
+  dlg.querySelectorAll('[data-testid=unit-config-play], [data-testid=unit-config-stage-row],'
+    + ' [data-testid=unit-config-result], [data-testid=unit-config-enact], [data-testid=unit-config-error]')
+    .forEach(n => n.remove());
+}
+
+async function unitConfigPreview(dlg) {
+  const body = dlg.querySelector('[data-testid=unit-config-body]');
+  unitConfigInvalidate(dlg);                                     // clear any prior preview/result first
+  const values = knobSelection(dlg).params || {};               // harvest by data-param (same as the capability form)
+  dlg._values = values;
+  let r;
+  try { r = await (await fetch('/api/actuation/'+encodeURIComponent(dlg._key), {method:'POST',
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify({values: values})})).json(); }
+  catch(e) { body.appendChild(E('div','warn','request failed','unit-config-error')); return; }
+  if (r.error) {                                                 // 422 invalid (per-knob errors) / 404 no unit
+    body.appendChild(ET('div','warn', 'ERROR: '
+      + (typeof r.detail === 'string' ? r.detail : JSON.stringify(r.detail || r.error)), 'unit-config-error'));
+    return;
+  }
+  dlg._token = r.token;
+  const t = r.target || {};
+  body.appendChild(ET('pre','out',
+    'WOULD RUN (writes nothing yet):\n'
+    + '  target:   ' + (t.device_class||'?') + ' · group ' + (t.inventory_group||'?')
+      + ' · blast ' + (t.blast_radius||'?') + '\n\n'
+    + (r.play || '') + '\n\n' + (r.check_first || ''), 'unit-config-play'));
+  const stage = E('button', null, 'Stage configure values (proposal)', 'unit-config-stage');
+  stage.onclick = () => unitConfigStage(dlg);
+  const sRow = E('div','row',null,'unit-config-stage-row'); sRow.appendChild(stage); body.appendChild(sRow);
+}
+
+async function unitConfigStage(dlg) {
+  const body = dlg.querySelector('[data-testid=unit-config-body]');
+  body.querySelectorAll('[data-testid=unit-config-result], [data-testid=unit-config-enact]').forEach(n => n.remove());
+  let r;
+  try { r = await (await fetch('/api/actuation/'+encodeURIComponent(dlg._key), {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({values: dlg._values || {}, apply: true, token: dlg._token})})).json(); }
+  catch(e) { body.appendChild(E('div','warn','request failed','unit-config-result')); return; }
+  body.appendChild(ET('pre','out', renderCapPromote(r), 'unit-config-result'));   // reuse the staged-ref + run_id renderer
+  if (!r.error && r.changed) {                                   // the post-promote hand-off
+    body.appendChild(ET('pre','out',
+      'next (after you promote run_id ' + r.run_id + ' in Semaphore):\n'
+      + '  the FIRST run is a --check --diff dry-run — review it before the apply run', 'unit-config-enact'));
+  }
+}
+
+// --- the RECONFIGURE dialog (Phase 4b, #139): the ONE data-driven surface for changing an already-configured
+// object's IDENTITY (module-identity) or a host's connection vars (inventory-host). It IS the shared knob renderer
+// (renderKnobGroup, pre-filled with current) + the reconfig-diff pane + the shared severity gate — no bespoke
+// per-object form (design 22 §11.4). propose/promote POST the surface's own route (/api/identity|host/…), which
+// STAGES proposed/<run_id> (C10, never promotes). `kind`/`id` select the projection; `route` is the write seam.
+async function openReconfigureDialog(kind, id, route, titleLabel){
+  document.querySelectorAll('[data-testid=reconfig-overlay]').forEach(n => n.remove());
+  const ov = E('div','capov',null,'reconfig-overlay');
+  const dlg = E('div','capdlg',null,'reconfig-dialog'); dlg.dataset.route = route;
+  dlg.innerHTML = '<div class="caphd"><span><b>Reconfigure</b> · '+titleLabel+'</span>'+
+    '<button class="capx" data-testid="reconfig-close">×</button></div>'+
+    '<div class="capbody" data-testid="reconfig-body"><div class="spin">Loading…</div></div>';
+  ov.appendChild(dlg); document.body.appendChild(ov);
+  dlg.querySelector('[data-testid=reconfig-close]').onclick = () => ov.remove();
+  let view;
+  try { view = await (await fetch('/api/configurable?kind='+encodeURIComponent(kind)+'&id='+encodeURIComponent(id))).json(); }
+  catch(e){ dlg.querySelector('.capbody').innerHTML = '<div class="warn">request failed</div>'; return; }
+  const body = dlg.querySelector('.capbody');
+  if (view.error){ body.innerHTML = '<div class="warn" data-testid="reconfig-error">'+view.error+'</div>'; return; }
+  let html = '<div class="meta">Change a value, <b>Propose</b> to review the diff, then <b>Promote</b> to stage '+
+    '(C10 — the GUI never promotes; do that in Semaphore).</div>';
+  (view.groups||[]).forEach(g => { if (g.testid) html += '<div data-testid="'+g.testid+'"></div>'; });
+  html += '<div class="row"><button class="go" data-testid="reconfig-propose">Propose</button>'+
+          '<button data-testid="reconfig-promote" disabled>Promote</button></div>'+
+          '<pre class="out" data-testid="reconfig-plan" style="display:none"></pre>';
+  body.innerHTML = html;
+  (view.groups||[]).forEach(g => renderKnobGroup(dlg, g));
+  // a knob change invalidates any prior plan+token+diff — re-Propose required before it can stage.
+  dlg.querySelectorAll('[data-param]').forEach(w => w.addEventListener('input', () => {
+    dlg.querySelectorAll('[data-testid=reconfig-diff], [data-testid=reconfig-confirm-row]').forEach(n => n.remove());
+    dlg._token = null; dlg.querySelector('[data-testid=reconfig-promote]').disabled = true;
+  }));
+  dlg.querySelector('[data-testid=reconfig-propose]').onclick = () => reconfigPropose(dlg);
+  dlg.querySelector('[data-testid=reconfig-promote]').onclick = () => reconfigPromote(dlg);
+}
+// Harvest the editable knobs (by data-param) into the {values:{…}} the identity/host routes expect. A blank input
+// is OMITTED (the server treats absence as unchanged); checkbox→bool, number→Number — the renderKnob convention.
+function reconfigSelection(dlg){
+  const values = {};
+  dlg.querySelectorAll('[data-param]').forEach(w => {
+    const k = w.dataset.param;
+    if (w.type === 'checkbox') values[k] = w.checked;
+    else if (w.value !== '') values[k] = (w.type === 'number') ? Number(w.value) : w.value;
+  });
+  return { values };
+}
+async function reconfigPropose(dlg){
+  const out = dlg.querySelector('[data-testid=reconfig-plan]'); out.style.display = 'block'; out.textContent = 'Proposing…';
+  let r;
+  try { r = await (await fetch(dlg.dataset.route, {method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({selection: reconfigSelection(dlg)})})).json(); }
+  catch(e){ out.textContent = 'request failed'; return; }
+  if (r.error){ out.textContent = 'ERROR: '+r.error+(r.detail ? '\n'+r.detail : ''); return; }
+  dlg._token = r.token;
+  out.textContent = 'PLAN — writes nothing yet:\n  paths: '+(r.paths||[]).join(', ')+
+    ((r.enact && r.enact.length) ? '\n\nenact (run AFTER promote to make it live):\n'+
+      r.enact.map(c => '  $ '+c.cmd+'\n      # '+c.why).join('\n') : '');
+  // the gate renders the consequence pane (design 23 §4.2) + the diff + the right-weight confirm
+  reconfigGate(dlg, r.changes, dlg.querySelector('[data-testid=reconfig-promote]'), r.consequence);
+}
+async function reconfigPromote(dlg){
+  const out = dlg.querySelector('[data-testid=reconfig-plan]'); out.textContent += '\n\nPromoting…';
+  let r;
+  try { r = await (await fetch(dlg.dataset.route, {method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({apply:true, token: dlg._token, selection: reconfigSelection(dlg)})})).json(); }
+  catch(e){ out.textContent += '\nrequest failed'; return; }
+  const res = E('pre', 'out', null, 'reconfig-result');   // reuse renderCapPromote (staged ref + run_id surfacing, #126)
+  res.textContent = renderCapPromote(r) + ((r.error && r.changes && r.changes.length) ? '\n\n'+renderReconfigDiff(r.changes) : '');
+  dlg.querySelector('.capbody').appendChild(res);
+}
+// --- the Fleet panel (#121): a read-only list of ONBOARDED device-classes, their declared capabilities, and the
+// inventory hosts under each. A class's capability badge opens the SAME openCapabilityDialog(cap, key) the search
+// cards use — so the operator can actuate telemetry/backup/logging per class straight from "what I've onboarded".
+// The Index panel (#128, evolving #121): TWO independently-degradable sections in one overlay — the control-plane
+// SERVICES kontroll stands up (link-only, from /api/services) + the onboarded FLEET device-classes (unchanged,
+// from /api/fleet). Function name + the fleet-* testids are kept (a stable contract `test_fleet.py`/e2e key off);
+// only the user-facing label widened from "Fleet" to "Index". A services-read failure can't blank the fleet
+// section and vice-versa (each section catches its own fetch).
+async function openFleetPanel() {
+  document.querySelectorAll('[data-testid=fleet-overlay]').forEach(n => n.remove());
+  const ov = E('div', 'capov', null, 'fleet-overlay');
+  const dlg = E('div', 'capdlg', null, 'fleet-panel');
+  dlg.innerHTML = '<div class="caphd"><span><b>Index</b> · services &amp; onboarded fleet</span>'+
+    '<button class="capx" data-testid="fleet-close">×</button></div>'+
+    '<div class="capbody" data-testid="fleet-body"><div class="spin">Loading…</div></div>';
+  ov.appendChild(dlg); document.body.appendChild(ov);
+  dlg.querySelector('[data-testid=fleet-close]').onclick = () => ov.remove();
+  const body = dlg.querySelector('.capbody'); body.innerHTML = '';
+
+  // Section 1 — control-plane SERVICES (the stack kontroll stands up). Link-only; no drill-in (it's the control
+  // plane, not an onboarded device).
+  body.appendChild(E('h3', 'section', 'Control-plane services', null));
+  const sbox = E('div', null, null, 'services-body'); body.appendChild(sbox);
+  try {
+    const svcs = await (await fetch('/api/services')).json();
+    if (svcs.error)        sbox.innerHTML = '<div class="warn" data-testid="services-error">'+svcs.error+'</div>';
+    else if (!svcs.length) sbox.appendChild(E('div', 'meta', 'no services declared', 'services-empty'));
+    else                   svcs.forEach(s => sbox.appendChild(serviceRow(s)));
+  } catch(e){ sbox.innerHTML = '<div class="warn" data-testid="services-error">request failed</div>'; }
+
+  // Section 2 — onboarded FLEET (device-classes). Contract unchanged from #121; fleet-empty/-error testids kept.
+  body.appendChild(E('h3', 'section', 'Onboarded fleet', null));
+  const fbox = E('div', null, null, 'fleet-classes'); body.appendChild(fbox);
+  try {
+    const fleet = await (await fetch('/api/fleet')).json();
+    if (fleet.error)        fbox.innerHTML = '<div class="warn" data-testid="fleet-error">'+fleet.error+'</div>';
+    else if (!fleet.length) fbox.appendChild(E('div', 'meta', 'No devices onboarded yet — search a collection and onboard one.', 'fleet-empty'));
+    else                    fleet.forEach(c => fbox.appendChild(fleetClassRow(c)));
+  } catch(e){ fbox.innerHTML = '<div class="warn" data-testid="fleet-error">request failed</div>'; }
+
+  // Section 3 — AUTOMATIONS (the registered app-store units the operator has AUTHORED). Each row's Configure opens
+  // the configure dialog (set curated knobs → preview → stage). Independently degradable (own fetch/catch), like
+  // the services + fleet sections. The entry point for the post-create configure flow (gui/app.py api_actuation).
+  body.appendChild(E('h3', 'section', 'Automations', null));
+  const abox = E('div', null, null, 'automations-classes'); body.appendChild(abox);
+  try {
+    const reg = await (await fetch('/api/actuation')).json();
+    const units = (reg && reg.units) || [];
+    if (reg.error)        abox.innerHTML = '<div class="warn" data-testid="automations-error">'+reg.error+'</div>';
+    else if (!units.length) abox.appendChild(E('div', 'meta', 'No automations yet — create one from a search result (⚙ Automations), then promote it.', 'automations-empty'));
+    else                  units.forEach(u => abox.appendChild(automationRow(u)));
+  } catch(e){ abox.innerHTML = '<div class="warn" data-testid="automations-error">request failed</div>'; }
+
+  // Section 4 — SUPPLY CHAIN (collection install provenance, MF-5: no verification theatre). A green 'installed'
+  // must NEVER imply a signature was checked — every unsigned-pinned collection shows an AMBER badge + the honest
+  // "verified by pin + checksum" note. Independently degradable; read-only over /api/provenance (sidecar + L2b lock).
+  body.appendChild(E('h3', 'section', 'Supply chain', null));
+  const provbox = E('div', null, null, 'provenance-classes'); body.appendChild(provbox);
+  try {
+    const prov = await (await fetch('/api/provenance')).json();
+    if (prov.error)           provbox.innerHTML = '<div class="warn" data-testid="provenance-error">'+prov.error+'</div>';
+    else if (!prov.available) provbox.appendChild(E('div', 'meta', 'collection provenance not generated yet — run bootstrap / gen-requirements.', 'provenance-empty'));
+    else {
+      const s = prov.summary || {};
+      provbox.appendChild(ET('div', 'meta', s.unsigned_pinned + ' of ' + s.total + ' collection(s) unsigned-pinned '
+        + '(verified by pin + checksum — this source serves no signatures); ' + (s.digests_recorded || 0)
+        + ' sha256-recorded.', 'provenance-summary'));
+      (prov.collections || []).forEach(c => provbox.appendChild(provenanceRow(c)));
+    }
+  } catch(e){ provbox.innerHTML = '<div class="warn" data-testid="provenance-error">request failed</div>'; }
+
+  // images sub-panel (C1 — report 22 §7.3): the IMAGE supply chain, same honest classes. digest-pinned (amber:
+  // Docker verifies the @sha256 on pull — NOT a signature); local-build (no published digest ⇒ built on the node).
+  // `signed` is the deferred cosign rung — never green today. Independently degradable; read-only /api/image-provenance.
+  const imgbox = E('div', null, null, 'image-provenance-classes'); body.appendChild(imgbox);
+  try {
+    const ip = await (await fetch('/api/image-provenance')).json();
+    if (ip.error)           imgbox.innerHTML = '<div class="warn" data-testid="image-provenance-error">'+ip.error+'</div>';
+    else if (!ip.available) imgbox.appendChild(E('div', 'meta', 'image digest-lock not present.', 'image-provenance-empty'));
+    else {
+      const s = ip.summary || {};
+      imgbox.appendChild(ET('div', 'meta', s.digest_pinned + ' of ' + s.total + ' image(s) digest-pinned '
+        + '(Docker verifies the @sha256: on pull — not a signature); ' + (s.local_build || 0) + ' local-build.',
+        'image-provenance-summary'));
+      (ip.images || []).forEach(c => imgbox.appendChild(imageProvenanceRow(c)));
+    }
+  } catch(e){ imgbox.innerHTML = '<div class="warn" data-testid="image-provenance-error">request failed</div>'; }
+}
+// One collection's install-provenance row (MF-5): name + an AMBER `unsigned-pinned` badge (or green `signed`) + the
+// honest pin/policy/checksum note — so a green "installed" never implies a signature was checked. NAMES only.
+function provenanceRow(c) {
+  const row = E('div', 'card', null, 'provenance-row'); row.dataset.name = c.name;
+  const title = E('h3'); title.appendChild(ET('span', null, c.name + '  '));   // collection name → textContent
+  const amber = c.class !== 'signed';
+  const badge = ET('span', 'badge ' + (amber ? 'maybe' : 'yes'),
+    amber ? '⚠ unsigned-pinned' : '✓ signed', 'provenance-class');
+  badge.dataset.class = c.class;
+  title.appendChild(badge);
+  row.appendChild(title);
+  row.appendChild(ET('div', 'meta', 'pin ' + (c.pin || '?') + ' (' + c.pin_kind + ') · policy ' + c.policy
+    + ' · ' + (c.digest_recorded ? 'sha256 recorded' : 'sha256 not yet recorded') + ' · ' + c.note));
+  return row;
+}
+// One image's install-provenance row (C1, report 22 §7.3): name + an AMBER `digest-pinned` badge (Docker verifies the
+// @sha256 on pull — NOT a signature), a neutral `local-build`, or green `signed` (cosign — deferred). NAMES + public digest.
+function imageProvenanceRow(c) {
+  const row = E('div', 'card', null, 'image-provenance-row'); row.dataset.name = c.name;
+  const title = E('h3'); title.appendChild(ET('span', null, c.name + '  '));   // image name → textContent
+  const cls = c.class;
+  const badge = ET('span', 'badge ' + (cls === 'signed' ? 'yes' : (cls === 'digest-pinned' ? 'maybe' : '')),
+    cls === 'signed' ? '✓ signed' : (cls === 'digest-pinned' ? '⚠ digest-pinned' : '○ local-build'),
+    'image-provenance-class');
+  badge.dataset.class = cls;
+  title.appendChild(badge);
+  row.appendChild(title);
+  row.appendChild(ET('div', 'meta', (c.digest_short ? 'sha256:' + c.digest_short + '… · ' : '') + c.note));
+  return row;
+}
+// One registered-unit row in the Index Automations section: the derived target/pin/knob-count/configured (NAMES
+// only — no value, SEC-2) + a Configure control opening the configure dialog on top of the panel.
+function automationRow(u) {
+  const row = E('div', 'card', null, 'automation-row'); row.dataset.key = u.key;
+  row.appendChild(ET('h3', null, u.key));                        // key → textContent (semi-trusted descriptor byte)
+  row.appendChild(ET('div', 'meta', (u.device_class||'?') + ' · group ' + (u.inventory_group||'?')
+    + ' · blast ' + (u.blast_radius||'?') + ' · pin ' + (u.pin||'?')
+    + ' · ' + u.knobs + ' knob' + (u.knobs === 1 ? '' : 's')
+    + ' · ' + (u.configured ? 'configured' : 'not configured')));
+  const cfg = E('button', null, 'Configure', 'automation-configure');
+  cfg.onclick = () => openUnitConfigDialog(u.key);
+  row.appendChild(cfg);
+  return row;
+}
+function serviceRow(s) {
+  const row = E('div', 'card', null, 'service-row'); row.dataset.name = s.name;
+  if (!s.enabled) row.classList.add('muted');
+  const title = s.url
+    ? s.name + ' <span class="meta"><a href="'+s.url+'" target="_blank" rel="noopener noreferrer">'+s.url+' ↗</a></span>'
+    : s.name + ' <span class="meta">(url not resolvable on this deploy)</span>';
+  row.appendChild(E('h3', null, title, null));
+  if (s.description) row.appendChild(E('div', 'meta', s.description, null));
+  return row;
+}
+// --- the Pending panel (#129, gap 3 / C10): a READ-ONLY list of proposals STAGED (proposed/<run_id>) and awaiting
+// promotion. The single action is COPY the run_id; the panel then points at the Semaphore promote-proposal task. It
+// NEVER promotes — promote is the separate, admin-authed Semaphore app (C10 two-key). Answers "where do I get the
+// run_id to promote?" for when the operator comes back later and the propose dialog is long gone.
+async function openPendingPanel() {
+  document.querySelectorAll('[data-testid=pending-overlay]').forEach(n => n.remove());
+  const ov = E('div', 'capov', null, 'pending-overlay');
+  const dlg = E('div', 'capdlg', null, 'pending-panel');
+  dlg.innerHTML = '<div class="caphd"><span><b>Pending</b> · proposals awaiting promotion</span>'+
+    '<button class="capx" data-testid="pending-close">×</button></div>'+
+    '<div class="capbody" data-testid="pending-body"><div class="spin">Loading…</div></div>';
+  ov.appendChild(dlg); document.body.appendChild(ov);
+  dlg.querySelector('[data-testid=pending-close]').onclick = () => ov.remove();
+  let data;
+  try { data = await (await fetch('/api/pending')).json(); }
+  catch(e){ dlg.querySelector('.capbody').innerHTML = '<div class="warn">request failed</div>'; return; }
+  const body = dlg.querySelector('.capbody'); body.innerHTML = '';
+  if (data.error){ body.innerHTML = '<div class="warn" data-testid="pending-error">'+data.error+'</div>'; return; }
+  const props = data.proposals || [];
+  if (!props.length){ body.appendChild(E('div', 'meta', data.note || 'No proposals pending.', 'pending-empty')); return; }
+  props.forEach(p => body.appendChild(pendingRow(p, data)));
+}
+function pendingRow(p, data) {
+  // stale = the FF-race: `main` advanced PAST this proposal (e.g. the auto-promoter promoted a later LOW-blast one),
+  // so it is non-FF and a promote would be REFUSED. The server computes it (pending.promotable); === false only
+  // (undefined/null = unknown ⇒ never scare the operator with a false 'stale').
+  const stale = p.promotable === false;
+  const row = E('div', 'card', null, 'pending-row'); row.dataset.runId = p.run_id;
+  const h = E('h3', null, p.run_id + ' <span class="meta">staged '+(p.staged_at||'?')+' · '+(p.sha||'')+'</span>');
+  if (stale) h.appendChild(ET('span', 'badge no', ' stale — re-propose', 'pending-stale'));   // red tag, no promote
+  row.appendChild(h);
+  if (p.subject) row.appendChild(E('div', 'meta', p.subject));                   // "what it changes" at a glance
+  if (p.paths && p.paths.length)
+    row.appendChild(E('div', 'meta', 'changes: '+p.paths.join(', '), 'pending-paths'));   // NAMES only — no contents
+  const copy = E('button', 'mini', 'copy run_id', 'pending-copy-runid');         // the load-bearing affordance
+  copy.onclick = () => copyRunId(copy, p.run_id);
+  row.appendChild(copy);
+  // A stale proposal can't be promoted — steer the operator to re-propose instead of the (would-be-refused) recipe.
+  row.appendChild(stale
+    ? ET('div', 'meta warn', 'main advanced past this — a promote would be refused (non-fast-forward). Re-run the '
+        + 'same onboard/capability dialog to stage a fresh proposal against current main.', 'pending-stale-hint')
+    : pendingPromoteHint(p, data));                                             // the static signpost (NOT a trigger)
+  // FF-race Move 1: for a STALE onboard proposal (repropose_hint — the class key the ref's path names yield), wire
+  // the stale-hint prose to a button that re-runs the SAME onboard dialog. NOT an actuation — it navigates (no write
+  // path; C10 intact). Only when the server gave a hint (an onboard shape); other stale kinds keep the prose only.
+  if (stale && p.repropose_hint && p.repropose_hint.key) {
+    const rb = E('button', 'mini', 'Re-propose', 'pending-re-propose');
+    rb.title = 'Re-run the ' + p.repropose_hint.key + ' onboard dialog to stage a fresh proposal against current main';
+    rb.onclick = () => reproposeFromPending(p.repropose_hint);
+    row.appendChild(rb);
+  }
+  // FF-race Move 2 (discard): a STALE proposal is un-promotable dead weight — offer to delete its proposed/<run_id>
+  // ref from the canonical. STALE-ONLY (a promotable proposal must never be nudged to discard) + a two-step confirm
+  // (the default griefing target is empty). C10-safe: un-stage != promote — the POST removes Key-1's own output, it
+  // cannot advance main. NOT shown on a healthy proposal.
+  if (stale) {
+    const dwrap = E('span', null, null, null);
+    const db = E('button', 'mini danger', 'Discard', 'pending-discard');
+    db.title = 'Delete this stale staged proposal from the canonical (cannot be undone from the GUI)';
+    db.onclick = () => {
+      dwrap.innerHTML = '';
+      dwrap.appendChild(ET('span', 'meta warn', 'Permanently delete this proposal? It cannot be undone from the GUI. '));
+      const yes = E('button', 'mini danger', 'Confirm discard', 'pending-discard-confirm');
+      yes.onclick = () => discardProposal(p.run_id, row, dwrap);
+      const no = E('button', 'mini', 'cancel', 'pending-discard-cancel');
+      no.onclick = () => { dwrap.innerHTML = ''; dwrap.appendChild(db); };
+      dwrap.appendChild(yes); dwrap.appendChild(no);
+    };
+    dwrap.appendChild(db);
+    row.appendChild(dwrap);
+  }
+  return row;
+}
+// FF-race Move 2 (discard): POST the stale proposal's run_id to the discard route → the server compare-and-deletes
+// the proposed/<run_id> ref (C10-safe: never a promote). On success the row is gone (it no longer exists in the
+// canonical); a 404/409/400 renders inline as `pending-discard-error` (the ref moved/vanished, or a bad id). The GUI
+// holds no promote path — this only un-stages.
+async function discardProposal(runId, row, dwrap) {
+  let res;
+  try { res = await fetch('/api/pending/' + encodeURIComponent(runId) + '/discard', {method: 'POST'}); }
+  catch(e) { dwrap.innerHTML = ''; dwrap.appendChild(ET('span', 'meta warn', 'request failed', 'pending-discard-error')); return; }
+  let data = {}; try { data = await res.json(); } catch(e) {}
+  if (!res.ok) {
+    dwrap.innerHTML = '';
+    dwrap.appendChild(ET('span', 'meta warn', data.error || 'discard failed', 'pending-discard-error'));
+    return;
+  }
+  row.remove();                                                                  // gone from the canonical -> gone from the list
+}
+// FF-race Move 1 (re-propose): a STALE proposal's base moved, so a promote would be refused non-fast-forward. This
+// lands the operator back on the proposal's device CLASS (all a path name yields — host + credentials live inside the
+// inventory YAML, re-entered by the human: SOPS is irreversible, and a base-moved HIGH proposal WANTS that re-review)
+// to re-run the SAME onboard dialog → a fresh proposal that IS a fast-forward of current main. Reuses the
+// discovery-inbox navigation verbatim (close the overlay → a context banner → search), NOT a new actuation: no write
+// path, the GUI still cannot promote (C10). `hint.key` is our own path-derived class token (never a device byte).
+function reproposeFromPending(hint) {
+  document.querySelectorAll('[data-testid=pending-overlay]').forEach(n => n.remove());   // close the Pending panel
+  const banner = document.getElementById('discovery-prefill'); banner.innerHTML = '';
+  banner.appendChild(ET('span', null, 'Re-proposing ' + hint.key + ' — its device class is searched below; open '
+    + 'the card, re-enter the host + credentials, and Run to stage a fresh proposal against current main.'));
+  const x = E('button', 'mini', 'clear', 'discovery-prefill-clear'); x.style.marginLeft = '8px';
+  x.onclick = clearPendingOnboard; banner.appendChild(x);
+  banner.style.display = '';
+  const q = document.getElementById('q'); q.value = hint.key.replace(/_/g, ' ');   // class key -> a search term
+  search();                                                                        // land on the class card
+}
+// Static pointer to the Semaphore promote-proposal task (the template name comes from the server, not hard-coded
+// twice). NEVER a run trigger — the GUI cannot promote (C10 two-key). Plain text only (no deep-link — scope-2).
+function pendingPromoteHint(p, data) {
+  const task = (data && data.promote_task) || 'promote-proposal';
+  const hint = E('div', 'meta', null, 'pending-promote-hint');
+  hint.innerHTML = 'To promote: open <b>Semaphore</b> → run the <b>'+task+'</b> task → paste this run_id into the '+
+    '<i>Proposal run_id</i> survey field. (The GUI cannot promote — C10 two-key safety.)';
+  return hint;
+}
+// Copy a run_id to the clipboard with a transient "copied ✓"; fall back to selecting the text in a non-secure
+// context (dev over plain HTTP, where navigator.clipboard is unavailable) so the operator can Ctrl/⌘-C it.
+function copyRunId(btn, runId) {
+  const done = () => { const t = btn.textContent; btn.textContent = 'copied ✓'; setTimeout(() => btn.textContent = t, 1200); };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(runId).then(done).catch(() => fallbackSelect(runId, btn));
+  } else { fallbackSelect(runId, btn); }
+}
+function fallbackSelect(runId, btn) {
+  const s = E('span', null, runId, null); s.style.userSelect = 'text';
+  btn.replaceWith(s);
+  const r = document.createRange(); r.selectNodeContents(s);
+  const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);     // pre-selected for Ctrl/⌘-C
+}
+// --- the Discovery inbox (Rung 1b, C18): a READ-ONLY panel of un-onboarded hosts an onboarded device's OWN lease
+// view sees (the out-of-band sweep wrote a cached artifact; this reads it via /api/discovery). Each row's "Onboard
+// this" stashes the host and pre-fills it into the EXISTING onboard form (the human picks the class + onboards +
+// promotes — C10; no auto-onboard). EVERY device byte (hostname/ip/mac) is painted with ET/textContent (F6) — a
+// lease is attacker-influenceable, so a `<script>` hostname must render as literal text, never execute.
+async function openDiscoveryPanel() {
+  document.querySelectorAll('[data-testid=discovery-overlay]').forEach(n => n.remove());
+  const ov = E('div', 'capov', null, 'discovery-overlay');
+  const dlg = E('div', 'capdlg', null, 'discovery-panel');
+  dlg.innerHTML = '<div class="caphd"><span><b>Discovery</b> · devices seen on the network but not onboarded</span>'+
+    '<button class="capx" data-testid="discovery-close">×</button></div>'+
+    '<div class="capbody" data-testid="discovery-body"><div class="spin">Loading…</div></div>';
+  ov.appendChild(dlg); document.body.appendChild(ov);
+  dlg.querySelector('[data-testid=discovery-close]').onclick = () => ov.remove();
+  let data;
+  try { data = await (await fetch('/api/discovery')).json(); }
+  catch(e){ dlg.querySelector('.capbody').innerHTML = '<div class="warn">request failed</div>'; return; }
+  const body = dlg.querySelector('.capbody'); body.innerHTML = '';
+  if (data.error){ body.innerHTML = '<div class="warn" data-testid="discovery-error">'+data.error+'</div>'; return; }
+  body.appendChild(discoverySwept(data));                              // read-only provenance signpost (C18)
+  const cands = data.candidates || [];
+  if (!cands.length){
+    body.appendChild(ET('div', 'meta',
+      data.generated_at ? 'Nothing new — every discovered host is already onboarded.'
+                        : 'No sweep has run yet — run the discovery task (scripts/kontroll-discover.py).',
+      'discovery-empty'));
+    return;
+  }
+  cands.forEach(c => body.appendChild(discoveryRow(c)));
+}
+// The "last swept …" meta line: `generated_at` + the per-source status counts (our own tokens/ints, not device
+// bytes; the sweep runs OUT-OF-BAND, so this is a signpost — never a trigger, C18).
+function discoverySwept(data) {
+  const srcs = data.sources || [];
+  const ok = srcs.filter(s => s.status === 'ok').length;
+  const swept = data.generated_at ? ('last swept ' + data.generated_at) : 'never swept';
+  return ET('div', 'meta', swept + ' · ' + srcs.length + ' source(s), ' + ok + ' ok', 'discovery-swept');
+}
+function discoveryRow(c) {
+  const row = E('div', 'card', null, 'discovery-row'); if (c.mac) row.dataset.mac = c.mac;   // stable id discriminator
+  const head = ET('h3', null, (c.hostname || c.ip));                   // device byte -> textContent (F6)
+  head.appendChild(ET('span', 'meta', ' · ' + c.ip + (c.mac ? ' · ' + c.mac : '')));   // ip/mac shape-validated, still ET
+  row.appendChild(head);
+  if (c.vendor) row.appendChild(ET('div', 'meta', c.vendor, 'discovery-vendor'));   // our IEEE OUI hint, ET, advisory display-only (F8)
+  if (c.source_key) row.appendChild(ET('div', 'meta', 'seen by: ' + c.source_key, 'discovery-source'));   // our token
+  const btn = E('button', 'go', 'Onboard this', 'discovery-onboard');
+  btn.onclick = () => onboardFromDiscovery(c);
+  row.appendChild(btn);
+  return row;
+}
+// The pre-fill: stash the discovered host, close the modal, show the (clearable) banner, and focus search. The
+// operator searches + picks the device class; the NEXT onboard form built pre-fills its host field (onboardForm).
+function onboardFromDiscovery(c) {
+  pendingOnboardHost = c.ip;                                           // the server-validated address (never a device byte)
+  pendingOnboardHostName = c.hostname || null;                         // the discovered hostname (form value only; server validates)
+  document.querySelectorAll('[data-testid=discovery-overlay]').forEach(n => n.remove());   // close the modal
+  const banner = document.getElementById('discovery-prefill'); banner.innerHTML = '';
+  banner.appendChild(ET('span', null,                                 // device bytes (ip/hostname) via textContent (F6)
+    'Onboarding ' + c.ip + (c.hostname ? ' (' + c.hostname + ')' : '') +
+    ' — search for its device class below; the host field is pre-filled.'));
+  const x = E('button', 'mini', 'clear', 'discovery-prefill-clear'); x.style.marginLeft = '8px';
+  x.onclick = clearPendingOnboard; banner.appendChild(x);
+  banner.style.display = ''; document.getElementById('q').focus();
+}
+function clearPendingOnboard() {
+  pendingOnboardHost = null; pendingOnboardHostName = null;
+  const b = document.getElementById('discovery-prefill'); b.style.display = 'none'; b.innerHTML = '';
+}
+// --- the Backup viewer (#131, gap 1 / C14): a READ-ONLY per-device backup index → redacted single-rev view →
+// unified diff over the secret-bearing capture git store. The boundary is auth + TLS + mgmt-bind + the `:ro` mount;
+// redaction (server-side) is defense-in-depth, not the boundary. The MVP serves TRACKED history only — excluded
+// on-disk captures (e.g. FortiGate) are listed but NEVER rendered (kept off the wire). No raw download, no split
+// view (deferred — C2). All device-controlled bytes are painted with textContent (zero XSS path).
+async function openBackupPanel(host) {
+  document.querySelectorAll('[data-testid=backup-overlay]').forEach(n => n.remove());
+  const ov = E('div', 'capov', null, 'backup-overlay');
+  const dlg = E('div', 'capdlg', null, 'backup-panel');
+  dlg.innerHTML = '<div class="caphd"><span class="bcap"><b>Backups</b> · config history (read-only, secrets masked)'+
+    '</span><button class="capx" data-testid="backup-close">×</button></div>'+
+    '<div class="capbody" data-testid="backup-body"><div class="spin">Loading…</div></div>';
+  ov.appendChild(dlg); document.body.appendChild(ov);
+  if (host) dlg.querySelector('.bcap').appendChild(document.createTextNode(' · ' + host));   // host via textContent (no XSS)
+  dlg.querySelector('[data-testid=backup-close]').onclick = () => ov.remove();
+  const body = dlg.querySelector('.capbody');
+  let data;
+  try { data = await (await fetch('/api/backups' + (host ? '?host=' + encodeURIComponent(host) : ''))).json(); }
+  catch(e){ body.innerHTML = ''; body.appendChild(E('div', 'warn', 'request failed', 'backup-error')); return; }
+  body.innerHTML = '';
+  if (data.error){ body.appendChild(E('div', 'warn', data.error, 'backup-error')); return; }
+  if (!data.available){
+    body.appendChild(E('div', 'meta', (data.reason || 'captures store not mounted') +
+      ' — the backup viewer needs the read-only captures mount (see docs/SETUP.md).', 'backup-unavailable'));
+    return;
+  }
+  const devs = data.devices || [];
+  if (!devs.length){
+    body.appendChild(E('div', 'meta', 'no backups captured yet — the backup schedule runs backup-configs.yml.',
+                       'backup-empty'));
+    return;
+  }
+  devs.forEach(d => body.appendChild(backupDeviceSection(d)));
+}
+function backupDeviceSection(d) {
+  const sec = E('div', 'card', null, 'backup-device'); sec.dataset.file = d.file;
+  const h = ET('h3', null, d.label || d.file);                  // device-controlled label/file via textContent (no XSS)
+  h.appendChild(document.createTextNode(' '));
+  h.appendChild(ET('span', 'meta', d.file + ' · ' + d.rev_count + ' rev' + (d.rev_count === 1 ? '' : 's')));
+  sec.appendChild(h);
+  if (!d.diffable){                                              // an excluded (capture-exception) on-disk file —
+    sec.appendChild(E('div', 'meta', 'latest only — excluded from history; not rendered here (C14).',
+                      'backup-excluded-note'));                  // listed but NEVER served (keeps it off the wire)
+    return sec;
+  }
+  const idx = E('div', null, null, 'backup-index'); sec.appendChild(idx);
+  loadRevisions(d.file, idx);
+  return sec;
+}
+async function loadRevisions(file, idx) {
+  idx.appendChild(E('div', 'spin', 'Loading revisions…'));
+  let data;
+  try { data = await (await fetch('/api/backups/' + encodeURIComponent(file) + '/revisions')).json(); }
+  catch(e){ idx.innerHTML = ''; idx.appendChild(E('div', 'warn', 'revisions request failed', 'backup-error')); return; }
+  idx.innerHTML = '';
+  if (data.error){ idx.appendChild(E('div', 'warn', data.error, 'backup-error')); return; }
+  const revs = data.revisions || [];
+  if (!revs.length){ idx.appendChild(E('div', 'meta', data.note || 'no history for this device yet', 'backup-empty')); return; }
+  const base = E('select', null, null, 'backup-base'), comp = E('select', null, null, 'backup-compare');
+  revs.forEach(r => {
+    const label = r.short + ' · ' + (r.iso || '') + (r.subject ? ' · ' + r.subject : '');
+    [base, comp].forEach(sel => { const o = document.createElement('option'); o.value = r.rev; o.textContent = label; sel.appendChild(o); });
+  });
+  base.selectedIndex = Math.min(1, revs.length - 1);             // older default = 2nd-newest (newest if only one)
+  comp.selectedIndex = 0;                                        // newer default = newest
+  const r1 = E('div', 'row'); r1.appendChild(E('label', null, 'base (older)')); r1.appendChild(base);
+  const r2 = E('div', 'row'); r2.appendChild(E('label', null, 'compare (newer)')); r2.appendChild(comp);
+  const out = E('div', null, null, 'backup-out');               // the view/diff render target (shared)
+  const actions = E('div', 'row');
+  const vb = E('button', 'mini', 'View base', 'backup-view-btn'); vb.onclick = () => viewBackup(file, base.value, out);
+  const db = E('button', 'mini', 'Diff →', 'backup-diff-btn'); db.onclick = () => diffBackup(file, base.value, comp.value, out);
+  actions.appendChild(vb); actions.appendChild(db);
+  idx.appendChild(r1); idx.appendChild(r2); idx.appendChild(actions); idx.appendChild(out);
+}
+async function viewBackup(file, rev, out) {
+  out.innerHTML = ''; out.appendChild(E('div', 'spin', 'Loading…'));
+  let data;
+  try { data = await (await fetch('/api/backups/' + encodeURIComponent(file) + '/view?rev=' + encodeURIComponent(rev))).json(); }
+  catch(e){ out.innerHTML = ''; out.appendChild(E('div', 'warn', 'view request failed', 'backup-error')); return; }
+  out.innerHTML = '';
+  if (data.error){ out.appendChild(E('div', 'warn', data.error, 'backup-error')); return; }
+  if (!data.available){ out.appendChild(E('div', 'meta', data.reason || 'unavailable', 'backup-unavailable')); return; }
+  out.appendChild(ET('div', 'meta', file + ' · ' + (rev || '').slice(0, 7), 'backup-view-head'));   // file via textContent
+  const pre = E('pre', null, null, 'backup-view');
+  (data.lines || []).forEach((ln, i) => {
+    const vl = E('div', 'vl');
+    const g = E('span', 'gutter'); g.textContent = i + 1;       // line-number gutter
+    const t = E('span', 'vtext'); t.textContent = ln;           // textContent — byte-faithful, no XSS
+    vl.appendChild(g); vl.appendChild(t); pre.appendChild(vl);
+  });
+  out.appendChild(pre);
+  if (data.redacted) out.appendChild(E('div', 'meta', 'secrets masked (best-effort) — see SECURITY.md C14', 'backup-redacted-note'));
+  if (data.truncated) out.appendChild(E('div', 'meta', 'view truncated (file exceeds the line ceiling)', 'backup-truncated-note'));
+}
+async function diffBackup(file, base, compare, out) {
+  out.innerHTML = ''; out.appendChild(E('div', 'spin', 'Diffing…'));
+  let data;
+  try { data = await (await fetch('/api/backups/' + encodeURIComponent(file) + '/diff?base=' +
+        encodeURIComponent(base) + '&compare=' + encodeURIComponent(compare))).json(); }
+  catch(e){ out.innerHTML = ''; out.appendChild(E('div', 'warn', 'diff request failed', 'backup-error')); return; }
+  out.innerHTML = '';
+  if (data.error){ out.appendChild(E('div', 'warn', data.error, 'backup-error')); return; }
+  if (!data.available){ out.appendChild(E('div', 'meta', data.reason || 'unavailable', 'backup-unavailable')); return; }
+  renderDiff(out, data);
+}
+// renderDiff — paint the server's structured hunks (no client diff library; server diffs + redacts, the client
+// only paints). Every device-controlled byte goes through textContent (zero XSS); lines are addressed by data-t
+// (add|del|ctx|hunk), never a per-line testid.
+function renderDiff(box, diff) {
+  const s = diff.stats || { added: 0, removed: 0 };
+  box.appendChild(ET('div', 'meta', diff.file + ' · ' + (diff.a_rev || '').slice(0, 7) + ' → ' +   // diff.file via textContent
+    (diff.b_rev || '').slice(0, 7) + ' · +' + s.added + ' −' + s.removed, 'backup-diff-head'));
+  if (diff.redacted) box.appendChild(E('div', 'meta', 'secrets masked (best-effort) — see SECURITY.md C14', 'backup-redacted-note'));
+  if (!diff.hunks || !diff.hunks.length){ box.appendChild(E('div', 'meta', diff.note || 'identical at these revisions', 'diff-empty')); return; }
+  const pre = E('pre', 'diff', null, 'diff-view');
+  diff.hunks.forEach(h => {
+    const hd = E('div', 'dl hunk', null, 'diff-hunk'); hd.dataset.t = 'hunk'; hd.textContent = h.header;
+    pre.appendChild(hd);
+    (h.lines || []).forEach(ln => {
+      const dl = E('div', 'dl ' + ln.t); dl.dataset.t = ln.t;
+      dl.textContent = (ln.t === 'add' ? '+' : (ln.t === 'del' ? '-' : ' ')) + ln.text;   // textContent — no XSS
+      pre.appendChild(dl);
+    });
+  });
+  box.appendChild(pre);
+}
+// --- the Settings panel (#135 read-only; Phase 5 #140 EDIT): a snapshot of the platform configuration grouped by
+// area (identity / backup / fleet / status). Each group degrades independently (a bad source shows
+// settings-<group>-error, never blanks the panel). Phase 5 makes the identity/backup/fleet knobs EDITABLE — each
+// `edit`/`disable` control opens the shared reconfigure dialog against /api/settings/* (mgmt_ip type-to-confirm,
+// domain/tls_mode redeploy, fleet removal remove-confirm), which STAGES proposed/<run_id> (C10 — the GUI never
+// promotes). api_privileged + docker/.env stay FORBID (status is read-only); no secret value is served.
+async function openSettingsPanel() {
+  document.querySelectorAll('[data-testid=settings-overlay]').forEach(n => n.remove());
+  const ov = E('div', 'capov', null, 'settings-overlay');
+  const dlg = E('div', 'capdlg', null, 'settings-panel');
+  dlg.innerHTML = '<div class="caphd"><span><b>Settings</b> · platform configuration</span>'+
+    '<button class="capx" data-testid="settings-close">×</button></div>'+
+    '<div class="capbody" data-testid="settings-body"><div class="spin">Loading…</div></div>';
+  ov.appendChild(dlg); document.body.appendChild(ov);
+  dlg.querySelector('[data-testid=settings-close]').onclick = () => ov.remove();
+  let v;
+  try { v = await (await fetch('/api/settings')).json(); }
+  catch(e){ dlg.querySelector('.capbody').innerHTML = '<div class="warn">request failed</div>'; return; }
+  const body = dlg.querySelector('.capbody'); body.innerHTML = '';
+  if (v.error){ body.innerHTML = '<div class="warn" data-testid="settings-error">'+v.error+'</div>'; return; }
+  body.appendChild(settingsGroup('identity', 'Instance identity', settingsIdentityRows, v.identity));
+  body.appendChild(settingsGroup('backup', 'Offsite backup', settingsBackupRows, v.backup));
+  body.appendChild(settingsGroup('fleet', 'Fleet enablement', settingsFleetRows, v.fleet));
+  body.appendChild(settingsGroup('status', 'Platform status', settingsStatusRows, v.status));
+}
+// One area group: a card with a header + either a per-group error (independent degrade) or the rows the renderer emits.
+function settingsGroup(key, title, rowsFn, data) {
+  const g = E('div', 'card', null, 'settings-group'); g.dataset.group = key;
+  g.appendChild(E('h3', null, title));
+  if (!data || data.error) { g.appendChild(E('div', 'warn', (data && data.error) || 'unavailable', 'settings-'+key+'-error')); return g; }
+  rowsFn(g, data);
+  return g;
+}
+function settingsRow(g, label, value) {
+  g.appendChild(E('div', 'meta', '<b>'+label+'</b>: '+(value == null || value === '' ? '—' : value)));
+}
+// An editable settings knob row (Phase 5): the value + an `edit` control that opens the shared reconfigure dialog
+// against /api/settings/<knob>. `danger` adds a ⚠ (mgmt_ip/domain/tls_mode — the GUARD knobs whose gate is the
+// type-to-confirm / redeploy ack). The write STAGES proposed/<run_id> (C10); the GUI never promotes.
+function settingsKnobRow(g, knob, value, danger) {
+  const row = E('div', 'row', null, 'settings-knob'); row.dataset.knob = knob;
+  row.appendChild(E('span', 'meta', '<b>'+knob+'</b>: '+(value == null || value === '' ? '—' : value)+(danger ? ' ⚠' : '')));
+  const btn = E('button', 'mini', 'edit', 'settings-knob-edit'); btn.dataset.knob = knob;
+  btn.onclick = () => openReconfigureDialog('settings-knob', knob,
+                        '/api/settings/'+encodeURIComponent(knob), 'settings · '+knob);
+  row.appendChild(btn); g.appendChild(row);
+}
+function settingsIdentityRows(g, d) {
+  settingsKnobRow(g, 'mgmt_ip', d.mgmt_ip, true);            // GUARD-danger: type-to-confirm the re-IP
+  settingsKnobRow(g, 'domain', d.domain, true);             // GUARD: redeploy (re-render URLs/SANs)
+  settingsKnobRow(g, 'tls_mode', d.tls_mode, true);         // GUARD-danger: redeploy + per-mode consequence
+  settingsRow(g, 'source_of_truth', d.source_of_truth);    // SURFACE — read-only (only `local` is supported)
+  // trust_mode (F3) — READ-ONLY surface: the chosen promote posture (no edit knob yet; the auto-promoter that
+  // gives 'solo' its effect is a later, gated rung). 'solo' notes it currently behaves like 'separated'.
+  const tm = d.trust_mode;
+  const note = tm === 'solo'
+    ? 'auto-promoter ships in a later release — proposals stay staged for manual promote (currently like separated)'
+    : (tm === 'separated' ? 'a human promotes each staged proposal (prod)' : 'not set — choose at fresh-init (--trust-mode)');
+  g.appendChild(E('div', 'meta', '<b>trust_mode</b>: ' + (tm || '—') + '  (' + note + ')', 'settings-trust-mode'));
+}
+function settingsBackupRows(g, d) {
+  settingsKnobRow(g, 'backup_remotes', (d.backup_remotes || []).join(', ') || '(none — self-sufficient)', false);
+}
+function settingsFleetRows(g, d) {
+  (d.enabled_modules || []).forEach(m => {                  // each module: a Disable control (GUARDED removal)
+    const row = E('div', 'row', null, 'settings-fleet-row'); row.dataset.module = m;
+    row.appendChild(E('span', 'meta', m));
+    const btn = E('button', 'mini', 'disable', 'settings-fleet-disable'); btn.dataset.module = m;
+    btn.onclick = () => openReconfigureDialog('settings-fleet', m,
+                          '/api/settings/fleet/'+encodeURIComponent(m), 'fleet · disable '+m);
+    row.appendChild(btn); g.appendChild(row);
+  });
+  if (!(d.enabled_modules || []).length) g.appendChild(E('div', 'meta', '(none)'));
+  g.appendChild(E('div', 'meta', 'add a class via Search → Onboard (never here — keeps the #124 reuse path)', 'settings-fleet-add-hint'));
+}
+function settingsStatusRows(g, d) {
+  const arm = E('div', 'meta', '<b>privileged mutation</b>: ');
+  arm.appendChild(E('span', 'badge '+(d.armed ? 'yes' : 'no'), d.armed ? 'ARMED (staging enabled)' : 'disarmed (read-only)', 'settings-arming-badge'));
+  g.appendChild(arm);
+  g.appendChild(E('div', 'meta', '<b>services</b>: '+((d.services || []).map(s => s.name).join(' · ') || '(none)'), 'settings-services'));
+  g.appendChild(E('div', 'meta', '🔑 '+((d.secret_domains || []).map(s => s.domain+' '+(s.set ? '✓' : '—')).join(' · ') || '(none)'), 'settings-secrets-roster'));
+  const jump = E('button', 'mini', 'manage in Secrets →', 'settings-secrets-jump');
+  jump.onclick = () => { document.querySelectorAll('[data-testid=settings-overlay]').forEach(n => n.remove()); openSecretsPicker(); };
+  g.appendChild(jump);
+}
+// --- the Homepage editor (#136, GUI-paradigm Phase 2): choose which control-plane tiles appear + reorder sections
+// and tiles. The :3000 board (gethomepage) only READS YAML, so this authoring surface rewrites the overlay files.
+// Optimistic, explicit-Save: reorder/select mutate the in-memory board (dlg._board) + re-render; persistence is one
+// reviewable proposal on Save → STAGED proposed/<run_id> (C10, never promotes). The generated fleet section renders
+// locked (its tiles are owned by gen-homepage). MVP: select + move-up/down (no drag-drop).
+async function openHomepagePanel() {
+  document.querySelectorAll('[data-testid=homepage-overlay]').forEach(n => n.remove());
+  const ov = E('div', 'capov', null, 'homepage-overlay');
+  const dlg = E('div', 'capdlg', null, 'homepage-panel');
+  dlg.innerHTML = '<div class="caphd"><span><b>Homepage</b> · arrange the portal</span>'+
+    '<button class="capx" data-testid="homepage-close">×</button></div>'+
+    '<div class="capbody" data-testid="homepage-body"><div class="spin">Loading…</div></div>';
+  ov.appendChild(dlg); document.body.appendChild(ov);
+  dlg.querySelector('[data-testid=homepage-close]').onclick = () => ov.remove();
+  let board;
+  try { board = await (await fetch('/api/homepage')).json(); }
+  catch(e){ dlg.querySelector('.capbody').innerHTML = '<div class="warn">request failed</div>'; return; }
+  if (board.error){ dlg.querySelector('.capbody').innerHTML = '<div class="warn" data-testid="homepage-error">'+board.error+'</div>'; return; }
+  dlg._board = board;
+  renderHomepageBoard(dlg);
+}
+function hpMove(arr, i, delta) { const j = i + delta; if (j < 0 || j >= arr.length) return; const t = arr[i]; arr[i] = arr[j]; arr[j] = t; }
+function renderHomepageBoard(dlg) {
+  dlg._token = null;                                          // a reorder/select invalidates any prior Preview token
+  const body = dlg.querySelector('.capbody'); body.innerHTML = '';
+  body.appendChild(E('div', 'meta', 'Reorder sections + tiles and choose which appear. <b>Preview</b> shows the diff; '+
+    '<b>Save</b> stages a proposal (promote it in Semaphore, then :3000 reloads).'));
+  (dlg._board.sections || []).forEach((sec, si) => body.appendChild(homepageSectionCard(dlg, sec, si)));
+  const actions = E('div', 'row', null, null);
+  const prev = E('button', null, 'Preview changes', 'homepage-propose'); prev.onclick = () => homepagePropose(dlg);
+  const save = E('button', 'go', 'Save + stage', 'homepage-apply'); save.onclick = () => homepageApply(dlg);
+  actions.appendChild(prev); actions.appendChild(save); body.appendChild(actions);
+  const diff = E('pre', 'out', null, 'homepage-diff'); diff.style.display = 'none'; body.appendChild(diff);
+}
+function homepageSectionCard(dlg, sec, si) {
+  const card = E('div', 'card', null, 'homepage-section'); card.dataset.section = sec.name;
+  const gen = !!sec.generated;
+  const hd = E('h3', null, (gen ? '🔒 ' : '') + sec.name + (gen ? ' <span class="meta">(generated — locked)</span>' : ''));
+  const up = E('button', 'mini', '▲', 'homepage-section-up'); up.onclick = () => { hpMove(dlg._board.sections, si, -1); renderHomepageBoard(dlg); };
+  const dn = E('button', 'mini', '▼', 'homepage-section-down'); dn.onclick = () => { hpMove(dlg._board.sections, si, 1); renderHomepageBoard(dlg); };
+  hd.appendChild(up); hd.appendChild(dn); card.appendChild(hd);
+  (sec.items || []).forEach((t, ti) => {
+    const row = E('div', 'meta', null, 'homepage-tile'); row.dataset.section = sec.name; row.dataset.tile = t.name;
+    const cb = E('input', null, null, 'homepage-tile-select'); cb.type = 'checkbox'; cb.checked = t.present !== false; cb.disabled = gen;
+    cb.onchange = () => { t.present = cb.checked; };
+    row.appendChild(cb);
+    row.appendChild(document.createTextNode(' ' + t.name + (t.has_widget ? ' (' + (t.widget_type || 'widget') + ' widget)' : '')));
+    if (!gen) {
+      const tu = E('button', 'mini', '▲', 'homepage-tile-up'); tu.onclick = () => { hpMove(sec.items, ti, -1); renderHomepageBoard(dlg); };
+      const td = E('button', 'mini', '▼', 'homepage-tile-down'); td.onclick = () => { hpMove(sec.items, ti, 1); renderHomepageBoard(dlg); };
+      row.appendChild(tu); row.appendChild(td);
+    }
+    card.appendChild(row);
+  });
+  return card;
+}
+async function homepagePropose(dlg) {
+  const out = dlg.querySelector('[data-testid=homepage-diff]'); out.style.display = 'block'; out.textContent = 'Computing diff…';
+  let r;
+  try { r = await (await fetch('/api/homepage', {method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({board: dlg._board})})).json(); }
+  catch(e){ out.textContent = 'request failed'; return; }
+  if (r.error){ out.textContent = 'ERROR: '+r.error+(r.detail ? '\n'+r.detail : ''); return; }
+  dlg._token = r.token; dlg._summary = r.summary;
+  out.textContent = renderHomepageDiff(r);
+}
+function renderHomepageDiff(r) {
+  if (!r.summary || !r.summary.changed) return 'No changes to stage.';
+  const removed = (r.summary.removed_tiles || []);
+  return 'PREVIEW — writes nothing yet:\n'+((r.diff || []).map(x => x.unified).join('\n') || '(section/tile reorder)')+
+    (removed.length ? '\n\nremoves: '+removed.join(', ') : '')+'\n\nClick "Save + stage" to stage this as a proposal.';
+}
+async function homepageApply(dlg) {
+  if (!dlg._token) await homepagePropose(dlg);               // Save without Preview: auto-propose to get a token
+  if (!dlg._token) return;                                    // nothing to stage / propose failed
+  const removed = (dlg._summary && dlg._summary.removed_widgets) || [];
+  if (removed.length && !window.confirm('Removing '+removed.join(', ')+' drops a LIVE widget tile from the portal. '+
+      'Its widget config (data-source + token placeholder) leaves the served board. Continue?')) return;
+  const res = E('pre', 'out', null, 'homepage-result'); res.textContent = 'Staging…';
+  dlg.querySelector('.capbody').appendChild(res);
+  let r;
+  try { r = await (await fetch('/api/homepage', {method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({board: dlg._board, apply: true, token: dlg._token})})).json(); }
+  catch(e){ res.textContent = 'request failed'; return; }
+  res.textContent = renderHomepageResult(r);
+}
+function renderHomepageResult(r) {
+  if (r.error) return 'ERROR: '+r.error;
+  if (!r.changed) return r.note || 'no change.';
+  return (r.staged ? 'STAGED proposal '+r.target_ref : 'committed to main')+' (run_id '+r.run_id+')\n'+
+    'paths: '+(r.paths || []).join(', ')+'\n'+(r.next || '');
+}
+function fleetClassRow(c) {
+  const row = E('div', 'card', null, 'fleet-class'); row.dataset.key = c.key;
+  row.appendChild(E('h3', null, c.key + ' <span class="meta">'+(c.collection||'')+
+    ' · group '+(c.group||'?')+' · '+(c.status||'?')+'</span>'));
+  const caps = E('div', 'badges', null, null);
+  ['telemetry','backup','logging'].forEach(cap => {        // all three clickable — declared OR addable (the dialog detects)
+    const on = !!(c.capabilities && c.capabilities[cap]);
+    const bd = E('span', 'badge '+(on?'yes':'no')+' cap-open', cap+' '+(on?'✓':'+'), 'fleet-class-cap');
+    bd.dataset.cap = cap; bd.dataset.key = c.key; bd.dataset.state = on?'yes':'no';
+    bd.title = (on?'configure':'add')+' '+cap+' for '+c.key;
+    bd.onclick = () => openCapabilityDialog(cap, c.key, {});
+    caps.appendChild(bd);
+  });
+  // Phase 4b: reconfigure the class IDENTITY (secrets_domain / inventory_group / backend / role / status) — the
+  // heaviest reconfigure (re-homes hosts / orphans creds), gated by the type-to-confirm identity gate.
+  const idb = E('span', 'badge no cap-open', '⚙ identity', 'fleet-class-identity');
+  idb.dataset.key = c.key;
+  idb.title = 'reconfigure identity (secrets_domain / inventory_group / backend / role) for ' + c.key;
+  idb.onclick = () => openReconfigureDialog('module-identity', c.key,
+                        '/api/identity/' + encodeURIComponent(c.key), c.key + ' · identity');
+  caps.appendChild(idb);
+  row.appendChild(caps);
+  const hosts = (c.hosts || []);
+  if (!hosts.length) {
+    row.appendChild(E('div', 'meta', 'hosts: (none in inventory yet)'));
+  } else {
+    row.appendChild(E('div', 'meta', 'hosts:'));
+    hosts.forEach(h => {                                       // per-host row + an "edit IP" reconfigure entry (§5.3)
+      const hr = E('div', 'row', null, 'fleet-host'); hr.dataset.host = h.name;
+      hr.appendChild(E('span', 'meta', h.name + (h.ansible_host ? ' (' + h.ansible_host + ')' : '')));
+      const eb = E('button', 'mini', 'edit IP', 'fleet-host-edit');
+      eb.dataset.key = c.key; eb.dataset.host = h.name;
+      eb.title = 'reconfigure host vars (ansible_host) for ' + h.name;
+      eb.onclick = () => openReconfigureDialog('inventory-host', c.key + ':' + h.name,
+                          '/api/host/' + encodeURIComponent(c.key) + '/' + encodeURIComponent(h.name),
+                          c.key + ' · ' + h.name);
+      hr.appendChild(eb);
+      if (h.ansible_host) {                                     // host-scoped backup drill-in (C14, scope-4)
+        const bb = E('button', 'mini', 'backups', 'fleet-backup-open'); bb.dataset.host = h.ansible_host;
+        bb.title = 'view + diff config backups for ' + h.name;
+        bb.onclick = () => openBackupPanel(h.ansible_host);
+        hr.appendChild(bb);
+      }
+      row.appendChild(hr);
+    });
+  }
+  return row;
+}
+// --- secret-onboarding dialog (D) — ONE shared shell; domain is data, not a branch (the secret analogue of
+// the capability dialog). Pick a domain → fill fields (blank generate-fields are minted on the box) → Save,
+// which encrypts to SOPS + STAGES proposed/<run_id>. Values are typed here but NEVER come back from the
+// server (only field NAMES + a source label). -------------------------------------------------------------
+async function openSecretsPicker() {
+  document.querySelectorAll('[data-testid=secret-overlay]').forEach(n => n.remove());
+  const ov = E('div','capov',null,'secret-overlay');
+  const dlg = E('div','capdlg',null,'secret-picker');
+  dlg.innerHTML = '<div class="caphd"><span><b>Secrets</b> · enter service/infra secrets</span>'+
+    '<button class="capx" data-testid="secret-close">×</button></div>'+
+    '<div class="capbody" data-testid="secret-picker-body"><div class="spin">Loading…</div></div>';
+  ov.appendChild(dlg); document.body.appendChild(ov);
+  dlg.querySelector('[data-testid=secret-close]').onclick = () => ov.remove();
+  let domains;
+  try { domains = await (await fetch('/api/secrets')).json(); }
+  catch(e){ dlg.querySelector('.capbody').innerHTML='<div class="warn">request failed</div>'; return; }
+  const body = dlg.querySelector('.capbody'); body.innerHTML='';
+  if (!domains.length){ body.innerHTML='<div class="meta">no secret forms registered</div>'; return; }
+  domains.forEach(d => {
+    const row = E('button', null, '<b>'+d.label+'</b><br><span class="meta">'+d.description+'</span>', 'secret-domain');
+    row.dataset.domain = d.domain;
+    row.onclick = () => { ov.remove(); openSecretDialog(d.domain); };
+    body.appendChild(row);
+  });
+}
+async function openSecretDialog(domain) {
+  document.querySelectorAll('[data-testid=secret-overlay]').forEach(n => n.remove());
+  const ov = E('div','capov',null,'secret-overlay');
+  const dlg = E('div','capdlg',null,'secret-dialog'); dlg.dataset.domain = domain;
+  dlg.innerHTML = '<div class="caphd"><span><b>secrets</b> · '+domain+'</span>'+
+    '<button class="capx" data-testid="secret-close">×</button></div>'+
+    '<div class="capbody" data-testid="secret-body"><div class="spin">Loading…</div></div>';
+  ov.appendChild(dlg); document.body.appendChild(ov);
+  dlg.querySelector('[data-testid=secret-close]').onclick = () => ov.remove();
+  let info;
+  // Converged onto the ONE knob renderer (Phase 3): the projected `fields` group renders through renderKnobGroup →
+  // renderSecretKnob (the SAME write-only/data-field/gen widget — secretApply is unchanged; values never echoed).
+  try { info = await (await fetch('/api/configurable?kind=secret-domain&id='+encodeURIComponent(domain))).json(); }
+  catch(e){ dlg.querySelector('.capbody').innerHTML='<div class="warn">request failed</div>'; return; }
+  const body = dlg.querySelector('.capbody');
+  if (info.error){ body.innerHTML='<div class="warn" data-testid="secret-error">'+info.error+'</div>'; return; }
+  body.innerHTML = '<div class="meta">'+(info.description||'')+'</div><div data-testid="secret-fields"></div>';
+  renderKnobGroup(dlg, (info.groups || [])[0]);    // the `fields` source → renderSecretKnob per field (gen bound inline)
+  body.appendChild(E('div','row','<button class="go" data-testid="secret-apply">Save + stage</button>'));
+  const res = E('pre','out',null,'secret-result'); res.style.display='none'; body.appendChild(res);
+  body.querySelector('[data-testid=secret-apply]').onclick = () => secretApply(dlg);
+}
+async function secretApply(dlg, overwrite) {
+  const out = dlg.querySelector('[data-testid=secret-result]'); out.style.display='block'; out.textContent='Saving…';
+  const values = {}, regenerate = [];
+  dlg.querySelectorAll('[data-field]').forEach(i => {
+    if (i.value) values[i.dataset.field] = i.value;
+    else if (i.dataset.regen === '1') regenerate.push(i.dataset.field);   // explicit 'gen' on a blank field (#141)
+  });
+  let r;
+  try { r = await (await fetch('/api/secrets/'+dlg.dataset.domain, {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({values, regenerate, apply:true, overwrite: !!overwrite})})).json(); }
+  catch(e){ out.textContent='request failed'; return; }
+  // Overwrite gate (C9): the server fails CLOSED with the NAMES of already-set fields this would clobber (no
+  // write happened yet). Render a confirm; on ack, re-submit with overwrite:true. NAMES only — never a value.
+  if (!overwrite && r.overwrite && r.overwrite.length){ secretOverwriteGate(dlg, r.overwrite, out); return; }
+  if (r.error){ out.textContent='ERROR: '+r.error; return; }
+  if (!r.changed){ out.textContent = r.note || 'no change'; return; }
+  out.textContent = (r.staged ? 'STAGED proposal '+r.target_ref : 'committed to main')+' (run_id '+r.run_id+')\n'+
+    'fields set: '+r.view.filter(v=>v.source==='provided'||v.source==='generated').map(v=>v.key).join(', ')+
+    '\nnext: '+r.next;
+  renderSecretEnact(dlg, r.enact);
+}
+// The overwrite confirm (C9 measure-twice): clobbering a LIVE secret (rotation) needs an explicit ack. Lists
+// field NAMES only — never a value, never before→after (C11). The server is the real guard (it 409'd WITHOUT a
+// write); this is the operator-facing convenience gate. On ack, re-submit with overwrite:true.
+function secretOverwriteGate(dlg, names, out){
+  dlg.querySelectorAll('[data-testid=secret-overwrite-confirm]').forEach(n => n.remove());
+  out.textContent = '⚠ overwrite confirm — this REPLACES the live value of: '+names.join(', ') +
+    '\n(a blank auto-generated field listed here is RE-MINTED on save — clear only what you mean to rotate)';
+  const row = E('div','row',null,'secret-overwrite-confirm');
+  const btn = E('button','go','Confirm — replace '+names.length+' live secret'+(names.length>1?'s':''), 'secret-overwrite-go');
+  btn.onclick = () => { row.remove(); secretApply(dlg, true); };
+  row.appendChild(btn); dlg.querySelector('.capbody').appendChild(row);
+}
+// The actuation hand-off (post-promote): the staged value is not LIVE until the operator promotes + runs these
+// (the GUI executes nothing — no docker socket). Command strings + field NAMES only; the secret value never appears.
+function renderSecretEnact(dlg, enact){
+  dlg.querySelectorAll('[data-testid=secret-enact]').forEach(n => n.remove());
+  if (!enact || !enact.length) return;
+  const pre = E('pre','out',null,'secret-enact');
+  pre.textContent = 'TO APPLY (after you promote — run these; the GUI runs nothing):\n' +
+    enact.map(e => '• '+e.field+': '+e.cmd +
+      (e.consequence && e.consequence !== 'none' ? '\n    ⚠ '+e.consequence : '') +
+      '\n    ('+e.why+')').join('\n');
+  dlg.querySelector('.capbody').appendChild(pre);
+}
+// --- keygen dialog (D): generate an age key by ROLE. ONE shared dialog — role is data, like the secret
+// dialog. The minted PRIVATE key comes back EXACTLY ONCE (the apply response) and is shown for the operator to
+// save; it is never stored by the server. Only the public recipient is added to /.sops.yaml (staged). --------
+async function openKeygenPicker() {
+  document.querySelectorAll('[data-testid=keygen-overlay]').forEach(n => n.remove());
+  const ov = E('div','capov',null,'keygen-overlay');
+  const dlg = E('div','capdlg',null,'keygen-picker');
+  dlg.innerHTML = '<div class="caphd"><span><b>Keys</b> · generate an age key</span>'+
+    '<button class="capx" data-testid="keygen-close">×</button></div>'+
+    '<div class="capbody" data-testid="keygen-picker-body"><div class="spin">Loading…</div></div>';
+  ov.appendChild(dlg); document.body.appendChild(ov);
+  dlg.querySelector('[data-testid=keygen-close]').onclick = () => ov.remove();
+  let roles;
+  try { roles = await (await fetch('/api/keygen')).json(); }
+  catch(e){ dlg.querySelector('.capbody').innerHTML='<div class="warn">request failed</div>'; return; }
+  const body = dlg.querySelector('.capbody'); body.innerHTML='';
+  if (!roles.length){ body.innerHTML='<div class="meta">no key roles registered</div>'; return; }
+  roles.forEach(r => {
+    const row = E('button', null, '<b>'+r.label+'</b><br><span class="meta">'+r.description+'</span>', 'keygen-role');
+    row.dataset.role = r.role;
+    row.onclick = () => { ov.remove(); openKeygenDialog(r.role); };
+    body.appendChild(row);
+  });
+}
+async function openKeygenDialog(role) {
+  document.querySelectorAll('[data-testid=keygen-overlay]').forEach(n => n.remove());
+  const ov = E('div','capov',null,'keygen-overlay');
+  const dlg = E('div','capdlg',null,'keygen-dialog'); dlg.dataset.role = role;
+  dlg.innerHTML = '<div class="caphd"><span><b>keygen</b> · '+role+'</span>'+
+    '<button class="capx" data-testid="keygen-close">×</button></div>'+
+    '<div class="capbody" data-testid="keygen-body"><div class="spin">Loading…</div></div>';
+  ov.appendChild(dlg); document.body.appendChild(ov);
+  dlg.querySelector('[data-testid=keygen-close]').onclick = () => ov.remove();
+  let plan;
+  try { plan = await (await fetch('/api/keygen/'+role)).json(); }
+  catch(e){ dlg.querySelector('.capbody').innerHTML='<div class="warn">request failed</div>'; return; }
+  const body = dlg.querySelector('.capbody');
+  if (plan.error){ body.innerHTML='<div class="warn" data-testid="keygen-error">'+plan.error+'</div>'; return; }
+  body.innerHTML = '<div class="meta">'+(plan.description||'')+'</div>'+
+    '<div class="row meta">Becomes a recipient of: <b>'+(plan.recipient_domains.join(', ')||'(configured groups)')+'</b></div>'+
+    '<div class="row meta">Private key: <b>'+(plan.placement==='offline'?'store OFFLINE (not saved here)':'save to '+plan.private_key_path)+'</b></div>'+
+    '<div class="warn" data-testid="keygen-warning">'+(plan.warning||'')+'</div>'+
+    '<div class="row"><button class="go" data-testid="keygen-generate">Generate + stage recipient</button></div>';
+  const res = E('pre','out',null,'keygen-result'); res.style.display='none'; body.appendChild(res);
+  body.querySelector('[data-testid=keygen-generate]').onclick = () => keygenApply(dlg);
+}
+async function keygenApply(dlg) {
+  const out = dlg.querySelector('[data-testid=keygen-result]'); out.style.display='block'; out.textContent='Generating…';
+  const btn = dlg.querySelector('[data-testid=keygen-generate]'); if (btn) btn.disabled = true;  // mint once
+  let r;
+  try { r = await (await fetch('/api/keygen/'+dlg.dataset.role, {method:'POST',
+        headers:{'Content-Type':'application/json'}, body:JSON.stringify({apply:true})})).json(); }
+  catch(e){ out.textContent='request failed'; if (btn) btn.disabled=false; return; }
+  if (r.error){ out.textContent='ERROR: '+r.error+(r.private_key?'\n\nSAVE THIS PRIVATE KEY NOW (commit failed but the key was minted):\n'+r.private_key:''); return; }
+  // The ONE render of the private key — make it unmissable. It never comes back again.
+  out.innerHTML = '';
+  out.appendChild(E('div','warn','⚠ SAVE THE PRIVATE KEY NOW — it is shown only once and is not stored:'));
+  out.appendChild(E('pre','keyval', r.private_key, 'keygen-private'));
+  out.appendChild(E('div','meta', 'public recipient: '+r.public_key, 'keygen-public'));
+  const steps = (r.next_steps||[]).map((s,i)=>(i+1)+'. '+s).join('\n');
+  out.appendChild(E('pre','out', (r.changed ? ('STAGED '+(r.target_ref||'')+' (run_id '+r.run_id+')\n') : (r.note+'\n'))+steps, 'keygen-steps'));
+}
+document.getElementById('q').addEventListener('keydown', e => { if(e.key==='Enter') search(); });
+</script>
+</body>
+</html>

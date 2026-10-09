@@ -1,0 +1,10 @@
+# Grafana datasource provisioning — Prometheus auto-wired on first boot.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus          # fixed uid so fetched community dashboards pin to it (scripts/fetch-dashboards.py)
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

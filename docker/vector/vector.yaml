@@ -1,0 +1,16 @@
+# Vector global options ONLY (loaded via `--config`). Components (sources/transforms/sinks) are namespaced
+# drop-ins under config.d/ (loaded via `--config-dir /etc/vector/config.d`) — subdir = component TYPE, filename
+# = component id. Adding a source NEVER touches this file. (10-research-vector-loki.md §1.2.)
+#
+# NB the command (docker/services/vector.yaml): `--config /etc/vector/vector.yaml` for these globals +
+# `--config-dir /etc/vector/config.d` (the hand-authored TYPE-namespaced tree) + a SECOND `--config-dir
+# /etc/vector/generated` for the gen-logging fragments. The generated tree is DISJOINT from config.d (full-config
+# fragments with EXPLICIT component ids, NOT type-dir namespacing — a source+transform sharing a stem would
+# collide otherwise). Generated capability sources land under docker/vector/generated/. See gen-logging.py.
+
+data_dir: /var/lib/vector                # checkpoints + disk buffers (the vector-data named volume)
+
+api:
+  enabled: true
+  address: "127.0.0.1:8686"              # container-internal only (never published) → the compose healthcheck.
+                                         # The API has NO auth, so it binds loopback inside the container only.

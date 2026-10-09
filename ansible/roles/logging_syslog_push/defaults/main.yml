@@ -1,0 +1,15 @@
+---
+# Device-side syslog-push wiring defaults. The collector host is passed in by wire-logging.yml (resolved from
+# instance/instance.yml mgmt_ip, or -e collector_host=); transport/port match the Vector syslog source
+# (logging/syslog_push.yml) + the published ingress (docker/services/vector.yaml ${KONTROLL_MGMT_IP}:5514).
+# noqa: var-naming[no-role-prefix] — these are read by the shared wiring playbook + the backend, so they carry
+# no role-name prefix (the cross-role contract convention, like backup_capable / backend_*).
+logging_collector_host: ""          # noqa: var-naming[no-role-prefix]  REQUIRED — wire-logging.yml passes it
+logging_transport: tcp              # noqa: var-naming[no-role-prefix]  tcp|udp (matches the Vector source mode)
+logging_port: 5514                  # noqa: var-naming[no-role-prefix]  unprivileged; Vector binds :5514
+# The vendor config line(s) that point the device's syslog at the collector. DEFAULT = IOS-family syntax
+# (`logging host …`), which most enterprise CLI gear accepts; a divergent vendor overrides this var in its
+# group_vars/module — NO per-vendor branching in the role (mirrors backend_backup_command's default+override).
+# `transport` is IOS-XE; bare IOS drops the keyword (override the template then).
+logging_syslog_lines:               # noqa: var-naming[no-role-prefix]
+  - "logging host {{ logging_collector_host }} transport {{ logging_transport }} port {{ logging_port }}"

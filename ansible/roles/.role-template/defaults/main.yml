@@ -1,0 +1,6 @@
+---
+# A new device class is NOT backup-capable until you implement a real capture in
+# tasks/backup.yml. Flip to true once the capture writes something meaningful.
+# See ansible/roles/cisco_ios/defaults/main.yml for the contract and
+# roles/cisco_ios/tasks/backup.yml for a worked capture.
+backup_capable: false  # noqa: var-naming[no-role-prefix]

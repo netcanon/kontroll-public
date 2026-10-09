@@ -1,0 +1,56 @@
+"""A divergent drop-in must raise the CATCHABLE gitio.WriteConflict, never sys.exit.
+
+WHY (the failure this guards): `_write_new` used `sys.exit(...)` to refuse clobbering a divergent file. In the
+CLI that's fine, but the GUI/API call the onboard service IN-PROCESS — and `sys.exit` raises SystemExit, which
+derives from BaseException, so Flask/Werkzeug does NOT catch it: it killed the onboard-gui request worker and the
+browser saw a bare "request failed" with no message. Live-caught onboarding a device with key `cisco_ios` (a
+SHIPPED module). The fix raises WriteConflict (a normal Exception) so the routes return a clean 409 and the CLI
+exits cleanly. These pins keep it an Exception (not a worker-killer) and keep _write_new raising it.
+"""
+import os
+
+import pytest
+
+from kontroll import gitio
+
+pytestmark = pytest.mark.unit
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def test_writeconflict_is_a_catchable_exception_not_a_worker_killer():
+    """WriteConflict must subclass Exception (caught by `except Exception` in a request handler), and crucially
+    must NOT be a SystemExit/BaseException-only — that is the whole point (a SystemExit escapes Flask and kills
+    the worker)."""
+    assert issubclass(gitio.WriteConflict, Exception)
+    assert not issubclass(gitio.WriteConflict, SystemExit)
+
+
+def test_write_new_raises_writeconflict_on_divergent_existing_file(tmp_path, monkeypatch):
+    """A pre-existing file with DIFFERENT content raises WriteConflict (not SystemExit); identical content is a
+    no-op (returns False); an absent file writes (returns True). Mirrors the onboard collision a key reuse hits."""
+    monkeypatch.setattr(gitio.paths, "ROOT", str(tmp_path))
+    rel = "modules/cisco_ios/module.yml"
+    os.makedirs(os.path.join(str(tmp_path), "modules", "cisco_ios"))
+    with open(os.path.join(str(tmp_path), rel), "w", encoding="utf-8") as fh:
+        fh.write("# banner\nEXISTING shipped content\n")
+    # divergent -> WriteConflict (catchable), never SystemExit
+    with pytest.raises(gitio.WriteConflict):
+        gitio._write_new(rel, "DIFFERENT onboard content\n", "# banner\n")
+    # identical -> no-op
+    assert gitio._write_new(rel, "EXISTING shipped content\n", "# banner\n") is False
+    # absent -> writes
+    assert gitio._write_new("modules/fresh_key/module.yml", "x\n", "# banner\n") is True
+    # overwrite=True -> the GUI 'Overwrite' escape hatch replaces the divergent file (returns True)
+    assert gitio._write_new(rel, "DIFFERENT onboard content\n", "# banner\n", overwrite=True) is True
+    assert open(os.path.join(str(tmp_path), rel), encoding="utf-8").read() == "# banner\nDIFFERENT onboard content\n"
+
+
+def test_overwrite_button_and_conflict_flag_are_wired():
+    """The GUI offers the Overwrite escape hatch: the route flags a conflict (`conflict: true`) and the template
+    renders an `onboard-overwrite` button that re-submits with overwrite=true. Pins the round-trip wiring."""
+    app_src = open(os.path.join(ROOT, "gui", "app.py"), encoding="utf-8").read()
+    tpl = open(os.path.join(ROOT, "gui", "templates", "index.html"), encoding="utf-8").read()
+    assert '"conflict": True' in app_src, "the GUI 409 must flag conflict:true so the front-end shows Overwrite"
+    assert "onboard-overwrite" in tpl and "submit(f, collection, backend, true)" in tpl
+    assert "overwrite=bool(d.get(\"overwrite\"))" in app_src or "overwrite=bool(d.get('overwrite'))" in app_src

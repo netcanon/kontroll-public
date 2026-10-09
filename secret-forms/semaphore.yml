@@ -1,0 +1,52 @@
+# Secret-onboarding FORM descriptor for the `semaphore` SOPS domain (Semaphore's own DB/admin/access-key
+# secrets). Fields only — never values; recipiency is base (control + break-glass) per /.sops.yaml.
+domain: semaphore
+label: Semaphore (Ansible UI) secrets
+description: Semaphore's database password, the admin login, and its access-key encryption key.
+order: 31
+recipients: base
+# Only the admin LOGIN is `rotatable:` — a per-FIELD allow-list. The DB password + access-key are rotation
+# TRAPS (see their notes): rotating the stored value alone breaks the running service, so they are deliberately
+# left un-flagged and are never offered for rotation (still settable at onboard time).
+fields:
+  - key: semaphore_db_password
+    label: Semaphore DB password
+    type: password
+    generate: hex32
+    required: true
+    # NOT rotatable: changing this value alone breaks the live Postgres role (needs a paired `ALTER ROLE`).
+    help: Postgres password for the semaphore-db container.
+  - key: semaphore_admin
+    label: Semaphore admin username
+    type: text
+    default: admin
+    required: true
+    help: The Semaphore UI admin login name.
+  - key: semaphore_admin_password
+    label: Semaphore admin password
+    type: password
+    required: true
+    rotatable: true
+    actuation:
+      # `semaphore-admin` (NOT `recreate`): Semaphore applies SEMAPHORE_ADMIN_PASSWORD only at first-run
+      # `semaphore setup` (config.json absent), so recreating the container does NOT rotate an existing admin.
+      # The enact is a two-step hand-off — recreate (re-render .env → new value into the container env), then an
+      # in-container `users change-by-login` that reads login+password from the container's OWN env (no value on
+      # host argv / shell history). Verified live on v2.18.12. See secret-forms/README.md + SECURITY.md C9.
+      kind: semaphore-admin
+      service: semaphore
+      consequence: recreates semaphore — drops in-flight jobs + this UI session
+    help: The Semaphore UI admin login password.
+  - key: semaphore_admin_email
+    label: Semaphore admin email
+    type: text
+    default: admin@example.com   # config, not a secret — lets kontroll-init auto-mint the domain (no prompt)
+    required: true
+    help: Admin contact email Semaphore records (no mail is sent by default).
+  - key: semaphore_access_key_encryption
+    label: Access-key encryption key
+    type: token
+    generate: base64_32   # Semaphore wants a base64 32-byte key
+    required: true
+    # NOT rotatable: re-keying orphans Semaphore's encrypted credential store (a destructive re-key, not a rotation).
+    help: Symmetric key Semaphore uses to encrypt the credentials in its own store.

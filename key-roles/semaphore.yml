@@ -1,0 +1,18 @@
+# Key-role descriptor for the SCOPED Semaphore runner key. Generating it MINTS a fresh age keypair: the
+# PRIVATE half is shown ONCE for the operator to save on the box (and load into Semaphore's encrypted store);
+# the PUBLIC half is added ONLY to the operational domains (network + proxmox) so a Semaphore breach can never
+# decrypt the service secrets. The service writes only the public recipient into /.sops.yaml — never the
+# private key. Re-wrapping the two operational domains (`sops updatekeys`) is a deferred operator step.
+role: semaphore
+label: Scoped Semaphore runner key
+description: The key the Semaphore runner uses to decrypt the operational domains only (network + proxmox).
+order: 20
+placement: path               # the operator saves the private key to this path on the control VM, mode 0600
+private_key_path: ~/.config/semaphore/age/keys.txt
+recipient_groups:             # operational domains ONLY — never the service/master domains
+  - ops_recipients
+scope_label: the operational domains (network, proxmox) only
+high_blast: false             # only the two operational domains need re-wrapping
+warning: >-
+  This is the only time the private key is shown. Save it to ~/.config/semaphore/age/keys.txt on the control
+  VM (mode 0600) and load it into Semaphore's encrypted store — it is never written here automatically.

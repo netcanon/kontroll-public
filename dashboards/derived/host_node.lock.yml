@@ -1,0 +1,16 @@
+---
+# GENERATED/maintained by scripts/gen-dashboard-floor.py --resolve — DO NOT hand-edit id/revision/sha.
+# The dashboard-floor pin (north-star Rung 4a): the grafana.com board DERIVED for this telemetry
+# method's derive_dashboard: selector, frozen so gen-dashboard-floor.py --check validates it OFFLINE
+# (BRICK-1). Re-derive with --resolve (network, operator-run); the diff is the reviewable churn.
+schema: 1
+method: host_node
+name: node
+id: 1860
+revision: 45
+datasource: prometheus
+content_sha256: "sha256:86f0e97bf672b4e79ba2b399db568e6503c48b188d3ad58bd519db575228da97"
+requires_series: node_cpu_seconds_total
+chosen_by: prefer_gnet
+search: "node exporter full"
+resolved_at: "2026-07-02"

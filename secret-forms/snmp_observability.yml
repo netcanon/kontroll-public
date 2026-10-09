@@ -1,0 +1,24 @@
+# Secret-onboarding FORM descriptor for the `snmp_observability` SOPS domain — the SNMPv3 read-only USM
+# creds the snmp_exporter uses to scrape the switch/firewall. A monitoring READ credential (SNMP GET —
+# cannot actuate the device). Fields only; recipiency is base (control + break-glass) per /.sops.yaml.
+domain: snmp_observability
+label: SNMPv3 monitoring read creds
+description: SNMPv3 authPriv user the snmp_exporter uses to read interface counters (SHA-1 auth / AES-128 priv).
+order: 40
+recipients: base
+fields:
+  - key: snmp_v3_username
+    label: SNMPv3 username (USM)
+    type: text
+    required: true
+    help: The read-only SNMPv3 user configured on the switch/firewall.
+  - key: snmp_v3_auth_password
+    label: SNMPv3 auth password (SHA)
+    type: password
+    required: true
+    help: Authentication passphrase (>= 8 chars); auth_protocol SHA (= SHA-1 in snmp_exporter).
+  - key: snmp_v3_priv_password
+    label: SNMPv3 privacy password (AES)
+    type: password
+    required: true
+    help: Privacy/encryption passphrase (>= 8 chars); priv_protocol AES-128.

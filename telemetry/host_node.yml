@@ -1,0 +1,31 @@
+# Telemetry method: host-agent node_exporter — the host itself runs the exporter (the old `via: host`).
+# Drop-in: gen-observability.py dispatches over telemetry/<name>.yml, so node_exporter is ONE row here, not
+# a hardcoded branch. Schema: docs/observability/telemetry-method-registry.md (the flat §4.0.2 descriptor).
+name: host_node
+label: Host node_exporter (CPU / mem / disk / net)
+order: 1
+kind: host-agent
+job: node                  # prometheus job_name AND the targets subdir (prometheus/targets/node/<key>.generated.yml)
+target_shape: host_port    # target = "<ansible_host>:<port>"
+port: 9100
+labels: [group, host]
+agent_role: node_exporter  # the ansible role that installs the agent; documentary in the scrape generator,
+                           # read by playbooks/install-node-exporter.yml + the observability enact step (gap c)
+# No applies_when: host_node is UNIVERSALLY offerable in the Stage-1 picker — any managed box MIGHT run
+# node_exporter. (It is never AUTO-suggested first, though: suggest_telemetry trails it. Offerability is
+# not suggestion — see classify.applicable_methods vs classify.suggest_telemetry.)
+# F2 auto-derivation switch (PRESENT ⇒ AUTO-DERIVABLE): host_node has no required param, so the default params are
+# empty. Conferred ONLY by HOST-shaped backends (raw_ssh), never network gear — a switch doesn't run node_exporter,
+# so netcommon_cli does NOT confer host_node. Creds-free.
+derive_default:
+  params: {}
+# Rung-4a dashboard-floor SELECTOR (scripts/gen-dashboard-floor.py) — DERIVE the grafana.com board (even its id)
+# from a search, never a hand-typed gnet. Resolved + PINNED to dashboards/derived/host_node.lock.yml; the honest
+# floor board for the node_exporter host metrics this method scrapes. `prefer_gnet` is a SOFT tie-break (1860 "Node
+# Exporter Full", honored only if the live search still returns it); `requires_series` is the fail-closed fit gate.
+derive_dashboard:
+  search: "node exporter full"
+  datasource: prometheus
+  requires_series: node_cpu_seconds_total
+  prefer_gnet: [1860]
+  name: node

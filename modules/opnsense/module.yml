@@ -1,0 +1,37 @@
+# Device-class module: OPNsense firewall.
+key: opnsense
+description: OPNsense firewall (API)
+status: staged                 # post-cutover edge — enable at cutover, disable fortigate
+# F2 (de-bespoke, north-star Rung 4): this class's metrics FLOOR is AUTO-DERIVED. ansibleguy.opnsense ships NO
+# connection plugin (it drives the OPNsense REST API via modules, not a plugin), so predicate.classify falls through
+# to the `raw_ssh` catch-all — NOT `api` (a real probe corrected the design; there is no httpapi PLUGIN). raw_ssh
+# confers telemetry [blackbox, host_node]. ADDITIVE migration (no metrics before) but STAGED/DORMANT (commented out
+# of the fleet + inventory) — zero live targets until cutover; while staged the floor is gated by the frozen-oracle
+# unit test (test_derive_class_capabilities.py), not gen-class-capabilities --check. host_node is honest (OPNsense
+# can run node_exporter) — it scrapes DOWN until one is installed. backup stays role-gated (not derived).
+derived: true
+collections:
+  - name: ansibleguy.opnsense
+    version: ">=1.2.0"         # NOTE: latest is 1.2.x, NOT 2.x (corrected from the old requirements)
+role: opnsense
+inventory_group: edge_firewall
+secrets_domain: network
+# Observability FLOOR — DERIVED (gen-class-capabilities-owned): ICMP reachability + host_node (raw_ssh floor). No
+# snmp (an API-driven firewall's plugin shape doesn't confer it) and no syslog (raw_ssh confers logs []) — those
+# stay operator-declarable. All `derived: true` (recomputed from facts.pinned.yml).
+metrics:
+  - {method: blackbox, params: {probe: icmp}, derived: true}    # ICMP reachability (blackbox, no creds/agent)
+  - {method: host_node, derived: true}                          # node_exporter host metrics (honest-DOWN until set up)
+# Dashboards - the DERIVED Grafana-board FLOOR (Rung 4a): raw_ssh confers [blackbox, host_node] -> reachability
+# (gnet 13659) + node_exporter (gnet 1860, honest-DOWN until installed). STAGED -> gated by the frozen-oracle unit
+# test, not --check, until cutover. `derived: true` = gen-class-capabilities-owned. See dashboards/derived/.
+dashboards:
+  - {gnet: 13659, name: blackbox, derived: true}   # blackbox -> "Blackbox Exporter (HTTP prober)"
+  - {gnet: 1860, name: node, derived: true}        # host_node -> "Node Exporter Full" (honest-DOWN until set up)
+# Discovery (read-spine, Rung 1a) — this class can be ASKED for its own DHCPv4 lease table read-only, to surface
+# un-onboarded hosts on the network into the onboard inbox. DECLARED (not facts-derived): ansibleguy.opnsense ships
+# no httpapi plugin (facts plugins:{}, classifies raw_ssh), so a `{plugin: httpapi}` predicate would offer to
+# NOTHING (F2). The class opts in explicitly, like logging's proxmox_api. Passive-only, read-only, C18. A human
+# still onboards + promotes every surfaced host (C10 unchanged; discovery only pre-fills the form). See discovery/.
+discovery:
+  - {method: dhcp_leases_opnsense}

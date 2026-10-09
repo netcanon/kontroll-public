@@ -1,0 +1,1011 @@
+---
+# Deploy the composed control-plane stack ON the control node itself.
+# Idempotent: installs Docker (once), renders docker/.env from the SOPS service
+# domains, and brings up the named service(s) via docker compose.
+#
+# Phased rollout: pass -e stack_services='["semaphore"]' (default) to bring up
+# just Semaphore now; later phases add homepage/prometheus/grafana to the list.
+# This playbook never hard-codes the service list into a god file — it's data.
+#
+# Access chain used:   runs locally on the control node (connection: local)
+# May break:           the control node's own Docker stack (not the lab fabric)
+# Fallback required:   no — re-runnable; `docker compose down` to revert
+# Blast radius:        control node only (installs packages, starts containers)
+# Idempotence:         apt + compose are idempotent; a second run reports no change
+
+- name: Stamp the run correlation id
+  ansible.builtin.import_playbook: _log-run-id.yml
+
+- name: Install Docker Engine + Compose on the control node
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  become: true
+  vars:
+    _arch_map: {x86_64: amd64, aarch64: arm64}
+    # True only inside the compose-native installer container (the launcher sets KONTROLL_IN_CONTAINER=1). The
+    # host ALREADY has Docker — it is the irreducible floor (scripts/install-prereqs.sh) — and a container has no
+    # systemd, so this whole host-Docker-setup play is skipped in-container (MF-6, synthesis §4.5).
+    in_container: "{{ (lookup('env', 'KONTROLL_IN_CONTAINER') | default('', true)) | length > 0 }}"
+  tasks:
+    - name: Skip host Docker setup inside the installer container (the host floor already provides Docker)
+      ansible.builtin.meta: end_play
+      when: in_container
+
+    - name: Install repo prerequisites
+      ansible.builtin.apt:
+        name: [ca-certificates, curl]
+        state: present
+        update_cache: true
+
+    - name: Ensure apt keyring dir exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Add Docker's official GPG key
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/debian/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+
+    - name: Add the Docker apt repository (deb822 — no apt-key/gpg needed)
+      ansible.builtin.deb822_repository:
+        name: docker
+        types: [deb]
+        uris: https://download.docker.com/linux/debian
+        suites: ["{{ ansible_distribution_release }}"]
+        components: [stable]
+        architectures: ["{{ _arch_map[ansible_architecture] | default(ansible_architecture) }}"]
+        signed_by: /etc/apt/keyrings/docker.asc
+        enabled: true
+        state: present
+
+    - name: Install Docker Engine + Compose plugin
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+
+    - name: Set the global Docker log-rotation default (logging foundation, Layer 0)
+      # One place bounds EVERY container's logs (current + future) — the default
+      # json-file driver is otherwise unbounded, so a crash-loop (restart:
+      # unless-stopped) rolls its own evidence off disk. Per-container `logging:`
+      # blocks are unnecessary: new/recreated containers inherit this. Time-based
+      # retention is enforced later at the Loki layer; this just caps disk.
+      # See docs/logging-architecture.md §3 (Layer 0).
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        mode: "0644"
+        content: |
+          {
+            "log-driver": "json-file",
+            "log-opts": {
+              "max-size": "10m",
+              "max-file": "5"
+            }
+          }
+      notify: Restart docker
+
+    - name: Ensure Docker is started and enabled
+      ansible.builtin.systemd_service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Add the operator to the docker group (rootless CLI in new sessions)
+      ansible.builtin.user:
+        name: "{{ ansible_user_id }}"
+        groups: docker
+        append: true
+  handlers:
+    - name: Restart docker
+      # Recreated containers (next compose-up) pick up the new default log policy.
+      ansible.builtin.systemd_service:
+        name: docker
+        state: restarted
+
+# Ensure the local canonical bare repo exists + is seeded BEFORE Semaphore mounts it
+# (Semaphore clones file:///srv/kontroll.git — the instance source of truth, not GitHub).
+- name: Ensure the local canonical git
+  ansible.builtin.import_playbook: local-canonical.yml
+
+- name: Render docker/.env from SOPS and bring up the stack
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: true
+  vars:
+    stack_dir: "{{ playbook_dir }}/../../docker"
+    # True only inside the compose-native installer container (MF-6). The host-systemd residual below (the logrotate
+    # package + its /etc/logrotate.d drop-in) can't run in an ephemeral container — apt has no python3-apt for check
+    # mode, and a drop-in written to the container's /etc never reaches the host's logrotate. It moves to
+    # scripts/host-systemd.sh. (Dogfood-caught 2026-06-29.)
+    in_container: "{{ (lookup('env', 'KONTROLL_IN_CONTAINER') | default('', true)) | length > 0 }}"
+    # C0 (report 22): pull the kontroll-control (runner) + kontroll-vector images BY DIGEST from private ghcr instead
+    # of building them on the control node. Default OFF ⇒ the local docker_image_build path runs, byte-identical to
+    # before. When ON, the two build tasks skip and docker/.env pins KONTROLL_{CONTROL,VECTOR}_IMAGE from
+    # docker/images.lock.yml (requires `docker login ghcr.io` + a recorded digest — `gen-image-digests.py --refresh`).
+    use_published_images: false
+    # Phase B (bake-code): when true, the flipped services run code from the BAKED control image at /opt/kontroll
+    # instead of the host /repo clone, and write the C10 propose tree via paths.write_root() at /propose. Default OFF
+    # ⇒ the .env code-root vars are NOT emitted, so the compose `${KONTROLL_CODE_ROOT:-/repo}` defaults keep the
+    # legacy /repo-clone path byte-identical. Rung 1b flips ONLY the api fragment (lowest blast radius); onboard-gui +
+    # semaphore stay on /repo until their rungs. Requires a code-baked control image (publish-images Rung 1a).
+    bake_code: false
+    # Live phases. Phase 5 adds prometheus/grafana. Override with -e to deploy a subset.
+    stack_services: ["semaphore", "homepage"]
+    # C10 privileged-mutation enablement for the network-service tier — the API AND onboard-gui (default OFF;
+    # the read-only deploy is untouched). true ⇒ render the API token + KONTROLL_STAGE_PUSHES into .env and make
+    # each enabled surface's content clone writable by uid-1001 + add a `local` remote, so the network service
+    # can only PROPOSE (push proposed/<run_id>), never main. NO age key for the API (the no-key posture);
+    # onboard-gui keeps its host-provisioned age key for device-cred encryption. Requires `kontroll_api_token`
+    # in the dashboards SOPS domain.
+    # ALSO renders KONTROLL_CANONICAL_MODE=rw — Semaphore then mounts the canonical :rw so the `promote-proposal`
+    # task (the GUI "approve" half) can fast-forward main as gid 1001 (no host root). Include `semaphore` in
+    # stack_services when arming so it is recreated with the rw mount. docs/privileged-mutation-enablement.md /
+    # SECURITY.md C10.
+    api_privileged: false
+    # The instance secrets dir, resolved through the OVERLAY SEAM (set by the first task below from
+    # scripts/kontroll/paths.py) so deploy-stack's secret READ path is IDENTICAL to the GUI onboarding WRITE path
+    # (secrets.py overlay_target) — no hardcoded instance/secrets that could silently drift from the overlay map
+    # under a relocation (M4 / docs/reviews/2026-06-17-secret-injection/).
+    _secrets_dir: "{{ _secrets_dir_resolved.stdout }}"
+    # PLATFORM-CORE (intrinsic control-plane) creds — REQUIRED domains: a missing one HARD-FAILS the deploy (no
+    # errors='ignore'), which is correct — the stack cannot run without them. They are explicit, fail-CLOSED .env
+    # lines and do NOT grow with the fleet, so they are NOT data-driven (the secret-env boundary; SECURITY.md C12).
+    _sem: "{{ lookup('community.sops.sops', _secrets_dir ~ '/semaphore.sops.yml') | from_yaml }}"
+    _dash: "{{ lookup('community.sops.sops', _secrets_dir ~ '/dashboards.sops.yml') | from_yaml }}"
+    # DEVICE / CONSUMER creds — DATA-DRIVEN, ZERO per-domain hand-wiring (this REPLACES _proxmox/_snmp/_sops_domains
+    # + the hand-listed PVE_EXPORTER_* lines + the logging-only token loop). The GENERATED unified manifest
+    # (gen-secret-env.py, scanning every telemetry metrics: + logging logs: method's secret_env_map) maps each env
+    # var -> {secret_domain, str.format template over the domain's SOPS field NAMES}. The render loop (below)
+    # decrypts the UNION of referenced domains BY NAME and composes each env var via kontroll_render_token. A NEW
+    # credentialed exporter OR log-pull is a telemetry/<m>.yml or logging/<m>.yml secret_env_map drop-in — ZERO edit
+    # here, no _<domain> lookup, no domain->dict map.
+    _secret_env_manifest: "{{ playbook_dir }}/../../config/secret-env.manifest.generated.yml"
+    _secret_env: >-
+      {{ (lookup('file', _secret_env_manifest, errors='ignore')
+      | from_yaml | default({}, true)).get('env', {}) }}
+    # The UNION of device-cred domains the manifest references, decrypted BY NAME, fail-SOFT PER DOMAIN (an absent
+    # file -> {} via the kontroll_sops_domain filter, so a fresh node without a domain onboarded still deploys with
+    # those env vars empty — never a hard fail). LAZY: a play var evaluated ONLY when dereferenced inside the no_log
+    # render task, never set_fact'd, so no decrypted value persists outside the no_log boundary (M3).
+    _referenced_domains: >-
+      {{ _secret_env.values() | map(attribute='secret_domain') | select('string') | unique | list }}
+    _device_domains: >-
+      {{ dict(_referenced_domains | zip(_referenced_domains | map('kontroll_sops_domain', _secrets_dir))) }}
+    # Per-instance frontend exposure (instance/instance.yml) -> uvicorn TLS flags, via the resolver seam.
+    _frontend_resolver: "{{ playbook_dir }}/../../scripts/kontroll/frontend.py"
+    _instance: "{{ lookup('file', playbook_dir ~ '/../../instance/instance.yml') | from_yaml }}"
+    # This node's mgmt IP + base domain → ${KONTROLL_MGMT_IP}/${KONTROLL_DOMAIN} in docker/.env, so the compose
+    # port binds listen mgmt-only (C3) and service URLs use the instance domain. Default mgmt_ip to loopback (never
+    # 0.0.0.0); compose's ${KONTROLL_MGMT_IP:?…} also fails closed if this somehow renders empty.
+    _mgmt_ip: "{{ _instance.mgmt_ip | default('127.0.0.1') }}"
+    _domain: "{{ _instance.domain | default('') }}"
+    _tls_mode_raw: "{{ (_instance.frontend | default({})).tls_mode | default('') }}"
+    # F3 — how this instance promotes a staged proposal (instance.yml top-level `trust_mode`). Read like
+    # _tls_mode_raw; UNLIKE tls_mode it has NO safe default — an unset/garbage value HARD-FAILS the deploy below
+    # (kontroll never guesses a trust posture). 'separated' (human promote, prod) | 'solo' (auto-promote, homelab).
+    _trust_mode: "{{ _instance.trust_mode | default('') }}"
+    _acme_domain: "{{ (_instance.frontend | default({})).domain | default('') }}"
+    _acme_email: "{{ (_instance.frontend | default({})).acme_email | default('') }}"
+    _acme_dns_provider: "{{ (_instance.frontend | default({})).dns_provider | default('') }}"
+    # Operator-pinned device CA host paths (PUBLIC certs) from instance.yml device_trust.<key>.tls_ca_file —
+    # cat into ONE bundle (below) BOTH Vector + the pve-exporter verify against (the no-bespoke TLS hardening path).
+    _ca_paths: >-
+      {{ (_instance.device_trust | default({}, true)).values()
+         | map(attribute='tls_ca_file') | select('string') | list }}
+    # Operator-pinned SSH host keys (PUBLIC) from instance.yml device_trust.<key>.ssh_known_hosts_file — cat into
+    # ONE known_hosts Vector's file_tail_ssh exec ssh reads RO (no TOFU). Sibling of _ca_paths (the same pattern).
+    _known_hosts_paths: >-
+      {{ (_instance.device_trust | default({}, true)).values()
+         | map(attribute='ssh_known_hosts_file') | select('string') | list }}
+  tasks:
+    - name: Resolve the instance secrets dir through the overlay seam (deploy READ == GUI onboarding WRITE; M4)
+      # Single source of truth: the SAME resolver (scripts/kontroll/paths.py) the service layer uses, so a future
+      # instance/ relocation can't split deploy-stack's secret READ path from the GUI's WRITE path (secrets.py).
+      # Runs FIRST so _secrets_dir (a lazy play var referencing this) resolves before any secret deref.
+      # check_mode:false (here + the sibling resolvers below): a plain `command` is SKIPPED under `--check`, so
+      # without it _secrets_dir_resolved.stdout is empty -> _secrets_dir empties -> the .env render's SOPS lookups
+      # crash (`could not locate file: /semaphore.sops.yml`), making the mandated `--check --diff` dry-run unusable.
+      # These resolvers only READ (resolve a path/flag), so running them in check mode is safe + makes --check work.
+      ansible.builtin.command:
+        cmd: python3 {{ playbook_dir }}/../../scripts/kontroll/paths.py resolve ansible/secrets
+      changed_when: false
+      check_mode: false
+      register: _secrets_dir_resolved
+
+    - name: Resolve the API uvicorn TLS flags from the instance frontend mode (config-as-data)
+      ansible.builtin.command:
+        cmd: python3 {{ _frontend_resolver }} uvicorn-extra {{ _tls_mode_raw | quote }}
+      changed_when: false
+      check_mode: false   # read-only resolver — see _secrets_dir_resolved above
+      register: _uvicorn_extra
+
+    - name: Resolve whether this frontend mode provisions a self-signed cert
+      ansible.builtin.command:
+        cmd: python3 {{ _frontend_resolver }} needs-cert {{ _tls_mode_raw | quote }}
+      changed_when: false
+      check_mode: false   # read-only resolver — see _secrets_dir_resolved above
+      register: _needs_cert
+
+    - name: Resolve whether this frontend mode runs the Caddy ingress (acme)
+      ansible.builtin.command:
+        cmd: python3 {{ _frontend_resolver }} runs-caddy {{ _tls_mode_raw | quote }}
+      changed_when: false
+      check_mode: false   # read-only resolver — see _secrets_dir_resolved above
+      register: _runs_caddy
+
+    - name: Resolve the storage-location root (the C8 at-rest paradigm — one var feeds every store)
+      # Every relocatable BIND store derives from KONTROLL_STORAGE_ROOT (operator override via -e / instance
+      # vars; default = today's /var/lib/kontroll). The SAME resolved value feeds BOTH the compose bind source
+      # (the rendered .env below) AND this play's chown tasks — so a relocated store is always created
+      # uid-scoped BEFORE `up`, never a Docker-auto-created root:root 0755 hole (the G9 / C8 failure).
+      # default(..., true) collapses an explicit-empty value to the safe default (Jinja default() is
+      # empty-blind otherwise → an empty -e would derive a host-root path like /loki).
+      ansible.builtin.set_fact:
+        kontroll_storage_root: "{{ kontroll_storage_root | default('/var/lib/kontroll', true) }}"
+
+    - name: Fail closed on an unsafe storage root (must be an absolute path, never '/' — C8)
+      ansible.builtin.assert:
+        that:
+          - kontroll_storage_root is match('^/.+')                       # absolute, at least one segment
+          - "kontroll_storage_root | regex_replace('/+', '/') != '/'"    # reject '/', '//', '///'
+        fail_msg: "KONTROLL_STORAGE_ROOT must be an absolute path other than '/' (got '{{ kontroll_storage_root }}')"
+
+    - name: Fail closed on an unset/invalid trust_mode (you MUST choose your promote posture — F3, never a default)
+      # The "never a silent default" rule at deploy time (belt-and-braces with kontroll-init's --fresh guard +
+      # the COMMENTED template line): a copied-but-unedited overlay, a typo, or a hand-deleted line can't silently
+      # fall back to prod-or-homelab. Gated on the network-service tier — a metrics-only deploy has no promote path.
+      ansible.builtin.assert:
+        that: _trust_mode in ['solo', 'separated']
+        fail_msg: >-
+          instance/instance.yml trust_mode is '{{ _trust_mode | default('unset', true) }}' — set it to 'separated'
+          (a human runs the promote-proposal Semaphore task; prod) or 'solo' (auto-promote; homelab — the
+          auto-promoter ships later). kontroll never picks your posture for you. See docs/trust-mode.md.
+        quiet: true
+      when: ('api' in stack_services) or ('onboard-gui' in stack_services)
+
+    - name: Derive the per-store dirs from the validated root (today-exact defaults — behaviour-preserving)
+      # The HIGH-growth / audit stores carry their own operator override (a separate data disk); api/onboard-gui/
+      # caddy are LOW-growth config and derive <root>/<cat> with no operator knob (they follow the root). Each
+      # default preserves today's EXACT path, so a no-override deploy binds + chowns exactly where it does today.
+      ansible.builtin.set_fact:
+        kontroll_logs_dir: "{{ kontroll_logs_dir | default(kontroll_storage_root ~ '/loki', true) }}"
+        kontroll_backups_dir: "{{ kontroll_backups_dir | default(kontroll_storage_root ~ '/backups', true) }}"
+        kontroll_api_audit_dir: "{{ kontroll_api_audit_dir | default(kontroll_storage_root ~ '/api/audit', true) }}"
+        kontroll_gui_audit_dir: >-
+          {{ kontroll_gui_audit_dir | default(kontroll_storage_root ~ '/onboard-gui/audit', true) }}
+        kontroll_ansible_log_dir: >-
+          {{ kontroll_ansible_log_dir | default(kontroll_storage_root ~ '/ansible-log', true) }}
+        kontroll_api_dir: "{{ kontroll_storage_root ~ '/api' }}"
+        kontroll_gui_dir: "{{ kontroll_storage_root ~ '/onboard-gui' }}"
+        kontroll_caddy_dir: "{{ kontroll_storage_root ~ '/caddy' }}"
+        kontroll_vector_dir: "{{ kontroll_storage_root ~ '/vector' }}"   # holds the file_tail_ssh read key (S11)
+
+    - name: Detect whether any class declares the file_tail_ssh log method (gates the custom Vector image + key)
+      # file_tail_ssh's Vector `exec` source runs `ssh ... journalctl` to PULL a remote host's journald — the
+      # STOCK Vector image has no ssh client (bench-verified), so ONLY when a class declares this method do we
+      # build + point KONTROLL_VECTOR_IMAGE at the thin kontroll/vector image (stock + openssh-client) and render
+      # the read key. Detected from the COMMITTED generated tree (CI's gen-logging --check keeps it == the declared
+      # set); gen-logging below regenerates it, but the .env image var must be decided BEFORE that. UNGATED so the
+      # var is always defined for the render; harmless (matched 0) on every instance that doesn't use the method.
+      ansible.builtin.find:
+        paths: "{{ playbook_dir }}/../../docker/vector/generated"
+        patterns: "file_tail_ssh_*.generated.yaml"
+      register: _file_tail_ssh_decls
+      changed_when: false
+
+    - name: Discover the host systemd-journal GID (group_add for the non-root Vector journald read)
+      # The journal dirs are root:systemd-journal 2750 (group-readable). Non-root Vector reads them via a
+      # supplementary group = this GID, which is host-assigned (NOT portable across distros), so DISCOVER it here
+      # and render it NUMERICALLY into .env (compose group_add needs a number, not a name). Same "discover the host
+      # fact at deploy" pattern as the storage-root + arch-map resolution. Fail-SOFT: a host without the group
+      # yields '' -> Vector's group_add falls back to the inert 65534 (nogroup) default (reads nothing extra), the
+      # honest degrade (GATE A then shows no journald lines), never a deploy failure.
+      ansible.builtin.command:
+        cmd: getent group systemd-journal
+      register: _journal_grp
+      changed_when: false
+      failed_when: false
+      check_mode: false   # read-only getent — resolve the GID under --check too (gated on vector)
+      when: "'vector' in stack_services"
+
+    - name: Extract the numeric systemd-journal GID (fail-soft empty)
+      ansible.builtin.set_fact:
+        kontroll_journal_gid: "{{ (_journal_grp.stdout.split(':')[2]) if (_journal_grp.stdout | default('')) else '' }}"
+      when: "'vector' in stack_services"
+
+    - name: Render docker/.env (secrets — never logged)
+      ansible.builtin.copy:
+        dest: "{{ stack_dir }}/.env"
+        # operator-owned so non-root tooling (validate) + a non-root `compose up` can read it. MF-1: this play does
+        # NOT gather facts and runs as root in-container, so `lookup('env','USER')` resolves to 'root' there — the
+        # launcher passes the host operator's NUMERIC uid/gid in KONTROLL_OPERATOR_{UID,GID}; host-direct keeps the
+        # exact `lookup('env','USER')` name (byte-identical). Without it the non-root operator's compose up hard-fails.
+        owner: "{{ lookup('env', 'KONTROLL_OPERATOR_UID') or lookup('env', 'USER') }}"
+        group: "{{ lookup('env', 'KONTROLL_OPERATOR_GID') or lookup('env', 'USER') }}"
+        mode: "0600"
+        content: |
+          # GENERATED by ansible/playbooks/deploy-stack.yml from the SOPS service
+          # domains. Do not edit by hand; do not commit (gitignored). Re-render by
+          # re-running deploy-stack.yml.
+          KONTROLL_MGMT_IP={{ _mgmt_ip }}
+          KONTROLL_DOMAIN={{ _domain }}
+          SEMAPHORE_DB_PASSWORD={{ _sem.semaphore_db_password }}
+          SEMAPHORE_ADMIN={{ _sem.semaphore_admin }}
+          SEMAPHORE_ADMIN_PASSWORD={{ _sem.semaphore_admin_password }}
+          SEMAPHORE_ADMIN_EMAIL={{ _sem.semaphore_admin_email }}
+          SEMAPHORE_ACCESS_KEY_ENCRYPTION={{ _sem.semaphore_access_key_encryption }}
+          GRAFANA_ADMIN_PASSWORD={{ _dash.grafana_admin_password }}
+          LOKI_RETENTION_PERIOD={{ loki_retention_period | default('720h') }}
+          PROM_RETENTION_TIME={{ prom_retention_time | default('90d') }}
+          PROM_RETENTION_SIZE={{ prom_retention_size | default('20GB') }}
+          KONTROLL_AUDIT_MAX_MB={{ kontroll_audit_max_mb | default('5') }}
+          KONTROLL_AUDIT_MAX_FILES={{ kontroll_audit_max_files | default('5') }}
+          KONTROLL_OPERATOR_HOME={{ lookup('env', 'KONTROLL_OPERATOR_HOME') or lookup('env', 'HOME') }}
+          KONTROLL_STORAGE_ROOT={{ kontroll_storage_root }}
+          KONTROLL_LOGS_DIR={{ kontroll_logs_dir }}
+          KONTROLL_BACKUPS_DIR={{ kontroll_backups_dir }}
+          KONTROLL_API_AUDIT_DIR={{ kontroll_api_audit_dir }}
+          KONTROLL_GUI_AUDIT_DIR={{ kontroll_gui_audit_dir }}
+          KONTROLL_ANSIBLE_LOG_DIR={{ kontroll_ansible_log_dir }}
+          KONTROLL_JOURNAL_GID={{ kontroll_journal_gid | default('') }}
+          {# Phase B (bake-code): when bake_code, the flipped services run code from the BAKED control image at
+             /opt/kontroll (KONTROLL_CODE_ROOT — working_dir/PYTHONPATH) and write the C10 propose tree at /propose
+             (KONTROLL_WRITE_ROOT, the paths.write_root() seam + the mount target). ABSENT by default ⇒ the compose
+             `${KONTROLL_CODE_ROOT:-/repo}` / `${KONTROLL_WRITE_ROOT:-/repo}` defaults keep the legacy /repo-clone path
+             byte-identical. Only the api fragment reads them in Rung 1b (onboard-gui/semaphore hardcode /repo). #}
+          {% if bake_code %}
+          KONTROLL_CODE_ROOT=/opt/kontroll
+          KONTROLL_WRITE_ROOT=/propose
+          {% endif %}
+          {# Gated custom Vector image (stock + openssh-client) — emitted ONLY when a class declares file_tail_ssh
+             (its exec-ssh source needs an ssh client the stock image lacks). Absent => compose uses the stock
+             pinned default (${KONTROLL_VECTOR_IMAGE:-timberio/vector:0.56.0-debian} in docker/services/vector.yaml). #}
+          {% if (_file_tail_ssh_decls.matched | default(0)) | int > 0 and not use_published_images %}
+          KONTROLL_VECTOR_IMAGE=kontroll/vector:latest
+          {% endif %}
+          GUI_USER={{ _dash.gui_admin_user | default('admin') }}
+          GUI_PASSWORD={{ _dash.gui_admin_password | default('') }}
+          GUI_TLS_CERT={{ '/tls/gui.crt' if _needs_cert.stdout == 'yes' else '' }}
+          GUI_TLS_KEY={{ '/tls/gui.key' if _needs_cert.stdout == 'yes' else '' }}
+          {# --- DEVICE / CONSUMER creds — ONE generic loop over the UNIFIED secret->env manifest. Each entry is
+             <env>=<value>, the value composed from its secret_domain (decrypted by name, fail-soft) via the
+             kontroll_render_token filter (str.format over the domain dict; '' if the domain/field is absent). NO
+             per-device line, NO per-domain lookup, NO domain->dict map: this ONE loop renders both the telemetry
+             exporter env (PVE_EXPORTER_*) and the logging token (KONTROLL_PVE_LOG_TOKEN) and any future credentialed
+             exporter/pull. A new one is a telemetry/<m>.yml or logging/<m>.yml secret_env_map drop-in — ZERO edit
+             here. The whole task is no_log; the decrypted _device_domains is deref'd ONLY inside this block. #}
+          {% for env, spec in _secret_env.items() %}
+          {{ env }}={{ spec.template | kontroll_render_token(_device_domains.get(spec.secret_domain, {})) }}
+          {% endfor %}
+          KONTROLL_API_UVICORN_EXTRA={{ _uvicorn_extra.stdout }}
+          {% if api_privileged | bool %}KONTROLL_API_TOKEN={{ _dash.kontroll_api_token }}
+          KONTROLL_STAGE_PUSHES=1
+          KONTROLL_CANONICAL_MODE=rw
+          {% endif %}
+      no_log: true
+
+    # C0 (report 22): when use_published_images, pin KONTROLL_{CONTROL,VECTOR}_IMAGE to the ghcr @sha256 digests
+    # from docker/images.lock.yml so the compose fragments pull-by-digest instead of using the locally-built image.
+    # gen-image-digests.py --env is OFFLINE (reads the committed lock); the control node must `docker login ghcr.io`.
+    - name: Read the published image digests from docker/images.lock.yml (offline)
+      ansible.builtin.command:
+        cmd: python3 scripts/gen-image-digests.py --env
+        chdir: "{{ playbook_dir }}/../.."
+      register: _img_env
+      changed_when: false
+      # Run even under --check (the `kontroll check` dry-run): a READ-ONLY offline lock read, and the fail-closed
+      # assert below needs its output — without check_mode:false the command is SKIPPED in --check and the assert
+      # wrongly fires "no recorded digest" (dogfood-caught 2026-06-29, the published-image `check` path).
+      check_mode: false
+      when: use_published_images
+
+    - name: Fail closed if use_published_images is set but no digest is recorded
+      ansible.builtin.assert:
+        that: _img_env.stdout | default('') | length > 0
+        fail_msg: >-
+          use_published_images=true but docker/images.lock.yml has no recorded digest. Publish a tag (the
+          publish-images workflow), then `docker login ghcr.io` + `python3 scripts/gen-image-digests.py --refresh
+          <tag>` and commit the lock — or deploy with use_published_images=false to build the images locally.
+      when: use_published_images
+
+    - name: Pin the published image digests into docker/.env (compose then pulls by digest)
+      ansible.builtin.blockinfile:
+        path: "{{ stack_dir }}/.env"
+        marker: "# {mark} kontroll published images (docker/images.lock.yml — C0)"
+        block: "{{ _img_env.stdout }}"
+        owner: "{{ lookup('env', 'KONTROLL_OPERATOR_UID') or lookup('env', 'USER') }}"
+        group: "{{ lookup('env', 'KONTROLL_OPERATOR_GID') or lookup('env', 'USER') }}"
+        mode: "0600"
+      when: use_published_images
+      no_log: true
+
+    - name: Regenerate the observability scrape targets from the modules + inventory (config-as-data)
+      # The metrics analogue of gen-requirements.py: prometheus/targets/<job>/<key>.generated.yml are
+      # derived from each enabled module's metrics: block x the inventory, so the deployed scrape set always
+      # reflects the live fleet. become:false — writes the operator-owned repo tree, never a root path.
+      ansible.builtin.command:
+        cmd: python3 {{ playbook_dir }}/../../scripts/gen-observability.py
+      become: false
+      changed_when: false
+      when: "'prometheus' in stack_services"
+
+    - name: Regenerate the proxy-exporter scrape jobs from the telemetry registry (config-as-data)
+      # prometheus/jobs.d/<job>.generated.yml — the proxy-exporter jobs (pve; snmp/blackbox later) that used
+      # to be hand-written in prometheus.yml, now derived from telemetry/<name>.yml. become:false — writes
+      # the operator-owned repo tree only.
+      ansible.builtin.command:
+        cmd: python3 {{ playbook_dir }}/../../scripts/gen-prometheus-jobs.py
+      become: false
+      changed_when: false
+      when: "'prometheus' in stack_services"
+
+    - name: Regenerate the proxy-exporter container fragments from the telemetry registry (config-as-data)
+      # docker/services/<container>.generated.yaml — the exporter containers (pve; snmp/blackbox later) that
+      # used to be hand-authored compose fragments, now derived from telemetry/<name>.yml's exporter: block.
+      ansible.builtin.command:
+        cmd: python3 {{ playbook_dir }}/../../scripts/gen-exporters.py
+      become: false
+      changed_when: false
+      when: "'prometheus' in stack_services"
+
+    - name: Regenerate the Vector logging config + Loki retention overrides from the modules (config-as-data)
+      # The logging analogue: docker/vector/generated/* (Vector source/transform/sink fragments) AND
+      # docker/loki/overrides/retention.generated.yaml (the per-class Loki retention, a hot-reloaded
+      # runtime_config overrides file keyed on tenant `fake`). Both derive from each enabled module's logs:
+      # block, so the deployed pipeline + retention always reflect the live fleet. Regenerating BEFORE the
+      # stack comes up guarantees Loki reads a fresh, valid overrides file (an invalid one is fatal at startup —
+      # M-1 F4). become:false — writes the operator-owned repo tree, never a root path.
+      ansible.builtin.command:
+        cmd: python3 {{ playbook_dir }}/../../scripts/gen-logging.py
+      become: false
+      changed_when: false
+      when: "'loki' in stack_services"
+
+    - name: Regenerate the Homepage Fleet tile group from the onboarded fleet (config-as-data)
+      # The portal-tile analogue: rewrites ONLY the `# >>> kontroll fleet` marked span inside
+      # instance/dashboards/homepage/services.yaml — one href+description tile per onboarded host (enabled
+      # modules x inventory), so the portal's Fleet group always reflects the live fleet. Operator tiles outside
+      # the markers are preserved byte-for-byte. become:false — writes the operator-owned repo tree, never a root
+      # path; the bare write reads the private instance/ overlay (real addrs stay local, never committed to origin).
+      ansible.builtin.command:
+        cmd: python3 {{ playbook_dir }}/../../scripts/gen-homepage.py
+      become: false
+      changed_when: false
+      when: "'homepage' in stack_services"
+
+    - name: Detect whether any class declares the journald_remote log method (gates the receiver below)
+      # The receiver (a host package + a mgmt-bound :19532 daemon) is provisioned ONLY when a class actually
+      # declares journald_remote — gen-logging (above) renders journald_remote_<key>.generated.yaml iff so. This
+      # keeps the "only provision what's declared" modularity (no unused listening daemon on a logging-only stack).
+      ansible.builtin.find:
+        paths: "{{ playbook_dir }}/../../docker/vector/generated"
+        patterns: "journald_remote_*.generated.yaml"
+      register: _journald_remote_decls
+      changed_when: false
+      when: "'vector' in stack_services"
+
+    - name: Provision the collector-side journald-upload receiver (systemd-journal-remote, mgmt-bound :19532)
+      # When a class declares journald_remote, the remote host's systemd-journal-upload ships its journal here;
+      # this role runs systemd-journal-remote bound to the MGMT IP only, writing /var/log/journal-remote/ for the
+      # method's Vector `exec` journalctl source (logging/journald_remote.yml; bind-mounted into Vector). WHY a
+      # journal-remote receiver + journalctl read, not a Vector http_server/journald source: LIVE-DISPROVEN +
+      # PROVEN on the bench (local/s10-journald-receiver-bench-findings.md; the reverted PR #12/#13).
+      ansible.builtin.include_role:
+        name: logging_journald_receiver
+      vars:
+        logging_collector_host: "{{ _mgmt_ip }}"   # noqa: var-naming[no-role-prefix]  bind :19532 to mgmt IP only (C3)
+      when: "'vector' in stack_services and (_journald_remote_decls.matched | default(0)) > 0"
+
+    - name: Render the snmp_exporter config from the template + the SNMPv3 creds (no_log; gitignored, 0600)
+      # prometheus/exporters/snmp/snmp.yml — the snmp_exporter v3 USM creds + module defs, rendered from
+      # snmp.yml.j2 + the snmp_observability SOPS domain. The rendered file holds the creds, so it is 0600 +
+      # gitignored (a tests/validate check enforces it stays untracked). become:false — operator-owned tree.
+      # This is the THIRD injection shape (a secret into a config FILE, not an env var) — intentionally a separate
+      # named task, NOT folded into the secret-env loop (docs/reviews/2026-06-17-secret-injection/).
+      vars:
+        # The snmp_observability SOPS domain (SNMPv3 USM creds), decrypted TASK-LOCAL (the shared _snmp var went away
+        # with _sops_domains) and keyed on the descriptor's secret_domain == the file stem (snmp_observability —
+        # never the old _sops_domains 'snmp' key). fail-SOFT (absent -> {}); deref'd only inside this no_log task.
+        _snmp: >-
+          {{ (lookup('community.sops.sops', _secrets_dir ~ '/snmp_observability.sops.yml', errors='ignore')
+          | from_yaml) or {} }}
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../../prometheus/exporters/snmp/snmp.yml.j2"
+        dest: "{{ playbook_dir }}/../../prometheus/exporters/snmp/snmp.yml"
+        mode: "0600"
+      become: false
+      no_log: true
+      # _snmp ABSENT on a fresh node until the operator onboards SNMP -> skip the render (the template dereferences
+      # the creds; the snmp_exporter has nothing to scrape anyway). It renders once the domain exists.
+      when: "'prometheus' in stack_services and (_snmp | length > 0)"
+
+    - name: Ensure the Vector host dir exists (holds the file_tail_ssh key + the device CA bundle; Vector-uid owned)
+      # Vector runs NON-ROOT (uid 10002, C12), and SSH refuses a private key not owned by the running uid — so the
+      # key + its 0700 dir are owned by 10002, not root. 0700 restricts it tightly; the per-file bind mounts (key,
+      # CA) are set up by the root daemon, so the 0700 dir doesn't block either container from reading the bound
+      # files (the pve-exporter binds the 0644 CA from here too — the one shared bundle both consumers verify).
+      ansible.builtin.file:
+        path: "{{ kontroll_vector_dir }}"
+        state: directory
+        owner: "10002"
+        group: "10002"
+        mode: "0700"
+      when: "'vector' in stack_services or 'prometheus' in stack_services"
+
+    - name: Ensure the Vector data dir exists (non-root checkpoint/buffer store; 10002-owned, NOT a named volume)
+      # Vector's data_dir (/var/lib/vector) bind SOURCE. Created 10002:10002 so the non-root Vector can write its
+      # journald checkpoint + disk buffers; a named volume would init root:root and a MISSING bind source would be
+      # auto-created root:root by Docker (G9) — either way non-root Vector exits "Permission denied" (dogfood-caught).
+      ansible.builtin.file:
+        path: "{{ kontroll_vector_dir }}/data"
+        state: directory
+        owner: "10002"
+        group: "10002"
+        mode: "0700"
+      when: "'vector' in stack_services"
+
+    - name: Render the file_tail_ssh read PRIVATE key from the logging_file_tail SOPS domain (no_log; 0600)
+      # The THIRD injection shape (a secret into a FILE, like snmp.yml.j2 — NOT an env var, so no secret_env_map):
+      # Vector's exec source authenticates with this key; the matching PUBLIC key is authorized (forced-command,
+      # `journalctl -f -o json`) on the target by roles/logging_file_tail_ssh. Decrypted TASK-LOCAL, deref'd only
+      # inside this no_log task. Rendered only when the domain exists; the placeholder task below keeps the bind
+      # valid until then (a creds gap blanks one stream, never fails the deploy — parity with rest_pull).
+      vars:
+        _ftssh: >-
+          {{ (lookup('community.sops.sops', _secrets_dir ~ '/logging_file_tail.sops.yml', errors='ignore')
+          | from_yaml) or {} }}
+      ansible.builtin.copy:
+        dest: "{{ kontroll_vector_dir }}/file_tail_ssh.key"
+        content: "{{ _ftssh.ssh_private_key }}"
+        owner: "10002"          # the Vector runtime uid — SSH refuses a key not owned by the running uid (C12)
+        group: "10002"
+        mode: "0600"
+      no_log: true
+      when: "'vector' in stack_services and (_ftssh.ssh_private_key | default('')) | length > 0"
+
+    - name: Ensure the file_tail_ssh key file exists even when no key is onboarded (valid file-bind; G9)
+      # The vector.yaml file-bind needs a FILE at the source path — a MISSING source is auto-created by Docker as
+      # a root:root DIR, breaking both the mount and ssh. When the domain isn't onboarded, leave an empty 0600
+      # placeholder (force:false => NEVER clobber a rendered real key): the exec source — only generated when
+      # file_tail_ssh is declared — then fails to auth and BLANKS its stream, never the deploy.
+      ansible.builtin.copy:
+        dest: "{{ kontroll_vector_dir }}/file_tail_ssh.key"
+        content: ""
+        owner: "10002"          # the Vector runtime uid (C12 non-root); matches the rendered-key task above
+        group: "10002"
+        mode: "0600"
+        force: false
+      when: "'vector' in stack_services"
+
+    # The no-bespoke TLS hardening path: cat every device_trust.<key>.tls_ca_file into ONE bundle BOTH consumers
+    # verify against (Vector source.tls.ca_file + the pve-exporter REQUESTS_CA_BUNDLE) — pinning a CA needs NO hub
+    # edit. ALWAYS written so the static vector.yaml bind resolves to a FILE (G9) AND the on-disk bundle matches the
+    # CURRENT pin set (un-pinning rewrites it empty). SPLIT pinned/empty because the no-pin DEFAULT (self_signed /
+    # no-`device_trust`) must still write a file, and ansible.builtin.copy REJECTS empty `content` (`src (or
+    # content) is required`) — so the empty case writes a single newline (a one-task `{% for %}` that renders ""
+    # broke every no-CA deploy on Ansible 2.19+; a trailing literal newline doesn't help — Jinja trim_blocks eats
+    # it). A CA is PUBLIC (not a SOPS secret) -> 0644, NO no_log; an absent pinned PEM fails LOUD (lookup errors).
+    - name: Assemble the operator-pinned device CA bundle (PUBLIC certs; for Vector + the pve-exporter)
+      ansible.builtin.copy:
+        dest: "{{ kontroll_vector_dir }}/device-ca-bundle.pem"
+        content: "{% for p in _ca_paths %}{{ lookup('file', playbook_dir ~ '/../../' ~ p) }}\n{% endfor %}"
+        owner: "10002"          # Vector runtime uid (C12 non-root); 0644 already world-readable so uid is tidiness
+        group: "10002"
+        mode: "0644"
+      when: "(_ca_paths | length > 0) and ('vector' in stack_services or 'prometheus' in stack_services)"
+
+    - name: Write an empty device CA bundle when none pinned (G9 file-bind; clears any stale CA)
+      ansible.builtin.copy:
+        dest: "{{ kontroll_vector_dir }}/device-ca-bundle.pem"
+        content: "\n"           # whitespace-only — NOT '' (copy rejects an empty string as absent)
+        owner: "10002"
+        group: "10002"
+        mode: "0644"
+      when: "(_ca_paths | length == 0) and ('vector' in stack_services or 'prometheus' in stack_services)"
+
+    # The no-TOFU pinning path: cat every device_trust.<key>.ssh_known_hosts_file into ONE known_hosts Vector's
+    # exec ssh reads RO (StrictHostKeyChecking=yes). Same pinned/empty split + reasoning as the CA bundle above:
+    # the empty case (no host key pinned) writes a single newline so the static bind resolves to a FILE (G9) — an
+    # empty string would be rejected by copy. PUBLIC host keys (not a secret) -> 0644, Vector-uid-owned, NO no_log;
+    # an absent pinned file fails LOUD. With StrictHostKeyChecking=yes + empty known_hosts the exec ssh refuses
+    # every connect (fail-closed) until the operator pins the host key — surfaced by the warn task below.
+    - name: Assemble the operator-pinned file_tail_ssh known_hosts (PUBLIC host keys; no-TOFU hardening)
+      ansible.builtin.copy:
+        dest: "{{ kontroll_vector_dir }}/file_tail_known_hosts"
+        content: "{% for p in _known_hosts_paths %}{{ lookup('file', playbook_dir ~ '/../../' ~ p) }}\n{% endfor %}"
+        owner: "10002"
+        group: "10002"
+        mode: "0644"
+      when: "('vector' in stack_services) and (_known_hosts_paths | length > 0)"
+
+    - name: Write an empty file_tail_ssh known_hosts when none pinned (G9 file-bind)
+      ansible.builtin.copy:
+        dest: "{{ kontroll_vector_dir }}/file_tail_known_hosts"
+        content: "\n"
+        owner: "10002"
+        group: "10002"
+        mode: "0644"
+      when: "('vector' in stack_services) and (_known_hosts_paths | length == 0)"
+
+    - name: Warn when file_tail_ssh is declared but no host key is pinned (the stream will blank, fail-closed)
+      # NON-GATING surfacing (MF-4): with StrictHostKeyChecking=yes + an EMPTY known_hosts, the exec ssh REFUSES
+      # every connect, so a file_tail_ssh class produces NO logs until the operator pins the host key (out-of-band,
+      # then device_trust.<key>.ssh_known_hosts_file). Surface that prerequisite loudly; never fail the deploy.
+      ansible.builtin.debug:
+        msg: >-
+          file_tail_ssh is declared but no device_trust.<key>.ssh_known_hosts_file is pinned — the exec-ssh log
+          stream will BLANK (StrictHostKeyChecking=yes, fail-closed) until you pin the target host key. This is a
+          provisioning prerequisite, not an error.
+      when:
+        - "'vector' in stack_services"
+        - "(_file_tail_ssh_decls.matched | default(0)) | int > 0"
+        - "_known_hosts_paths | length == 0"
+
+    - name: Build the custom Vector image (stock + openssh-client) for the file_tail_ssh exec-ssh source
+      # ONLY when a class declares file_tail_ssh — the stock image has no ssh client (bench-verified). .env points
+      # KONTROLL_VECTOR_IMAGE at kontroll/vector:latest under the SAME condition, so compose runs this image; every
+      # other instance keeps the stock pinned default. Build context = docker/vector-image (the Dockerfile only).
+      community.docker.docker_image_build:
+        name: kontroll/vector:latest
+        path: "{{ playbook_dir }}/../../docker/vector-image"
+        dockerfile: Dockerfile
+        pull: false
+        rebuild: always
+      when:
+        - "'vector' in stack_services"
+        - "(_file_tail_ssh_decls.matched | default(0)) | int > 0"
+        - not use_published_images          # C0: pull kontroll-vector by digest instead
+
+    - name: Regenerate the runner's collection lockfile from the enabled modules (config-as-data; the image bakes it)
+      # The runner image (built below) COPYs ansible/collections/requirements.generated.yml — a GENERATED,
+      # gitignored artifact derived from modules/_core.yml + each enabled module's module.yml (instance/fleet.yml).
+      # A fresh node (or a fleet change) has none / a stale one, so the image build fails "not found". Regenerate it
+      # here — exactly like every other config-as-data artifact above — so deploy-stack is SELF-SUFFICIENT and a
+      # fresh install needs no prior bootstrap.yml. (Found live by the blind-human install walkthrough, 2026-06-19;
+      # gen-requirements.py is the same single-source generator bootstrap uses — never a hand-listed set, CLAUDE.md.)
+      ansible.builtin.command:
+        cmd: python3 scripts/gen-requirements.py
+        chdir: "{{ playbook_dir }}/../.."
+      changed_when: false
+      when:
+        - ('semaphore' in stack_services) or ('api' in stack_services) or ('onboard-gui' in stack_services)
+        - not use_published_images          # C0: a published runner bakes the all-modules superset in CI, not here
+
+    - name: Build the Semaphore runner image (stock + sops/age + baked collections)
+      community.docker.docker_image_build:
+        name: kontroll/semaphore:latest
+        path: "{{ playbook_dir }}/../.."
+        dockerfile: docker/semaphore-runner/Dockerfile
+        pull: false
+        rebuild: always          # pick up Dockerfile/lockfile changes (layer cache keeps it fast)
+      when:
+        - ('semaphore' in stack_services) or ('api' in stack_services) or ('onboard-gui' in stack_services)
+        - not use_published_images          # C0: pull kontroll-control by digest instead (use_published_images)
+
+    - name: Ensure the persistent backups dir exists (runner-writable, secret-bearing)
+      ansible.builtin.file:
+        path: "{{ kontroll_backups_dir }}"
+        state: directory
+        owner: "1001"           # semaphore runtime uid — captures are written by the container
+        group: "1001"
+        mode: "0700"            # captures hold device secrets; restrict tightly
+      when: "'semaphore' in stack_services"
+
+    - name: Ensure the Loki store dir exists (filesystem TSDB + compactor; secret-adjacent at rest — C12/C8)
+      ansible.builtin.file:
+        path: "{{ kontroll_logs_dir }}"
+        state: directory
+        owner: "10001"          # Loki's official-image uid; the BIND MOUNT (not a named volume) keeps the log
+        group: "10001"          # bodies inside the C8 crown-jewel-at-rest boundary, like the backup captures.
+        mode: "0750"
+      when: "'loki' in stack_services"
+
+    - name: Ensure the persistent API audit-log dir exists (fix — audit log off ephemeral /tmp; Vector tails it)
+      ansible.builtin.file:
+        path: "{{ kontroll_api_audit_dir }}"
+        state: directory
+        owner: "1001"
+        group: "1001"
+        # 0755 (was 0750): non-root Vector (uid 10002) reads the audit TSV via world-read — NOT via group_add:[1001],
+        # which would over-grant read of the 0640 1001:1001 API/GUI TLS private keys (C12 MF-1). The TSV is already
+        # destined for Loki, so o+r adds no exposure; the bodies are no_log-clean (C2). Pinned by test_compose_logging.
+        mode: "0755"
+      when: "'api' in stack_services or 'vector' in stack_services"
+
+    - name: Ensure the persistent onboard-gui audit-log dir exists (M11 — off the code/propose tree; Vector tails it)
+      # Phase B Rung 2: the GUI audit log moves off /repo/local (inside the content clone) to this dedicated /audit
+      # bind, so it is writable under a read-only baked /opt/kontroll AND survives the clone `reset --hard`. Mirrors
+      # the API audit dir exactly (uid-1001, 0755 so non-root Vector world-reads the TSV without group_add:[1001]).
+      ansible.builtin.file:
+        path: "{{ kontroll_gui_audit_dir }}"
+        state: directory
+        owner: "1001"
+        group: "1001"
+        mode: "0755"
+      when: "'onboard-gui' in stack_services or 'vector' in stack_services"
+
+    - name: Ensure the persistent ansible-log dir exists (fix — run-log survives the job clone; Vector tails it)
+      ansible.builtin.file:
+        path: "{{ kontroll_ansible_log_dir }}"
+        state: directory
+        owner: "1001"
+        group: "1001"
+        mode: "0755"            # o+r so non-root Vector (10002) tails the run-log without group_add:[1001] (C12 MF-1)
+      when: "'semaphore' in stack_services or 'vector' in stack_services"
+
+    - name: Ensure logrotate is present (bounds the ansible run-log — G5; Debian ships it, ensured idempotently)
+      ansible.builtin.apt:
+        name: logrotate
+        state: present
+      # MF-6: a HOST-systemd concern (scripts/host-systemd.sh) — apt has no python3-apt for check mode in the
+      # ephemeral installer image, and logrotate manages the HOST's log rotation, not the container's.
+      when: ('semaphore' in stack_services or 'vector' in stack_services) and not in_container
+
+    - name: Bound the ansible run-log with a logrotate drop-in (G5 — the run-log appends forever otherwise)
+      # ansible.cfg `log_path` APPENDS with no built-in rotation (unlike the API/GUI audit RotatingFileHandler),
+      # so the persistent run-log above grows unbounded. logrotate caps it at
+      # kontroll_ansible_log_max_mb x kontroll_ansible_log_max_files. copytruncate is LOAD-BEARING: Vector tails
+      # this file by EXACT path (internal_ansible.yaml), so rotate-by-rename would orphan the tail on the old
+      # inode; copytruncate keeps the inode (the lost-line race is negligible for a low-volume burst log).
+      ansible.builtin.copy:
+        dest: /etc/logrotate.d/kontroll-ansible-log
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # GENERATED by ansible/playbooks/deploy-stack.yml — bounds the kontroll ansible run-log (G5).
+          {{ kontroll_ansible_log_dir }}/*.log {
+              size {{ kontroll_ansible_log_max_mb | default(5) }}M
+              rotate {{ kontroll_ansible_log_max_files | default(5) }}
+              missingok
+              notifempty
+              copytruncate
+              compress
+              delaycompress
+          }
+      # MF-6: written on the HOST by scripts/host-systemd.sh — a drop-in in the ephemeral container's /etc never
+      # reaches the host's logrotate (it would silently no-op the G5 bound).
+      when: ('semaphore' in stack_services or 'vector' in stack_services) and not in_container
+
+    - name: Ensure the shared kontroll network exists (declared external)
+      community.docker.docker_network:
+        name: kontroll
+        state: present
+
+    - name: Provision the API host artifacts (read-only deploy — RO content clone + self-signed TLS)
+      when: "'api' in stack_services"
+      block:
+        - name: Ensure the API host dirs exist
+          ansible.builtin.file:
+            path: "{{ item.path }}"
+            state: directory
+            owner: "1001"
+            group: "1001"
+            mode: "{{ item.mode }}"
+          loop:
+            - {path: "{{ kontroll_api_dir }}", mode: "0755"}
+            - {path: "{{ kontroll_api_dir }}/tls", mode: "0750"}
+
+        - name: Trust the API content clone for root's git on privileged re-runs  # noqa: command-instead-of-module
+          # Once the clone is chowned to uid-1001 (below), root re-running the git module on it hits git's
+          # dubious-ownership guard. Mark it safe.directory for root (system scope) so the clone task stays
+          # idempotent across re-deploys. Gated — the read-only deploy never chowns, so never needs this.
+          when: api_privileged | bool
+          ansible.builtin.command:
+            cmd: git config --system --add safe.directory {{ kontroll_api_dir }}/repo
+          changed_when: false
+
+        - name: Clone/update the local canonical into the API's content tree
+          # Root-owned + world-readable by default ⇒ uid-1001 reads but cannot write (the read-only lock). The
+          # gated privileged block below chowns it to uid-1001 + adds a `local` remote so the API can PROPOSE.
+          ansible.builtin.git:
+            repo: file:///srv/kontroll.git
+            dest: "{{ kontroll_api_dir }}/repo"
+            version: main
+            update: true
+
+        - name: Make the API content clone WRITABLE by uid-1001 + give it a 'local' remote (C10 — privileged)
+          when: api_privileged | bool
+          block:
+            - name: Own the API content clone as the runtime uid so the container can commit (C10)
+              # In read-only mode this is SKIPPED, so the clone stays root-owned and uid-1001 cannot write it —
+              # the read-only deploy is provably untouched by the enablement (the flag default is false).
+              ansible.builtin.file:
+                path: "{{ kontroll_api_dir }}/repo"
+                state: directory
+                owner: "1001"
+                group: "1001"
+                recurse: true
+
+            - name: Add the API clone's 'local' remote → the canonical  # noqa: command-instead-of-module
+              # gitio.commit_and_push pushes to a remote literally named `local` (scripts/kontroll/gitio.py).
+              # Run as ROOT (no become_user — that needs the `acl` package + trips the unprivileged-become ACL
+              # path) with safe.directory, since the clone is now uid-1001-owned. The config ends root-owned but
+              # world-readable, so the container reads the remote at push time. Idempotent (tolerates exists).
+              ansible.builtin.command:
+                cmd: git -C {{ kontroll_api_dir }}/repo remote add local file:///srv/kontroll.git
+              register: _api_local_remote
+              changed_when: _api_local_remote.rc == 0
+              failed_when: _api_local_remote.rc != 0 and 'already exists' not in _api_local_remote.stderr
+
+        # byo_proxy/acme terminate TLS at the edge (the operator's proxy / Caddy) — kontroll provisions
+        # no cert there. Gated on the resolver so the instance frontend mode is the single source of truth.
+        - name: Generate a self-signed TLS cert for the API (self_signed mode only; if absent)
+          when: _needs_cert.stdout == "yes"
+          ansible.builtin.command:
+            cmd: >-
+              openssl req -x509 -newkey rsa:2048 -nodes -days 825
+              -keyout {{ kontroll_api_dir }}/tls/api.key
+              -out {{ kontroll_api_dir }}/tls/api.crt -subj /CN=kontroll-api
+            creates: "{{ kontroll_api_dir }}/tls/api.crt"
+
+        - name: Own the TLS material as the runtime uid (self_signed mode; the container reads the key)
+          when: _needs_cert.stdout == "yes"
+          ansible.builtin.file:
+            path: "{{ item.path }}"
+            owner: "1001"
+            group: "1001"
+            mode: "{{ item.mode }}"
+          loop:
+            - {path: "{{ kontroll_api_dir }}/tls/api.key", mode: "0640"}
+            - {path: "{{ kontroll_api_dir }}/tls/api.crt", mode: "0644"}
+
+    - name: Provision the onboard-gui host artifacts (RO content clone; age key + TLS stay host-provisioned)
+      # Mirrors the API block: onboard-gui (Flask) is the SAME network-service trust tier — it serves the
+      # capability dialog + device onboarding. Read-only by default (the clone is root-owned ⇒ uid-1001 reads but
+      # cannot write/push); the gated privileged block makes it writable + adds a `local` remote so a
+      # capability-promote can only PROPOSE (push proposed/<run_id>). This block does NOT mint the age key or TLS
+      # — those stay host/GUI-provisioned (security boundary: never an agent, never committed). C10.
+      when: "'onboard-gui' in stack_services"
+      block:
+        - name: Ensure the onboard-gui host dirs exist
+          ansible.builtin.file:
+            path: "{{ item.path }}"
+            state: directory
+            owner: "1001"
+            group: "1001"
+            mode: "{{ item.mode }}"
+          loop:
+            - {path: "{{ kontroll_gui_dir }}", mode: "0755"}
+            - {path: "{{ kontroll_gui_dir }}/tls", mode: "0750"}
+
+        - name: Fail closed if the onboard-gui age key is absent (host/GUI-provisioned; never auto-create — G9)
+          # The age PRIVATE KEY stays host/GUI-provisioned (deploy-stack NEVER mints it — security boundary). But
+          # if the key file is missing at `up`, `docker compose` would auto-create the :ro file-bind source as a
+          # root:root 0755 DIRECTORY (breaks the mount + the SOPS load). Refuse to proceed instead — the
+          # fail-closed backstop the storage-chown guard keys on for the age.key bind (the parent dir above is
+          # already uid-scoped). Only enforced when onboard-gui is actually being brought up.
+          ansible.builtin.stat:
+            path: "{{ kontroll_gui_dir }}/age.key"
+          register: _gui_age_key
+          failed_when: not _gui_age_key.stat.exists
+          when: "'onboard-gui' in stack_services"
+
+        - name: Generate a self-signed TLS cert for onboard-gui (self_signed mode only; if absent)
+          # The GUI serves HTTPS on :8443 and load_cert_chain's /tls/gui.crt+gui.key at startup — without them it
+          # CRASH-LOOPS. Mirror the API block's self-signed cert-gen (byo_proxy/acme terminate TLS at the edge, so
+          # the resolver gates this off there). This was the one asymmetry vs the API block: the tls dir was
+          # created but its cert never generated, so a fresh self_signed install never brought the GUI up.
+          when: _needs_cert.stdout == "yes"
+          ansible.builtin.command:
+            cmd: >-
+              openssl req -x509 -newkey rsa:2048 -nodes -days 825
+              -keyout {{ kontroll_gui_dir }}/tls/gui.key
+              -out {{ kontroll_gui_dir }}/tls/gui.crt -subj /CN=kontroll-onboard-gui
+            creates: "{{ kontroll_gui_dir }}/tls/gui.crt"
+
+        - name: Own the onboard-gui TLS material as the runtime uid (self_signed mode; the container reads the key)
+          when: _needs_cert.stdout == "yes"
+          ansible.builtin.file:
+            path: "{{ item.path }}"
+            owner: "1001"
+            group: "1001"
+            mode: "{{ item.mode }}"
+          loop:
+            - {path: "{{ kontroll_gui_dir }}/tls/gui.key", mode: "0640"}
+            - {path: "{{ kontroll_gui_dir }}/tls/gui.crt", mode: "0644"}
+
+        - name: Trust the onboard-gui clone for root's git on privileged re-runs  # noqa: command-instead-of-module
+          # Once the clone is chowned to uid-1001 (below), root re-running the git module on it hits git's
+          # dubious-ownership guard. Mark it safe.directory for root (system scope) so the clone task stays
+          # idempotent across re-deploys. Gated — the read-only deploy never chowns, so never needs this.
+          when: api_privileged | bool
+          ansible.builtin.command:
+            cmd: git config --system --add safe.directory {{ kontroll_gui_dir }}/repo
+          changed_when: false
+
+        - name: Clone/update the local canonical into the onboard-gui content tree
+          # Root-owned + world-readable by default ⇒ uid-1001 reads but cannot write (the read-only lock). The
+          # gated privileged block below chowns it to uid-1001 + adds a `local` remote so the GUI can PROPOSE.
+          ansible.builtin.git:
+            repo: file:///srv/kontroll.git
+            dest: "{{ kontroll_gui_dir }}/repo"
+            version: main
+            update: true
+
+        - name: Make the onboard-gui content clone WRITABLE by uid-1001 + give it a 'local' remote (C10 — privileged)
+          when: api_privileged | bool
+          block:
+            - name: Own the onboard-gui content clone as the runtime uid so the container can commit (C10)
+              # In read-only mode this is SKIPPED, so the clone stays root-owned and uid-1001 cannot write it —
+              # the read-only deploy is provably untouched by the enablement (the flag default is false).
+              ansible.builtin.file:
+                path: "{{ kontroll_gui_dir }}/repo"
+                state: directory
+                owner: "1001"
+                group: "1001"
+                recurse: true
+
+            - name: Add the onboard-gui clone's 'local' remote → the canonical  # noqa: command-instead-of-module
+              # gitio.commit_and_push pushes to a remote literally named `local` (scripts/kontroll/gitio.py).
+              # Run as ROOT (no become_user — that needs the `acl` package + trips the unprivileged-become ACL
+              # path) with safe.directory, since the clone is now uid-1001-owned. The config ends root-owned but
+              # world-readable, so the container reads the remote at push time. Idempotent (tolerates exists).
+              ansible.builtin.command:
+                cmd: git -C {{ kontroll_gui_dir }}/repo remote add local file:///srv/kontroll.git
+              register: _gui_local_remote
+              changed_when: _gui_local_remote.rc == 0
+              failed_when: _gui_local_remote.rc != 0 and 'already exists' not in _gui_local_remote.stderr
+
+    - name: Provision the Caddy ingress + render its Caddyfile (acme mode — config-as-data)
+      when: _runs_caddy.stdout == "yes"
+      block:
+        - name: Ensure the Caddy host dir exists (uid-scoped — never root:root 0755; closes the G9 hole)
+          ansible.builtin.file:
+            path: "{{ kontroll_caddy_dir }}"
+            state: directory
+            owner: "1001"          # the runtime uid that reads the rendered Caddyfile (parity with api/gui config dirs)
+            group: "1001"
+            mode: "0750"
+
+        - name: Render the Caddyfile from the instance frontend config (scripts/kontroll/frontend.py)
+          ansible.builtin.command:
+            cmd: >-
+              python3 {{ _frontend_resolver }} caddyfile {{ _acme_domain | quote }}
+              {{ _acme_email | quote }} {{ _acme_dns_provider | quote }} {{ stack_services | join(',') | quote }}
+          changed_when: false
+          check_mode: false   # read-only resolver — render the Caddyfile under --check too (gated on acme)
+          register: _caddyfile
+
+        - name: Write the rendered Caddyfile (never holds the DNS token — that comes from the env)
+          ansible.builtin.copy:
+            dest: "{{ kontroll_caddy_dir }}/Caddyfile"
+            owner: "1001"          # uid-scoped so the file-bind resolves to an existing FILE, not a Docker root dir
+            group: "1001"
+            mode: "0644"
+            content: "{{ _caddyfile.stdout }}\n"
+
+    - name: Compute the services to bring up (acme mode appends the caddy ingress)
+      ansible.builtin.set_fact:
+        _up_services: "{{ (stack_services + ['caddy']) | unique if _runs_caddy.stdout == 'yes' else stack_services }}"
+
+    # docker compose CLI directly, NOT community.docker.docker_compose_v2: that module's post-up
+    # `docker compose images --format json` state query returns empty on this host's docker compose
+    # (v5.1.4) and aborts the run even though the bring-up itself succeeds (a module/CLI mismatch).
+    # The CLI `up -d` is reliable; state is reported by a follow-up `ps`.
+    - name: Bring up the selected stack service(s)
+      ansible.builtin.command:  # noqa: command-instead-of-module
+        cmd: >-
+          docker compose --project-directory {{ stack_dir }} --file {{ stack_dir }}/compose.yaml
+          --env-file {{ stack_dir }}/.env up -d {{ _up_services | join(' ') }}
+      changed_when: true
+
+    - name: Collect the running stack containers
+      ansible.builtin.command:  # noqa: command-instead-of-module
+        cmd: docker compose --project-directory {{ stack_dir }} --env-file {{ stack_dir }}/.env ps
+      changed_when: false
+      register: compose_ps
+
+    - name: Report the running stack containers
+      ansible.builtin.debug:
+        msg: "{{ compose_ps.stdout_lines }}"

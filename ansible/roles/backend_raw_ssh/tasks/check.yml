@@ -1,0 +1,8 @@
+---
+# Generic liveness for bespoke SSH appliances (no usable collection — e.g. OpenWrt
+# over Dropbear). Runs a benign raw command; the device class supplies
+# backend_liveness_command (default: a no-op `true`).
+- name: Liveness via raw command
+  ansible.builtin.raw: "{{ backend_liveness_command | default('true') }}"
+  changed_when: false
+  when: not (molecule_test | default(false) | bool)

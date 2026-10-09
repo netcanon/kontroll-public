@@ -1,0 +1,18 @@
+# Operational Semaphore template (manually-run) — the Tier-1 ENACT for host-agent telemetry (item F). Installs
+# the node_exporter agent on the metrics-eligible hosts so their (already-generated) scrape targets go UP. A
+# normal fleet play — exactly what Semaphore runs — so it needs NO new privilege. State-changing: tick
+# Semaphore's **Dry Run** when launching to do the `--check --diff` pass first (CLAUDE.md), then run again to
+# apply. The optional `target` survey var limits it to one host/group; empty backfills all eligible hosts.
+name: install-node-exporter
+playbook: ansible/playbooks/install-node-exporter.yml
+description: >-
+  Install the node_exporter host-agent on the metrics-eligible hosts (Tier-1 enact). Use Dry Run for the
+  --check pass first. `target` limits to a host/group; empty = all eligible.
+survey_vars:
+  - name: target
+    title: Target host or group
+    description: >-
+      Optional host or inventory group to limit the install to (e.g. a single onboarded host). Leave blank to
+      backfill all metrics-eligible hosts (hypervisors + docker_hosts).
+    type: ""
+    required: false

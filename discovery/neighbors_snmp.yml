@@ -1,0 +1,57 @@
+# Discovery method: read a Layer-3 device's OWN dual-stack neighbour cache (RFC-4293 ipNetToPhysicalTable) read-only
+# over SNMPv3, surfacing un-onboarded IPv4 AND IPv6 hosts into the onboard inbox. Sibling of arp_neighbors_snmp — the
+# SAME snmp transport + the SAME authPriv creds; it differs ONLY in the OID column (the newer dual-stack table) and the
+# parse SHAPE (`neighbors_table`, which decodes a TYPE-tagged, LENGTH-prefixed InetAddress index -> v4 OR v6). Vendor-
+# NEUTRAL: ipNetToPhysicalTable is the RFC-4293 universal neighbour table (IPv4 ARP + IPv6 ND unified), so a vendor
+# literal in the name would be the no-bespoke smell — the vendor-ness lives in the OFFER (a declared block on the
+# class's module.yml), never here. Complements arp_neighbors_snmp (v4-only, the near-universal legacy table):
+# a class that serves the dual-stack table offers THIS to ALSO catch v6 ND neighbours a DHCP-lease API + the v4 ARP
+# table never see. PASSIVE + read-only by construction: a WALK reads a table the device already keeps; it reaches ONLY
+# the onboarded device's :161 agent (no scan, no CIDR). SECURITY C18 (same trust boundary, same transport).
+#
+# TRANSPORT: source.transport: snmp -> the sweep's _run_snmp snmpbulkwalks source.walk_oid read-only (GETBULK; no SNMP
+# SET). One WALK of the ipNetToPhysicalPhysAddress column yields BOTH fields: the row index is
+# <ifIndex>.<addrType>.<len>.<addr-bytes> (addrType 1=ipv4/len4, 2=ipv6/len16), so the IP is decoded from the TYPE-
+# tagged, LENGTH-prefixed suffix (parse.shape `neighbors_table`) and the MAC is the value.
+#
+# Auth/cred flow (C12 / MF-PROV): SNMPv3 authPriv, reusing the SHARED read-only kontroll_ro v3 user from the EXISTING
+# snmp_observability SOPS domain (the same read cred arp_neighbors_snmp + the snmp_exporter use — as-scoped, never
+# widened, no new domain). The OPERATOR exports KONTROLL_SNMP_V3_USER/AUTH_PASS/PRIV_PASS before the on-demand sweep;
+# ANY unset => the source is recorded `no-creds` and skipped (fail-closed, no v1/v2c/authNoPriv fallback). The values
+# enter ONLY at the fetcher boundary as list argv (never shell-interpolated, never audited/artifacted).
+#
+# F11 (dogfood-confirmed-not-CI-confirmed, mirrors arp_neighbors_snmp): the OID + index encoding are the documented
+# public RFC-4293 ipNetToPhysicalTable; CI pins the parser against a mocked net-snmp golden
+# (tests/fixtures/discovery/cisco_ios_neighbor_walk.txt, doc-only RFC-3849 v6 + RFC-5737 v4 identifiers). A live dogfood
+# confirms with a 1-line edit. IPv6 candidates now FLOW the read side (the read-side `_clean_ip` is dual-stack) — a v6
+# neighbour is surfaced for awareness, not parsed-then-dropped. SEE-ONLY this rung: a v6 candidate surfaces + pre-fills
+# the onboard form, but onboard's `ansible_host` knob stays `type: ipv4` (a v6 onboard is a separate config-plane
+# decision) — onboard a v6 host only once that knob is widened. See docs/reviews/2026-07-03-discovery-corpus-growth.
+name: neighbors_snmp
+label: SNMP neighbours (read an L3 device's own dual-stack ipNetToPhysicalTable, read-only)
+order: 50                                       # after arp_neighbors_snmp (40); a class may offer both
+source:
+  transport: snmp                              # the sweep dispatches this NAME to _run_snmp (default is http)
+  walk_oid: "1.3.6.1.2.1.4.35.1.4"       # ipNetToPhysicalPhysAddress: value=MAC, OID-index=<if>.<type>.<len>.<addr>
+  auth:
+    strategy: snmp_v3                           # SNMPv3 authPriv (SHA / AES), read-only
+    user_env: KONTROLL_SNMP_V3_USER            # env NAMES the operator exports; the value enters at the fetcher only
+    auth_pass_env: KONTROLL_SNMP_V3_AUTH_PASS
+    priv_pass_env: KONTROLL_SNMP_V3_PRIV_PASS
+    auth_proto: SHA
+    priv_proto: AES
+# The parse SHAPE is a NAME the `_PARSERS` table keys on — NO function knows a vendor (de-bespoke). `neighbors_
+# table` = net-snmp walk lines -> {ip (decoded from the type-tagged/length-prefixed InetAddress index, v4 OR v6), mac
+# (the value), hostname:null}; incomplete/expired rows (all-zero/broadcast MAC) + non-plain-address indices are dropped.
+parse:
+  shape: neighbors_table
+secret_domain: snmp_observability              # REUSE the existing SNMPv3 read domain; audited by NAME only (C12).
+# CREDS ARE OPERATOR-EXPORTED at sweep time (there is deliberately NO secret_env_map): gen-secret-env renders .env from
+# metrics:/logs: only, never discovery:. The operator exports KONTROLL_SNMP_V3_USER/AUTH_PASS/PRIV_PASS from the
+# snmp_observability domain (the SAME env vars gen-validate-live + arp_neighbors_snmp already use). Unset => `no-creds`.
+# NO applies_when -> DECLARED-only (opt-in per class, like arp_neighbors_snmp): opt in via a `discovery:` block.
+access_chain:
+  chain: "control VM -> sweep snmp_walk -> SNMPv3 authPriv WALK of <device>:161 ipNetToPhysicalTable (read-only)"
+  may_break: nothing — a read-only WALK reads the neighbour cache; a creds/reach failure records no-creds/unreachable
+  fallback: "no"
+  blast_radius: control node only (an SNMP GETBULK reads the neighbour table; actuates NOTHING on the device)

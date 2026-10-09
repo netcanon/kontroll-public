@@ -1,0 +1,20 @@
+# Auto-scaffolded by scripts/galaxy.py. Verify network_os + commands
+# against a real device (live-smoke) before flipping status to active.
+#
+# This module was produced MACHINE-ONLY: `galaxy.py search cisco.ios` -> it labels
+# cisco.ios backup-capable -> `galaxy.py scaffold cisco.ios --key ios_xe_auto
+# --group core_switch`. No human wrote any Cisco-specific task. It runs through the
+# generic backend_netcommon_cli backend. Kept STAGED as the e2e onboarding proof
+# (see tests/e2e/).
+key: ios_xe_auto
+description: cisco.ios via netcommon_cli backend (auto-scaffolded - VERIFY before enabling)
+status: staged
+collections:
+  - name: cisco.ios
+    version: '>=11.0.0'
+role: backend_netcommon_cli
+backend: netcommon_cli
+backend_params:
+  network_os: cisco.ios.ios
+inventory_group: core_switch
+secrets_domain: network

@@ -1,0 +1,76 @@
+# Telemetry method: proxy-exporter snmp_exporter — a control-node exporter SNMP-walks a device that cannot
+# run an agent (the Cisco core switch, the FortiGate firewall) on Prometheus's behalf. AGENT-LESS, READ-ONLY:
+# SNMP GET, never actuation. The scrape target is the DEVICE address; the generated `network` job's relabel
+# proxies it onto snmp-exporter:9116, and the per-target __param_module label (emitted by gen-observability
+# from `params.module`) makes Prometheus pass ?module=<m> to select the snmp_exporter module. Schema:
+# docs/observability/telemetry-method-registry.md.
+name: snmp
+label: SNMP (snmp_exporter, v3 authPriv read-only)
+order: 21
+kind: proxy-exporter
+job: network               # prometheus/targets/network/<key>.generated.yml + the generated `network` job
+target_shape: device       # target = "<ansible_host>" (the device addr); the job relabel proxies it
+labels: [host]
+metrics_path: /snmp
+exporter_address: snmp-exporter:9116
+target_param: target       # ?target=<device>
+# Picker offerability (Stage-1 filter — predicate.eval_pred, the SAME three-valued engine the vectors fold).
+# snmp fits CLI/NETCONF-managed network gear (switch/router/firewall), which universally supports SNMP. A
+# method with NO applies_when is universal; present here, it is NOT — a pure REST service (httpapi-only) is
+# filtered out. Offerability, not a gate: the operator can still DECLARE snmp (e.g. the httpapi FortiGate,
+# wired in Phase 3b), and the picker UNIONs applicable ∪ already-declared.
+applies_when:
+  any_of:
+    - {plugin: cliconf}
+    - {plugin: netconf}
+# Per-class params — a CLOSED allow-list (the config-injection guard: a value not in `allowed` is REJECTED at
+# generate time, NEVER interpolated). `module` -> the __param_module target label -> Prometheus passes
+# ?module=<m> to snmp_exporter (no extra relabel needed; a __param_* target label is auto-used as a query arg).
+params:
+  module:
+    allowed: [if_mib]      # the module generated into prometheus/exporters/snmp/modules.generated.yml (generator.yml)
+    required: true
+    label_as: __param_module
+# F2 auto-derivation switch — `derive_default` PRESENT ⇒ this method is AUTO-DERIVABLE onto a blind-onboarded class
+# whose backend CONFERS it: the universal interface-counter default for the required `module` param. snmp is NOT
+# creds-free (it uses the SHARED, already-provisioned snmp_observability v3 READ-ONLY domain — MF-S5), so it is
+# auto-derivable ONLY because that domain is shared + read-only, never a per-class secret. gen-class-capabilities /
+# onboard emit `{method: snmp, params: {module: if_mib}}`.
+derive_default:
+  params: {module: if_mib}
+# Rung-4a dashboard-floor SELECTOR (scripts/gen-dashboard-floor.py) — DERIVE the grafana.com board (even its id)
+# from a search, never a hand-typed gnet. Resolved + PINNED to dashboards/derived/snmp.lock.yml; the honest floor
+# board for the IF-MIB interface counters snmp_exporter's if_mib module walks. `prefer_gnet` is a SOFT tie-break
+# (1124 "SNMP Interface Throughput"); `requires_series` (ifHCInOctets, the 64-bit input counter) is the fit gate.
+derive_dashboard:
+  search: "snmp interface"
+  datasource: prometheus
+  requires_series: ifHCInOctets
+  prefer_gnet: [1124]
+  name: snmp_if
+# ONLINE validate leg (scripts/gen-validate-live.py) — a top-level `validate:` SIBLING key (consistent with the
+# module + logging descriptors). The SECOND transport in the seam (proving the dispatch is generic across HTTPS +
+# SNMP, not proxmox-only). snmp_oid_support GETNEXTs the pinned IF-MIB column subtree read-only (SNMPv3 authPriv)
+# and confirms the device still answers under it (1.3.6.1.2.1.2.2.1.10 = ifInOctets, the if_mib generator's anchor
+# column). A returned OID outside the subtree => the device dropped IF-MIB support.
+validate:
+  - {check: snmp_oid_support, oids: ["1.3.6.1.2.1.2.2.1.10"]}
+# Method-level labels emitted on EVERY target (not per-class). __param_auth selects the snmp_exporter auth
+# (the v3_kontroll USM creds in snmp.yml.j2); Prometheus passes it as ?auth=.
+static_labels:
+  __param_auth: v3_kontroll
+secret_domain: snmp_observability   # the SNMPv3 creds (control + break-glass only); rendered into the
+                                    # snmp_exporter config by deploy-stack (no_log), NOT committed.
+exporter:
+  # Pinned in LOCKSTEP with the snmp_exporter generator (v0.30.1) that produces modules.generated.yml — the
+  # config format has breaking changes across versions, so generator version MUST == exporter version. Bump both
+  # together as one reviewable change (no-bespoke tenet: pinned public source, not a moving :latest).
+  image: prom/snmp-exporter:v0.30.1
+  container_name: snmp-exporter
+  config_mount: ../../prometheus/exporters/snmp/snmp.yml   # rendered from .j2 at deploy (gitignored, 0600)
+  config_container_path: /etc/snmp_exporter/snmp.yml
+  access_chain:
+    chain: control VM (kontroll net) -> snmp-exporter -> SNMPv3 (authPriv) GET to the device (udp/161)
+    may_break: nothing — a read-only SNMP GET; a creds/reachability failure blanks a panel, not the lab
+    fallback: "no"
+    blast_radius: control node only (SNMP GET reads counters; actuates NOTHING on the device)

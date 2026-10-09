@@ -1,0 +1,36 @@
+# Device-class module: Docker hosts (container stacks over SSH).
+key: docker_host
+description: Docker hosts (NAS / reverse-proxy stacks) over SSH
+status: active
+# F2 (de-bespoke, north-star Rung 4): this class's metrics FLOOR is AUTO-DERIVED. community.docker does NOT classify
+# (its `docker_config` swarm module trips the raw_ssh `none_of {module_suffix: _config}` guard → no backend), but a
+# Docker host is a plain Linux box whose TELEMETRY backend is raw SSH (the collection only actuates containers). So
+# we DECLARE `backend: raw_ssh` — _backend_for honors a declared backend over classification —
+# and derive raw_ssh's floor [blackbox, host_node]. ADDITIVE on blackbox (the class had host_node only) → it gains a
+# committed blackbox reachability target; host_node is byte-identical. The `dashboards:` block is now the DERIVED
+# floor too (Rung 4a: blackbox + node boards); backup stays role-gated (not derived). See facts.pinned.yml.
+derived: true
+backend: raw_ssh               # declared (community.docker won't classify)
+collections:
+  - name: community.docker
+    version: ">=4.0.0"
+role: docker_host
+inventory_group: docker_hosts
+secrets_domain: compute
+# Observability FLOOR — DERIVED (gen-class-capabilities-owned): node_exporter host metrics + ICMP reachability.
+# Docker hosts are Linux boxes (host metrics via node_exporter; container metrics come from cAdvisor on the control
+# node). All `derived: true` (recomputed from facts.pinned.yml via the raw_ssh confer list).
+metrics:                       # ORDER = raw_ssh confers.telemetry [blackbox, host_node] (--check is order-sensitive)
+  - {method: blackbox, params: {probe: icmp}, derived: true}    # ICMP reachability (blackbox, no creds/agent)
+  - {method: host_node, derived: true}                          # host CPU/mem/disk via node_exporter
+# Dashboards - the DERIVED Grafana-board FLOOR (Rung 4a): raw_ssh confers [blackbox, host_node], so the derived
+# boards are reachability (gnet 13659) + node_exporter (gnet 1860, shared with proxmox). node was a bare curated
+# override pre-4a; it is now derived. `derived: true` = gen-class-capabilities-owned. See dashboards/derived/.
+dashboards:
+  - {gnet: 13659, name: blackbox, derived: true}   # blackbox -> "Blackbox Exporter (HTTP prober)"
+  - {gnet: 1860, name: node, derived: true}        # host_node -> "Node Exporter Full"
+# Backup — the secondary-capability block (instance #2). gen-backup -> a per-class Semaphore schedule running
+# backup-configs.yml --limit docker_hosts. capable mirrors the role's backup_capable. See capabilities/backup.yml.
+backup:
+  capable: true
+  schedule: "30 3 * * *"   # nightly 03:30

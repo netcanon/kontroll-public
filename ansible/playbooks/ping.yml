@@ -1,0 +1,54 @@
+---
+# Connectivity smoke test — Phase 1 exit criterion.
+# Reachability is determined by an explicit TCP probe FROM the control node
+# (delegated to localhost) inside block/rescue — NOT by ignore_unreachable
+# bookkeeping, which continues past an unreachable host and would otherwise
+# let a down device report a misleading "ok". The per-class `check` (real
+# protocol/creds liveness) runs only once the port is confirmed open.
+#
+# Access chain used:   control node (mgmt VLAN) -> mgmt IPs (TCP/SSH/API)
+# May break:           none (read-only liveness checks)
+# Fallback required:   no
+# Blast radius:        none — pure reads
+
+- name: Fleet preamble — stamp the run id + materialize per-host SSH keys
+  ansible.builtin.import_playbook: _fleet-preamble.yml
+
+- name: Reach the fleet (per-class liveness)
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Probe reachability, then run the class check
+      block:
+        - name: TCP reachability probe from the control node
+          ansible.builtin.wait_for:
+            host: "{{ ansible_host }}"
+            port: "{{ mgmt_port | default(22) }}"
+            timeout: 5
+          delegate_to: localhost
+
+        - name: Run the class-specific liveness check
+          ansible.builtin.include_role:
+            name: "{{ device_role }}"
+            tasks_from: check
+
+        - name: Mark host reachable
+          ansible.builtin.set_fact:
+            kontroll_reachable: true
+      rescue:
+        - name: Mark host unreachable
+          ansible.builtin.set_fact:
+            kontroll_reachable: false
+
+- name: Reachability summary
+  hosts: all
+  gather_facts: false
+  connection: local
+  tasks:
+    - name: Per-host reachability
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ 'OK' if kontroll_reachable | default(false) else 'UNREACHABLE' }}"
+
+# Post-run: remove the per-run ephemeral SSH key dir (imported LAST — after the fleet connections; MF-4).
+- name: Clean up the per-run ephemeral SSH key dir
+  ansible.builtin.import_playbook: _cleanup-ssh-keys.yml

@@ -1,0 +1,8 @@
+# config.d/sources/internal_containers.yaml  → source id "internal_containers", type docker_logs.
+# Driver-agnostic, rich metadata. Self-excludes vector+loki to avoid a shipping feedback loop.
+type: docker_logs
+# The FILTERED read-only Docker API (docker/services/docker-socket-proxy.yaml), NOT the raw root-equivalent socket —
+# so non-root Vector never holds /var/run/docker.sock (C12 promotion fix); POST=0 on the proxy makes it read-only.
+docker_host: http://docker-socket-proxy:2375
+exclude_containers: [vector, loki, docker-socket-proxy]  # never ship our own collector/store/proxy logs (loop guard)
+auto_partial_merge: true                 # re-join Docker's 16 KiB line splits

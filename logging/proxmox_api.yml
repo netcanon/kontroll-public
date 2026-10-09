@@ -1,0 +1,100 @@
+# Logging method: Vector PULLS the Proxmox VE cluster TASK history via the PVE REST API. The CONCRETE
+# credentialed-pull instance (the worked example for rest_pull's generic pattern): Vector's `http_client` source
+# GETs /api2/json/cluster/tasks read-only, authenticating with a PVE API TOKEN as a custom `Authorization` header
+# (PVEAPIToken=USER@REALM!ID=SECRET — NOT Bearer). PULL direction -> NO device-side push to configure (Vector
+# reaches OUT), so wiring_role: null. ONE method per API shape (drop-in ethos): another REST log API (FortiGate
+# Bearer, OPNsense Basic) is a sibling logging/<x>.yml, never an `if` here. Schema: logging/README.md.
+#
+# Endpoint = /cluster/tasks, LIVE-VALIDATED (local/proxmox-api-live-findings.md): a read-only probe found
+# /cluster/log empty on an idle cluster (200 but count=0), while /cluster/tasks is the reliably-populated AUDIT
+# stream — every VM/LXC/backup/migrate task with {node, type, status, user, upid, starttime, endtime}. That is
+# the valuable Proxmox log: who ran what, when, OK/failed.
+#
+# Auth/token flow (C12): the token is INJECTED as ${KONTROLL_PVE_LOG_TOKEN} at deploy from the existing `proxmox`
+# SOPS domain (deploy-stack renders it into docker/.env under no_log; reuses the audit-scoped pve-exporter token,
+# which already carries Sys.Audit/PVEAuditor — enough to READ the task list, nothing more). The generated config
+# carries ONLY the ${ENV} reference (never the value); Vector interpolates it at runtime. NEVER committed,
+# NEVER a label. Read-only: an HTTP GET reads the task history and actuates NOTHING. (Live-proven: HTTP 200.)
+name: proxmox_api
+label: Proxmox cluster tasks (Vector http_client pulls /cluster/tasks via a PVE API token)
+order: 5
+kind: http_client
+direction: pull
+source:
+  endpoint: "https://${DEVICE_ADDR}:8006/api2/json/cluster/tasks"   # gen-logging templates the host addr; mgmt-routed
+  method: GET
+  scrape_interval_secs: 3600   # a recent-window endpoint with no since-cursor -> a short poll RE-INGESTS the same
+                               # tasks; `dedupe_key` (below) drops the dups (dogfood-verified: 50 polled tasks ->
+                               # 50 distinct Loki events, zero dups across 30s polls), so this is SAFE to shorten
+                               # to e.g. 60s for fresher audit history. Hourly is the low-cost default; an operator
+                               # knob — raise the poll rate if tasks burst faster than the endpoint's default window.
+  decoding: {codec: json}
+  auth:
+    strategy: custom                              # http_client `custom` => sets the Authorization header verbatim
+    value: "PVEAPIToken=${KONTROLL_PVE_LOG_TOKEN}"   # ${ENV} only — Vector interpolates at runtime; NEVER committed
+  # NO hardcoded `tls:` block — the verify posture is a DEVICE-CLASS fact, not a per-method bespoke value
+  # (no-bespoke-config tenet). gen-logging injects `source.tls` from the class `vendor_defaults.tls_posture`
+  # (modules/proxmox: self_signed -> verify_certificate:false) ⊕ the instance CA pin, via the tls_from_class flag
+  # below + scripts/kontroll/endpoints.py. The SAME fact telemetry/pve.yml's PVE_VERIFY_SSL derives from.
+tls_from_class: true            # gen-logging resolves source.tls from the device class's vendor_defaults (+ any
+                                # instance CA pin) instead of a literal here — the shared vendor-fact seam.
+# ONLINE validate leg (scripts/gen-validate-live.py) — a top-level `validate:` SIBLING key (NOT inside `source`,
+# which gen-logging copies verbatim into the Vector config) listing checks of the facts THIS descriptor owns: the
+# pulled API path + this token's read scope. api_path: GET the device's node-local apidoc (mgmt-VLAN, no WAN) and
+# confirm /cluster/tasks is still PUBLISHED before the pull silently 404s. schema_permission (A′): confirm the
+# apidoc still encodes the PERMISSION MODEL we assume — {user: all} for /cluster/tasks (any authenticated token;
+# access is per-row audit FILTERED, NOT an endpoint permission). That is exactly what token_scope's 200+empty
+# /version disambiguation (M-8) relies on; if PVE tightens it to a hard perm check, this DRIFTs deterministically
+# from the schema. token_scope: GET source.endpoint with the descriptor's OWN token (the ${ENV} ref above) and
+# confirm a 200 read — a too-narrow token 403s, or gets an audit-filtered 200+empty disambiguated via a /version
+# corroboration GET. Read-only; the token never leaves the fetcher boundary. The grant role this backs lives in
+# modules/proxmox `provisioning:` (one declaration). The {user: all} expectation was apidoc-verified live (2026-06-18).
+# grant_covers (A′ heavy, role->privilege-map): the SAME *.Audit token must also COVER a perm-GATED read —
+# /cluster/status ({check: [perm, /, [Sys.Audit]]}, live-verified 2026-06-17), the live backing for the provisioning
+# grant; a 403 there = the grant no longer confers Sys.Audit and the proxmox metrics' privileged reads break.
+validate:
+  - {check: api_path}
+  - {check: schema_permission, expect: {user: all}}
+  - {check: token_scope}
+  # A′ (heavy, role->privilege-map): the grant the provisioning surface asks for (PVEAuditor -> Sys.Audit) must
+  # COVER the perm-GATED reads the proxmox metrics depend on. /cluster/status is the canonical root-Sys.Audit probe:
+  # schema_permission pins the apidoc still REQUIRES Sys.Audit (catches PVE relaxing/changing it — least-priv drift);
+  # grant_covers LIVE-reads it with this shared *.Audit token (200 = grant confers it; 403 = grant lost coverage and
+  # the privileged reads break). perm/path are descriptor DATA — the checks judge only schema/status, no literal.
+  - {check: schema_permission, api_path: /cluster/status, expect: {check: [perm, /, [Sys.Audit]]}}
+  - {check: grant_covers, api_path: /cluster/status, perm: Sys.Audit}
+labels: [host, service, level]
+# NO applies_when -> UNIVERSAL, DECLARED-only (the operator declares it on the proxmox class; never auto-suggested).
+# PER-TASK pipeline (data-driven, no generator branch): gen-logging renders src -> unnest -> dedupe -> shape.
+# pull_unnest fans the {data:[...]} response to ONE event per task (each event then carries the task under .data);
+# dedupe_key drops a task already ingested on a prior poll (the recent-window endpoint has no since-cursor); the
+# transform_vrl below maps the per-task .data.* fields to the canonical labels.
+pull_unnest: data          # the array field in the pulled body -> `. = unnest(.data)` (one event per task)
+dedupe_key: data.upid      # the globally-unique PVE task id (post-unnest path) -> Vector dedupe fields.match
+transform_vrl:             # LIVE-VERIFY the exact VRL/paths on the pipeline dogfood (Windows can't vector validate):
+  - '.service = string(.data.type) ?? .service'                       # task type (qmstart, vzdump, …) -> service
+  - '.host = string(.data.node) ?? .host'                            # the PVE node that ran the task -> host
+  - '.level = if (string(.data.status) ?? "") == "OK" { "info" } else { "error" }'   # task status -> level
+  - '.run_id = string(.data.upid) ?? .run_id'                        # the unique task id (also the dedupe key)
+  - '.message = encode_json(.data)'   # full task object as body; encode_json is infallible so no ?? coalesce
+params:
+  retention:
+    allowed: ["7d", "30d", "90d"]
+    required: false
+wiring_role: null                       # PULL — nothing to configure ON the device (no push to set up)
+secret_domain: proxmox                  # REUSE the existing proxmox domain (the pve-exporter token); audited by
+                                        # NAME only (C12). No new SOPS domain — the read-only token already exists.
+# How the token is composed + injected — DATA, so deploy-stack renders it GENERICALLY (no per-method hand-edit).
+# secret_env_map: {ENV_VAR: "<str.format template over the secret_domain's SOPS field NAMES>"} — the SAME unified
+# block telemetry exporters use (a 1-field exporter env var is the degenerate "{field}" case of this token). The
+# KEY is the ONE env var source.auth.value references; the VALUE composes the token. gen-secret-env.py emits a
+# value-free manifest; deploy-stack composes <env>=<token> into .env via the kontroll_render_token filter (no_log,
+# fail-soft). (A new logging token also needs a one-line ${VAR:-} passthrough in docker/services/vector.yaml —
+# compose include can't merge it — carrying no secret/shape.)
+secret_env_map:
+  KONTROLL_PVE_LOG_TOKEN: "{proxmox_api_user}!{proxmox_api_token_id}={proxmox_api_token_secret}"
+access_chain:
+  chain: "control VM (kontroll net) -> Vector http_client -> HTTPS GET <pve>:8006/api2/json/cluster/tasks (read-only)"
+  may_break: nothing — a read-only audit poll; a creds/reach failure blanks the stream, not the cluster
+  fallback: "no"
+  blast_radius: control node only (an HTTP GET reads the task history; actuates NOTHING on Proxmox)

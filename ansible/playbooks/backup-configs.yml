@@ -1,0 +1,335 @@
+---
+# Pull a fresh config from each device into {{ config_backup_dir }} and commit a
+# timestamped snapshot into that dir's LOCAL git history (the final play), so every
+# device's config is diffable over time. Mirrors the migration repo's
+# ops/backup-procedure.md intent for the new stack.
+#
+# Thin orchestrator — each device CLASS does its capture via its own role's
+# `backup` entrypoint, selected by `device_role` (same dispatch as ping.yml).
+# Adding a device class = add roles/<class>/tasks/backup.yml. This playbook
+# never changes.
+#
+# Backup-capability: each class declares `backup_capable` (roles/<class>/
+# defaults/main.yml); a class that is not capable records a logged skip instead
+# of a forced empty capture. Override per host in host_vars/<host>.yml. The final
+# play prints a per-host summary (captured / skipped / not-run) from the
+# `kontroll_backup_result` fact each role sets.
+#
+# Access chain used:   control node (mgmt VLAN) -> mgmt IPs over SSH/API
+# May break:           none (read-only captures)
+# Fallback required:   no
+# Blast radius:        none — pure reads
+
+- name: Fleet preamble — stamp the run id + materialize per-host SSH keys
+  ansible.builtin.import_playbook: _fleet-preamble.yml
+
+- name: Ensure backup dir exists
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Ensure backup directory exists
+      ansible.builtin.file:
+        path: "{{ config_backup_dir }}"
+        state: directory
+        mode: "0750"
+
+- name: Capture device configs (per-class backup entrypoint)
+  hosts: all
+  gather_facts: false
+  ignore_unreachable: true
+  tasks:
+    - name: Run the class-specific backup entrypoint
+      ansible.builtin.include_role:
+        name: "{{ device_role }}"
+        tasks_from: backup
+
+- name: Backup run summary
+  hosts: all
+  gather_facts: false
+  connection: local
+  tasks:
+    - name: Per-host backup result
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} ({{ device_role | default('?') }}):
+          {{ kontroll_backup_result | default('not run — unreachable or skipped') }}
+
+    # A logged skip or an unreachable host is tolerated; a capture that actually
+    # FAILED (e.g. a permission error) must not pass silently — fail the run so a
+    # scheduled job surfaces it. This runs after every host's summary line above.
+    - name: Fail the run if any capture failed
+      ansible.builtin.assert:
+        that: not (kontroll_backup_failed | default(false) | bool)
+        fail_msg: "{{ inventory_hostname }}: config-backup capture FAILED (see summary above)."
+        quiet: true
+      when: kontroll_backup_failed | default(false) | bool
+
+# Keep a per-run, diffable HISTORY of every device's config instead of overwriting
+# (docs/logging-architecture.md Layer 0, G3 — answers "what changed on this device?").
+# The store is LOCAL-ONLY: it lives inside the already-0700/uid-1001 captures dir, has
+# NO remote, and is never pushed — captures hold device secrets (running-config hashes,
+# PSKs), so the history stays exactly as protected as the captures (SECURITY.md C8).
+# The git module covers clone/checkout, not init/add/commit — raw git by necessity.
+#
+# Access chain used:   localhost (the control node's captures dir)
+# May break:           nothing on the lab — control-node git only
+# Fallback required:   no
+# Blast radius:        this VM's captures dir only
+# Idempotence:         no device change -> nothing staged -> no commit (0 changed)
+- name: Snapshot the captures into local history (git)
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  vars:
+    _ts: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
+    # The capture-exception matrix (config/capture-exceptions.yml) is a SPARSE registry —
+    # only captures that misbehave (e.g. FortiGate's non-deterministic full-config export).
+    # Its exclude_from_history members are kept on disk (latest) but NOT versioned, so a
+    # non-diffable capture can't fill the history with noise commits. Operator-extensible.
+    _matrix: >-
+      {{ lookup('ansible.builtin.file', playbook_dir ~ '/../../config/capture-exceptions.yml',
+         errors='ignore') | default('', true) | from_yaml | default({}, true) }}
+    _exclude_globs: >-
+      {{ (_matrix.exceptions | default([])) | selectattr('disposition', 'defined')
+         | selectattr('disposition', 'eq', 'exclude_from_history') | map(attribute='match') | list }}
+  tasks:
+    - name: Initialise the capture-history repo if absent  # noqa: command-instead-of-module
+      ansible.builtin.command:
+        cmd: "git init -q {{ config_backup_dir }}"
+        creates: "{{ config_backup_dir }}/.git"
+
+    - name: Render the history .gitignore from the capture-exception matrix
+      ansible.builtin.copy:
+        dest: "{{ config_backup_dir }}/.gitignore"
+        mode: "0644"
+        content: |
+          # GENERATED from config/capture-exceptions.yml (disposition: exclude_from_history).
+          # Non-deterministic/volatile captures: kept on disk (latest), kept OUT of the git
+          # history so they don't make noise commits. Edit the matrix, not this file.
+          {{ _exclude_globs | join('\n') }}
+
+    # The capture-history store is owned by the Semaphore runtime uid (1001) — the SCHEDULED writer. The mutating
+    # raw-git tasks below carry `-c safe.directory={{ config_backup_dir }}` (scoped to THIS store, never `*`) so an
+    # operator hand-running this play on the host to debug or seed a first capture — necessarily a DIFFERENT uid
+    # (root via sudo, or the uid-1000 operator; uid-1001 has no host passwd entry) — doesn't abort on git's
+    # dubious-ownership guard. It is a no-op on the same-uid runner path and adds NO write capability (it only
+    # suppresses the cross-uid guard for one dedicated dir). `git init` above needs none — it CREATES the repo.
+    - name: Untrack any now-excluded captures (one-time cleanup; idempotent after)  # noqa: command-instead-of-module
+      ansible.builtin.command:
+        cmd: >-
+          git -c safe.directory={{ config_backup_dir }} -C {{ config_backup_dir }}
+          rm -r --cached --ignore-unmatch -- {{ _exclude_globs | join(' ') }}
+      changed_when: false
+      when: _exclude_globs | length > 0
+
+    - name: Stage all captures (excluded ones are gitignored)  # noqa: command-instead-of-module
+      ansible.builtin.command:
+        cmd: "git -c safe.directory={{ config_backup_dir }} -C {{ config_backup_dir }} add -A"
+      changed_when: false
+
+    - name: Commit a timestamped snapshot when configs changed  # noqa: command-instead-of-module
+      ansible.builtin.command:
+        cmd: >-
+          git -c safe.directory={{ config_backup_dir }} -C {{ config_backup_dir }}
+          -c user.email=kontroll-backup@localhost -c user.name='kontroll backup'
+          commit -q -m 'backup {{ _ts }}'
+      register: _snapshot
+      changed_when: _snapshot.rc == 0
+      failed_when:
+        - _snapshot.rc != 0
+        - "'nothing to commit' not in _snapshot.stdout + _snapshot.stderr"
+
+# ENFORCE the backup retention window by pruning capture-history commits older than it (#125 — the deferred
+# follow-up to #123, which only DECLARED + CARRIED `retention`). DEFAULT-SAFE: a NO-OP unless a finite
+# `kontroll_backup_retention` window (30d/90d/365d) is passed; `keep-all` or an undefined var (a manual /
+# unscheduled run) skips the prune (0 changed). The prune is a DESTRUCTIVE, history-only git rewrite of the
+# LOCAL-ONLY captures repo: it re-roots the kept slice onto a synthetic FULL-snapshot baseline (each commit's
+# tree is a complete snapshot, so dropping old commits loses no current capture — only the diffable HISTORY
+# beyond the window), then gc's to reclaim disk. A fail-closed guard set (finite window / real worktree / NO
+# git remote / not bare / not the canonical path) SKIPS or FAILS before any destructive command — a wrong-repo
+# rewrite (the C10 canonical /srv/kontroll.git, the deploy tree) is the catastrophic mode this is built to make
+# impossible. The captures repo NEVER has a remote; the canonical + deploy tree DO — that is the load-bearing
+# distinguisher. Touches commit metadata/trees only, never prints capture CONTENT (no secret leak; SECURITY.md C8).
+#
+# Access chain used:   localhost (the control node's own captures dir — config_backup_dir); local git only,
+#                      no network, no device, no SSH.
+# May break:           at worst the LOCAL capture history's OLD commits (by design — that IS the prune). The
+#                      latest snapshot + working tree are preserved. CANNOT touch the canonical /srv/kontroll.git
+#                      or the deploy tree — guarded fail-closed (no-remote + non-bare + not-canonical-path).
+# Fallback required:   no — captures are local-only ephemeral history; the latest capture state (working tree +
+#                      HEAD) is preserved; only AGED history below the window is dropped.
+# Blast radius:        this VM's captures dir ONLY (config_backup_dir). Never the canonical, deploy tree, device,
+#                      or network.
+# Idempotence:         re-running with the same window in the same time window ⇒ 0 changed (no commit is older
+#                      than the cutoff after the first prune). A rolling cutoff means a later cron run MAY drop
+#                      newly-aged commits (correct — changed_when reflects whether anything was actually pruned).
+# Concurrency:         an mkdir lock serializes two prunes on the same captures dir. RESIDUAL (review SEC-MF1):
+#                      a per-class snapshot COMMIT from ANOTHER concurrent backup run could be orphaned by this
+#                      prune's history rewrite and reclaimed — bounded to ONE historical diff point on local-only
+#                      ephemeral data (never the canonical, never the current capture — the next run re-captures
+#                      live device state). Mitigated by the staggered per-class crons (≥30 min apart).
+- name: Prune capture history older than the retention window (git)
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  vars:
+    _retention: "{{ kontroll_backup_retention | default('keep-all') | trim }}"
+    # The finite windows (days) — MUST match service/backup.py _RETENTIONS (a covering test pins the agreement).
+    _windows: {'30d': 30, '90d': 90, '365d': 365}
+    _retention_days: "{{ _windows.get(_retention, 0) }}"
+  tasks:
+    # Tier 1 (UNCONDITIONAL): a hand-run `-e kontroll_backup_retention=7d` (a value the GUI never offers) FAILS
+    # loudly rather than silently falling through to keep-all. keep-all / undefined pass (keep-all is allowed).
+    - name: Fail-closed — reject a retention value that is not a known preset
+      ansible.builtin.assert:
+        that:
+          - _retention in ['keep-all', '30d', '90d', '365d']
+        fail_msg: >-
+          kontroll_backup_retention='{{ kontroll_backup_retention | default('') }}' is not a recognised window.
+          Allowed: keep-all (no prune), 30d, 90d, 365d (matches service/backup.py _RETENTIONS). A hand-run -e
+          with a bad value is refused, not silently treated as keep-all.
+        quiet: true
+
+    # The remaining tasks run ONLY for a finite window (keep-all / undefined ⇒ _retention_days == 0 ⇒ skip,
+    # a clean no-op). The read-only guard resolvers carry check_mode:false (so a --check dry-run PROVES the
+    # decision); the destructive prune does NOT (it stays check-skipped — a dry-run rewrites nothing).
+    - name: Resolve the captures repo's real toplevel (read-only)  # noqa: command-instead-of-module
+      ansible.builtin.command:
+        cmd: "git -C {{ config_backup_dir }} rev-parse --show-toplevel"
+      register: _prune_toplevel
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: _retention_days | int > 0
+
+    - name: Stat the captures .git to confirm a real worktree repo
+      ansible.builtin.stat:
+        path: "{{ config_backup_dir }}/.git"
+      register: _prune_dotgit
+      check_mode: false
+      when: _retention_days | int > 0
+
+    # The captures repo must have NONE — the load-bearing guard (the canonical + deploy tree DO have remotes).
+    - name: List the captures repo's remotes (must be empty)  # noqa: command-instead-of-module
+      ansible.builtin.command:
+        cmd: "git -C {{ config_backup_dir }} remote"
+      register: _prune_remotes
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: _retention_days | int > 0
+
+    # The canonical is a BARE repo; the captures dir is a worktree. A bare target ⇒ wrong repo ⇒ refuse.
+    - name: Detect whether the captures repo is bare  # noqa: command-instead-of-module
+      ansible.builtin.command:
+        cmd: "git -C {{ config_backup_dir }} rev-parse --is-bare-repository"
+      register: _prune_is_bare
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: _retention_days | int > 0
+
+    # Fail CLOSED (loud) if ANY precondition is unmet. The no-remote + not-canonical clauses are the firewall
+    # against rewriting the wrong repo; rc==0 on the discriminating reads means an ERRORED git read fails closed
+    # rather than reading as a benign empty result.
+    - name: Fail-closed — refuse the prune unless the target is provably the local-only captures repo
+      ansible.builtin.assert:
+        that:
+          - _prune_dotgit.stat.exists
+          - _prune_toplevel.rc == 0 and (_prune_toplevel.stdout | length > 0)
+          - _prune_remotes.rc == 0 and (_prune_remotes.stdout | trim | length == 0)
+          - _prune_is_bare.rc == 0 and (_prune_is_bare.stdout | trim | lower == 'false')
+          - (_prune_toplevel.stdout | trim) not in ['/srv/kontroll.git']
+          - not (_prune_toplevel.stdout | trim | regex_search('(^|/)kontroll\.git(/|$)'))
+        fail_msg: >-
+          Refusing to prune capture history: the target {{ config_backup_dir }} (resolved
+          {{ _prune_toplevel.stdout | default('?') | trim }}) failed a fail-closed safety gate
+          [remotes='{{ _prune_remotes.stdout | default('') | trim }}',
+          bare={{ _prune_is_bare.stdout | default('?') | trim }}].
+          The prune ONLY ever rewrites the LOCAL-ONLY captures worktree — a non-bare git repo at config_backup_dir
+          with NO remote that is NOT the canonical /srv/kontroll.git or the deploy tree. A remote, a bare repo, or a
+          canonical path means the wrong repo (SECURITY.md C8/C10).
+        quiet: true
+      when: _retention_days | int > 0
+
+    # The prune. History-only (no working-tree checkout): re-root the kept slice onto a synthetic full-snapshot
+    # baseline, bake with filter-branch, drop the backup refs, reflog-expire + gc to actually reclaim disk. The
+    # drop-set count (`--before`) gate makes a re-run a true no-op (after the first prune nothing is older than
+    # the cutoff). In-script guards (no-remote / canonical-path) are REDUNDANT with the asserts above by design
+    # (defense in depth on the catastrophic wrong-repo mode). belt-and-suspenders `when:` re-asserts every guard
+    # + `not ansible_check_mode` so a --check dry-run never rewrites and a future edit must defeat BOTH layers.
+    - name: Enforce retention — prune capture-history commits older than the window  # noqa: command-instead-of-module
+      ansible.builtin.shell: |
+        set -euo pipefail
+        repo='{{ config_backup_dir }}'
+        window_days='{{ _retention_days }}'
+        cd "$repo"
+        # --- in-script fail-closed guards (redundant defense-in-depth with the ansible asserts) ---
+        git rev-parse --git-dir >/dev/null 2>&1 || { echo "PRUNE_SKIP not-a-git-repo"; exit 0; }
+        [ -z "$(git remote)" ] || { echo "PRUNE_ABORT has-remote"; exit 3; }
+        case "$repo" in */srv/kontroll.git*|*kontroll.git) echo "PRUNE_ABORT canonical-path"; exit 3 ;; esac
+        # A captures dir holds only device configs; the deploy/source tree has a root CLAUDE.md — a second
+        # independent net for the deploy tree on top of its no-remote (it is a clone). (review SEC-MF2)
+        [ ! -e CLAUDE.md ] || { echo "PRUNE_ABORT looks-like-source-tree"; exit 3; }
+        # --- serialize against a CONCURRENT prune on the same captures dir: two filter-branch rewrites racing
+        #     could corrupt refs. mkdir is atomic on every POSIX fs (no flock dep). Skip (don't fail) if locked —
+        #     the next cron tick prunes. (review SEC-MF1; the snapshot-vs-prune residual is documented in the
+        #     header + SECURITY.md C8.) ---
+        lock="$(git rev-parse --git-dir)/kontroll-prune.lock"
+        mkdir "$lock" 2>/dev/null || { echo "PRUNE_NOOP locked (a concurrent prune holds the lock)"; exit 0; }
+        trap 'rmdir "$lock" 2>/dev/null || true' EXIT
+        # --- clear stale rewrite scaffolding from a prior KILLED run BEFORE the drop-set gate, so a half-run
+        #     can't (a) mask itself as a clean no-op via a lingering virtual graft or (b) leave history
+        #     permanently grafted with the old objects never reclaimed. Idempotent (xargs -r no-ops when clean).
+        #     This also makes `git replace --graft` below always run against a clean state. (review COR-MF1) ---
+        git for-each-ref --format='%(refname)' refs/replace/  | xargs -r -n1 git update-ref -d
+        git for-each-ref --format='%(refname)' refs/original/ | xargs -r -n1 git update-ref -d
+        # --- empty / single-commit short-circuits ---
+        git rev-parse -q --verify HEAD >/dev/null 2>&1 || { echo "PRUNE_NOOP empty-repo"; exit 0; }
+        total=$(git rev-list --count HEAD)
+        [ "$total" -gt 1 ] || { echo "PRUNE_NOOP single-commit"; exit 0; }
+        # --- the drop set: commits OLDER than the window. zero -> idempotent no-op (the key re-run guard) ---
+        drop=$(git rev-list --count --before="${window_days} days ago" HEAD)
+        [ "$drop" -gt 0 ] || { echo "PRUNE_NOOP nothing-older-than-window"; exit 0; }
+        # --- keep-root = oldest commit WITHIN the window; all-older -> keep ONLY the latest snapshot ---
+        keep_root=$(git rev-list --reverse --since="${window_days} days ago" HEAD | head -1 || true)
+        [ -n "$keep_root" ] || keep_root=$(git rev-parse HEAD)
+        # --- re-root: synthetic full-snapshot baseline (no data loss), graft, bake, drop refs, gc ---
+        baseline=$(git -c user.email=kontroll-backup@localhost -c user.name='kontroll backup' \
+                     commit-tree "${keep_root}^{tree}" -m "backup history baseline (pruned >${window_days}d)")
+        git replace --graft "${keep_root}" "${baseline}"
+        FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch --force --tag-name-filter cat -- --all
+        git replace -d "${keep_root}" 2>/dev/null || true
+        git for-each-ref --format='%(refname)' refs/original/ | xargs -r -n1 git update-ref -d
+        git reflog expire --expire=now --all
+        git gc --prune=now --quiet
+        # EXACT removed-count: total(before) - kept(after) + 1 (the synthetic baseline inflates the after-count
+        # by exactly 1, so a kept keep_root/boundary commit is never mis-counted as dropped). (review COR-MF3)
+        kept=$(git rev-list --count HEAD)
+        echo "PRUNE_DONE dropped=$(( total - kept + 1 )) kept=${kept} window=${window_days}d"
+      args:
+        executable: /bin/bash
+      register: _prune
+      changed_when: "'PRUNE_DONE' in _prune.stdout"
+      failed_when: "_prune.rc != 0"
+      # NO check_mode:false — this is a MUTATOR; it must stay check-skipped so --check never rewrites history.
+      # This `when:` is a FAITHFUL MIRROR of the fail-closed assert above (rc==0 reads + the kontroll.git regex,
+      # not just the literal /srv/kontroll.git) so the "a future edit must defeat BOTH layers" invariant is real,
+      # not a subset. (review SEC-MF3)
+      when:
+        - _retention_days | int > 0
+        - _prune_dotgit.stat.exists | default(false)
+        - (_prune_remotes.rc | default(1)) == 0 and (_prune_remotes.stdout | default('') | trim | length == 0)
+        - (_prune_is_bare.rc | default(1)) == 0 and (_prune_is_bare.stdout | default('') | trim | lower == 'false')
+        - (_prune_toplevel.stdout | default('') | trim) not in ['/srv/kontroll.git']
+        - not ((_prune_toplevel.stdout | default('') | trim) | regex_search('(^|/)kontroll\.git(/|$)'))
+        - not ansible_check_mode
+
+    - name: Report the prune outcome (run-id-correlated audit; counts only, never capture content)
+      ansible.builtin.debug:
+        msg: "retention prune ({{ _retention }}): {{ _prune.stdout | default('(skipped)') }}"
+      when: _retention_days | int > 0
+
+# Post-run: remove the per-run ephemeral SSH key dir (imported LAST — after the fleet connections; MF-4).
+- name: Clean up the per-run ephemeral SSH key dir
+  ansible.builtin.import_playbook: _cleanup-ssh-keys.yml

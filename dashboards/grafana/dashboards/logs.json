@@ -1,0 +1,109 @@
+{
+  "__comment": "Hand-authored kontroll logs dashboard (Layer 3). Auto-loaded by the file provider (dashboards/grafana/provisioning/dashboards/providers.yml). Every panel + target pins the Loki datasource by its FIXED uid 'loki' (provisioning/datasources/loki.yml) — never rename it on a live Grafana. Panels key ONLY off the canonical, non-secret C12 label set {source,host,service,level,run_id,device}; body search is a LogQL |~ filter (a query, never a label → no cardinality growth). Live rendering is verified post-deploy (dashboards/README §Testing); CI runs the hermetic shape test tests/unit/test_dashboards_logs.py.",
+  "uid": "kontroll-logs",
+  "title": "kontroll — Logs",
+  "tags": ["kontroll", "logs", "loki"],
+  "timezone": "",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": {"from": "now-6h", "to": "now"},
+  "refresh": "30s",
+  "templating": {
+    "list": [
+      {
+        "name": "source", "label": "source", "type": "query",
+        "datasource": {"type": "loki", "uid": "loki"},
+        "query": "label_values(source)",
+        "refresh": 2, "includeAll": true, "multi": true, "allValue": ".*"
+      },
+      {
+        "name": "service", "label": "service", "type": "query",
+        "datasource": {"type": "loki", "uid": "loki"},
+        "query": "label_values({source=~\"$source\"}, service)",
+        "refresh": 2, "includeAll": true, "multi": true, "allValue": ".*"
+      },
+      {
+        "name": "level", "label": "level", "type": "custom",
+        "query": "info,warn,error,debug,audit,notice",
+        "includeAll": true, "multi": true, "allValue": ".*",
+        "current": {"text": "All", "value": "$__all"}
+      },
+      {
+        "name": "run_id", "label": "run_id (internal)", "type": "query",
+        "datasource": {"type": "loki", "uid": "loki"},
+        "query": "label_values({source=\"internal\"}, run_id)",
+        "refresh": 2, "includeAll": true, "multi": false, "allValue": ".*"
+      },
+      {
+        "name": "search", "label": "body search", "type": "textbox",
+        "query": "", "current": {"text": "", "value": ""}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "title": "Log volume by source", "type": "timeseries",
+      "datasource": {"type": "loki", "uid": "loki"},
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 0},
+      "targets": [
+        {"refId": "A", "datasource": {"type": "loki", "uid": "loki"},
+         "editorMode": "code", "queryType": "range",
+         "expr": "sum by (source) (count_over_time({source=~\"$source\"} [$__interval]))"}
+      ]
+    },
+    {
+      "id": 2, "title": "Error / warn rate by service", "type": "timeseries",
+      "datasource": {"type": "loki", "uid": "loki"},
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 0},
+      "targets": [
+        {"refId": "A", "datasource": {"type": "loki", "uid": "loki"},
+         "editorMode": "code", "queryType": "range",
+         "expr": "sum by (service) (count_over_time({source=~\"$source\", level=~\"error|warn\"} [$__interval]))"}
+      ]
+    },
+    {
+      "id": 3, "title": "Top services by volume", "type": "table",
+      "datasource": {"type": "loki", "uid": "loki"},
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 7},
+      "targets": [
+        {"refId": "A", "datasource": {"type": "loki", "uid": "loki"},
+         "editorMode": "code", "queryType": "instant",
+         "expr": "topk(10, sum by (service) (count_over_time({source=~\"$source\"} [$__range])))"}
+      ]
+    },
+    {
+      "id": 4, "title": "Audit trail (api-audit / gui-audit, kept 90d)", "type": "logs",
+      "datasource": {"type": "loki", "uid": "loki"},
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 7},
+      "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true},
+      "targets": [
+        {"refId": "A", "datasource": {"type": "loki", "uid": "loki"},
+         "editorMode": "code", "queryType": "range",
+         "expr": "{source=\"internal\", service=~\"api-audit|gui-audit\"}"}
+      ]
+    },
+    {
+      "id": 5, "title": "Run correlation ({source=internal, run_id})", "type": "logs",
+      "datasource": {"type": "loki", "uid": "loki"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 14},
+      "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true},
+      "targets": [
+        {"refId": "A", "datasource": {"type": "loki", "uid": "loki"},
+         "editorMode": "code", "queryType": "range",
+         "expr": "{source=\"internal\", run_id=~\"$run_id\"}"}
+      ]
+    },
+    {
+      "id": 6, "title": "Live log stream", "type": "logs",
+      "datasource": {"type": "loki", "uid": "loki"},
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 22},
+      "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true},
+      "targets": [
+        {"refId": "A", "datasource": {"type": "loki", "uid": "loki"},
+         "editorMode": "code", "queryType": "range",
+         "expr": "{source=~\"$source\", service=~\"$service\", level=~\"$level\"} |~ \"$search\""}
+      ]
+    }
+  ]
+}

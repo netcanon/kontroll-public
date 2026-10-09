@@ -1,0 +1,16 @@
+---
+# See cisco_ios/defaults/main.yml for the backup_capable contract.
+#
+# Docker hosts have no single, uniformly-capturable "device config": their state
+# is per-app appdata + compose files managed outside this seam (a NAS appliance's
+# config.xml, a reverse proxy's nginx tree, bind-mounted stack directories). Forcing a
+# class-wide capture would produce something meaningless or misleading, so the
+# class is NOT backup-capable by default and backup-configs.yml records a logged
+# skip instead. This is the intended "manage-but-don't-back-up" state.
+#
+# To enable a real capture for ONE host, set `backup_capable: true` in
+# host_vars/<host>.yml and add that host's specific capture to tasks/backup.yml.
+#
+# Uniform cross-role contract var — see cisco_ios/defaults/main.yml for why it
+# carries no role-name prefix.
+backup_capable: false  # noqa: var-naming[no-role-prefix]

@@ -1,0 +1,127 @@
+# Vector — log collector/shipper for the stack's OWN logs (Loki sink). Config is a DROP-IN TREE under
+# ../vector: global opts via --config, components via --config-dir (implicit namespacing — subdir = type,
+# filename = id). ADDING A SOURCE = one new file under vector/config.d/sources/ + a transform + wiring it into
+# the loki sink's `inputs` — NEVER an edit to a hub. (10-research-vector-loki.md §1.2.)
+#
+# Access chain used:   reads host journald (/var/log/journal RO), the Docker API socket (RO), and bind-mounted
+#                      audit/run-log files (RO); writes ONLY to Loki over the kontroll network.
+# May break:           nothing on the lab — Vector is read-only on every source; a Vector outage loses log
+#                      SHIPPING, not the source logs (files/journald/Semaphore DB persist).
+# Fallback required:   no. Loki/Vector down => degrade to `docker logs` / journalctl / the flat audit files.
+# Blast radius:        this VM (observability only). No device, VLAN, or WAN path is touched.
+#
+# PRIVILEGE (SECURITY.md C12): Vector runs NON-ROOT (`user: "10002:10002"`, a uid distinct from Loki's 10001) and
+# holds NO raw Docker socket — its docker_logs source talks to the GET/HEAD-only docker-socket-proxy (POST=0),
+# which alone mounts /var/run/docker.sock. Host journald (root:systemd-journal 2750, group-readable) is read via
+# `group_add: ${KONTROLL_JOURNAL_GID}` (the host systemd-journal GID, discovered by deploy-stack). The audit/run-log
+# dirs are read via their `o+r` world-read (deploy-stack widens them; they carry audit TSV already destined for Loki)
+# — NOT via `group_add: 1001`, which would over-grant read of the API/GUI TLS private keys (0640 1001:1001). So a
+# Vector RCE is an unprivileged process that can read only logs — it cannot take the host. Vector publishes NO host
+# port beyond the mgmt-bound syslog ingress. GATE A (the non-root journald read) is the live GO/NO-GO dogfood.
+
+services:
+  vector:
+    # Debian tag ships `journalctl` (the journald source shells out to it). The default is the STOCK pinned image;
+    # deploy-stack overrides KONTROLL_VECTOR_IMAGE to the locally-built kontroll/vector (stock + openssh-client)
+    # ONLY when a class declares file_tail_ssh (that method's exec source needs an ssh client the stock image
+    # lacks — bench-verified). Keep this default tag in LOCKSTEP with docker/vector-image/Dockerfile's FROM.
+    image: ${KONTROLL_VECTOR_IMAGE:-timberio/vector:0.56.0-debian}
+    container_name: vector
+    restart: unless-stopped
+    user: "10002:10002"                      # NON-ROOT (C12). Distinct from Loki's 10001 (a shared uid would let a
+                                             # Vector RCE read the Loki store) — pinned by test_vector_uid_distinct.
+    group_add:
+      - "${KONTROLL_JOURNAL_GID:-65534}"     # host systemd-journal GID (deploy-stack getent), to read /var/log/journal.
+                                             # 65534 (nogroup) is an inert fail-closed default (reads nothing extra).
+    security_opt:
+      - no-new-privileges:true               # guard the non-root switch from any setuid escalation (free, DiD).
+    depends_on:
+      - loki
+      - docker-socket-proxy                  # docker_logs targets the proxy, never the raw socket
+    # config.d = the hand-authored INTERNAL tree (sources/transforms/sinks type-dirs, implicit namespacing);
+    # generated = the CAPABILITY drop-ins gen-logging.py writes (full-config fragments, explicit ids — a
+    # DISJOINT config-dir so the two never collide). Adding a device's log source = a generated file, no hub edit.
+    command: ["--config", "/etc/vector/vector.yaml",
+              "--config-dir", "/etc/vector/config.d", "--config-dir", "/etc/vector/generated"]
+    ports:
+      # Syslog INGRESS for the syslog_push logging method — MGMT interface ONLY (never 0.0.0.0; C3/C12 parity
+      # with loki.yaml/prometheus.yaml; :? fails closed if KONTROLL_MGMT_IP is empty). A device configured by
+      # roles/logging_syslog_push ships RFC5424 syslog here; Vector's GENERATED syslog source
+      # (docker/vector/generated/syslog_push_<key>.generated.yaml) binds 0.0.0.0:5514 INSIDE the container's
+      # own netns, so THIS host publish is what scopes the exposure to the management VLAN. Harmless when no
+      # class declares syslog_push (nothing listens inside the container -> connection refused), only meaningful
+      # once one does. TCP matches the source mode (logging/syslog_push.yml mode: tcp); a udp method would add a
+      # udp publish + a udp source mode. 5514 (not 514) so the container needs no privileged-port capability.
+      - "${KONTROLL_MGMT_IP:?set in .env}:5514:5514/tcp"
+    environment:
+      VECTOR_LOG: "info"
+      # Operator home is instance-specific — parameterize the script-run-log bind base (the source mount below).
+      KONTROLL_OPERATOR_HOME: ${KONTROLL_OPERATOR_HOME:-/home/admin}
+      # Credentialed-pull token passthrough — one ${VAR:-} line per credentialed LOGGING method (compose `include`
+      # can't merge an addition into an existing service, so this stays hand-authored). It carries NO secret and NO
+      # token SHAPE — just the env name; the VALUE is composed into .env by deploy-stack from the GENERATED unified
+      # manifest (config/secret-env.manifest.generated.yml) via the kontroll_render_token filter (no_log). Empty
+      # default so the syslog/journald-only stack is unaffected. (Telemetry exporter env is generated into its own
+      # exporter container by gen-exporters, so only Vector-interpolated logging tokens need this line.)
+      KONTROLL_PVE_LOG_TOKEN: ${KONTROLL_PVE_LOG_TOKEN:-}   # proxmox_api (logging/proxmox_api.yml secret_env_map)
+    volumes:
+      # --- config (the drop-in tree: vector.yaml globals + config.d/{sources,transforms,sinks} + generated/) ---
+      # ../ (one level up from docker/services/) = docker/vector/. NOT ../../ (that is repo-root/vector, which
+      # does not exist → Docker creates an empty dir → "config not found"). Caught live on the dogfood.
+      - ../vector:/etc/vector:ro
+      # --- internal sources (all RO — Vector reads, never writes the host; C12 minimal-privilege) ---
+      # NB: the raw /var/run/docker.sock is NOT mounted here — docker_logs targets the docker-socket-proxy
+      # (GET/HEAD-only) over the kontroll net, so non-root Vector never holds the root-equivalent socket (C12).
+      - /var/log/journal:/var/log/journal:ro                     # host journald (persistent)
+      - /run/log/journal:/run/log/journal:ro                     # host journald (volatile)
+      # Remote hosts' journals: received by the host systemd-journal-remote (roles/logging_journald_receiver) and
+      # read by the journald_remote method's `exec` journalctl source. A SEPARATE top-level dir (NOT under
+      # /var/log/journal) so internal_journald never double-ingests the uploads (logging/journald_remote.yml). The
+      # dir is created by the receiver role; harmless empty if no class declares journald_remote.
+      - /var/log/journal-remote:/var/log/journal-remote:ro       # remote uploads (journal-remote -> exec journalctl)
+      - /etc/machine-id:/etc/machine-id:ro                       # journald needs it to identify the journal
+      # file_tail_ssh: the READ-ONLY forced-command SSH private key the exec source authenticates with (the
+      # 3rd injection shape — a secret FILE, not an env). deploy-stack renders it from the logging_file_tail SOPS
+      # domain (0600) when file_tail_ssh is declared, else an empty placeholder so this static file-bind always
+      # resolves to a FILE (a missing source would be auto-created as a root:root DIR — the G9 trap). RO: Vector
+      # reads the key, never writes it (C12). The exec command's `-i` points here (logging/file_tail_ssh.yml).
+      - ${KONTROLL_STORAGE_ROOT:-/var/lib/kontroll}/vector/file_tail_ssh.key:/etc/vector-keys/file_tail_ssh:ro
+      # Operator-pinned device CA bundle (PUBLIC certs; the no-bespoke TLS hardening path). deploy-stack ASSEMBLES
+      # it from every device_trust.<key>.tls_ca_file (empty placeholder when none pinned) — ONE bundle BOTH Vector
+      # AND the pve-exporter verify against, so pinning a CA for a new class needs NO hub edit. A class's pull
+      # source references this path in source.tls.ca_file ONLY when a CA is pinned (kontroll.endpoints.
+      # VECTOR_CA_BUNDLE); harmless empty file otherwise. RO — Vector reads it, never writes (C12). Static (compose
+      # `include` can't merge a mount into an existing service — same reason as the KONTROLL_PVE_LOG_TOKEN line).
+      - ${KONTROLL_STORAGE_ROOT:-/var/lib/kontroll}/vector/device-ca-bundle.pem:/etc/vector-keys/device-ca-bundle.pem:ro
+      # file_tail_ssh PINNED known_hosts (PUBLIC host keys; the no-TOFU hardening). Assembled by deploy-stack from
+      # device_trust.<key>.ssh_known_hosts_file (always written, empty when none pinned → valid file-bind, G9). RO:
+      # Vector reads it (the exec ssh's UserKnownHostsFile=yes), never writes — no TOFU into a writable file (C12).
+      - ${KONTROLL_STORAGE_ROOT:-/var/lib/kontroll}/vector/file_tail_known_hosts:/etc/vector-keys/file_tail_known_hosts:ro
+      # Vector RE-READS the SAME relocatable stores RO — repointed to the SAME vars so a relocation can't move
+      # the store out from under the log shipper (else these silently stop forwarding — C12 logging gap).
+      - ${KONTROLL_GUI_AUDIT_DIR:-/var/lib/kontroll/onboard-gui/audit}:/host/gui-audit:ro        # GUI audit log (TSV)
+      - ${KONTROLL_API_AUDIT_DIR:-/var/lib/kontroll/api/audit}:/host/api-audit:ro                # API audit log (TSV)
+      - ${KONTROLL_ANSIBLE_LOG_DIR:-/var/lib/kontroll/ansible-log}:/host/ansible-log:ro          # ansible run log
+      - ${KONTROLL_OPERATOR_HOME:-/home/admin}/.local/state/kontroll/runs:/host/operator-runs:ro  # script run-logs
+      # --- checkpoints / disk buffers (so a restart resumes, not re-reads) ---
+      # A BIND MOUNT owned by the non-root Vector uid (deploy-stack creates it 10002:10002), NOT a named volume:
+      # a named volume initializes ROOT-owned, so non-root Vector could not write its data_dir (/var/lib/vector) and
+      # the container exits "Permission denied" creating the journald checkpoint — caught on the GATE-A dogfood.
+      - ${KONTROLL_STORAGE_ROOT:-/var/lib/kontroll}/vector/data:/var/lib/vector
+    healthcheck:
+      # Vector's API /health on 8686 binds loopback inside the container (vector.yaml) — never published.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8686/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    # The ONLY published port is the mgmt-bound syslog ingress (above) — Vector is a collector, not a query
+    # surface; its API/health (8686) stays loopback-internal. A future http_server (journald-remote) ingress
+    # would add another mgmt-bound publish here the same way.
+    networks:
+      - kontroll
+
+networks:
+  kontroll:
+    external: true
+    name: kontroll

@@ -1,0 +1,27 @@
+# Capability vector: logging (can this thing be told to EXPORT its logs to us?). See vectors/actuate.yml for
+# the drop-in contract.
+#
+# SCOPE — read before adding a rule. A vector matches a COLLECTION's probe facts (modules/plugins), NOT a live
+# host. "Does this emit logs?" is ALMOST UNIVERSALLY true and is mostly a HOST/SERVICE fact (journald on a host,
+# docker_logs on a container, a file on disk), which is NOT a collection-plugin fact — so it must be
+# OPERATOR-DECLARED in modules/<key>/module.yml (logs: [...]), never probe-detected (exactly like host_node for
+# telemetry). The ONE collection-visible signal is "this box has a CLI/NETCONF management plane" (cliconf/
+# netconf): such gear can be CONFIGURED to ship syslog to us (syslog_push). Treat `yes`/`maybe` as "a device-
+# side log export is plausible — offer syslog_push", `no` as "no log-export-shaped signal (the operator must
+# DECLARE journald/file/docker)". Confidence is deliberately conservative: NEVER `high` or `medium` — no
+# collection signal is strong evidence of log exportability. The DECLARED method (module.yml) is the truth.
+name: logging
+label: logging (export)
+symbol: logging
+order: 5   # after telemetry (4)
+match:
+  # A network_cli / NETCONF-managed device (switch / router / firewall) has a config plane we can use to point
+  # its syslog at the collector. The ONLY collection-visible log-export signal. Suggestive, not certain.
+  - rule: {any_of: [{plugin: cliconf}, {plugin: netconf}]}
+    confidence: low
+  # A *_facts module means a structured read-out plane exists — a VERY weak hint that a pull/REST log endpoint
+  # MIGHT exist (rest_pull). Lowest confidence; the operator confirms by DECLARING the method.
+  - rule: {module_suffix: _facts}
+    confidence: low
+# NO httpapi->yes rule: a REST/httpapi collection does NOT imply a queryable LOG endpoint (it implies a config/
+# metrics API). rest_pull is therefore DECLARED, not suggested — the vector stays silent on it.

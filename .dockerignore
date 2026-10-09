@@ -1,0 +1,40 @@
+# Build-context exclusions for EVERY image build (the compose-native installer, the Semaphore runner, the Vector
+# image). The installer image (docker/installer/Dockerfile) does `COPY . /repo`; without this, the dev node's
+# live `instance/` overlay (the age private key, the SOPS recipients, the real-IP inventory, instance/trust) and
+# `local/` ssh keys would bake into an image layer. The compose-native security floor forbids any secret in an
+# image (synthesis §5); tests/unit/test_installer_phase1.py pins these exclusions so they can't silently regress.
+#
+# Mirrors .gitignore's secret patterns. KEEP ansible/collections/*.generated.yml — gitignored, but the Semaphore
+# runner image bakes the fleet collections from it (docker/semaphore-runner/Dockerfile). Do NOT add a
+# *.generated.* exclude here.
+
+# Private instance overlay (age key, SOPS secrets, .sops.yaml recipients, real-IP inventory, trust root) + scratch
+instance/
+local/
+
+# age private keys + decrypted secret outputs (mirror .gitignore)
+*.agekey
+keys.txt
+**/sops/age/keys.txt
+*.dec
+*.decrypted
+*.plain.yml
+*.plain.yaml
+
+# Runtime env files (rendered with secrets; host bind, never an image layer)
+.env
+**/.env
+*.env
+!*.env.example
+
+# Not needed in any image; large or noise
+.git/
+.github/
+docs/reviews/
+node_modules/
+**/__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+*.retry

@@ -1,0 +1,5 @@
+---
+# Liveness check for the docker_host class — SSH ping.
+- name: SSH liveness ping
+  ansible.builtin.ping:
+  when: not (molecule_test | default(false) | bool)

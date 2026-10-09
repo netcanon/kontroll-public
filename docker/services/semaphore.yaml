@@ -1,0 +1,82 @@
+# Semaphore — Ansible automation frontend (create/run/schedule jobs).
+# Uses its own Postgres. Secrets (DB password, admin password, encryption key)
+# come from the SOPS-decrypted ../.env — placeholders documented in .env.example.
+
+services:
+  semaphore-db:
+    image: postgres:16-alpine
+    container_name: semaphore-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: semaphore
+      POSTGRES_DB: semaphore
+      POSTGRES_PASSWORD: ${SEMAPHORE_DB_PASSWORD:?set in .env}
+    volumes:
+      - semaphore-db:/var/lib/postgresql/data
+    networks:
+      - kontroll
+
+  semaphore:
+    # Custom runner (stock image + sops/age + baked collections), built by
+    # deploy-stack.yml from docker/semaphore-runner/Dockerfile.
+    image: ${KONTROLL_CONTROL_IMAGE:-kontroll/semaphore:latest}   # ghcr digest if published; else local build
+    container_name: semaphore
+    restart: unless-stopped
+    # uid:gid both 1001 — the image's `USER 1001` resolves to gid 0 (root), which is NOT in group 1001, so a job
+    # could not write the group-1001 canonical even when mounted :rw. Force gid 1001 (like api.yaml) so the
+    # `promote-proposal` task can fast-forward main as a group member, no host root. Inert when the canonical is
+    # mounted :ro (unarmed). Verified live 2026-06-15: stock USER 1001 → gid 0; `user: "1001:1001"` → gid 1001. C10.
+    user: "1001:1001"
+    depends_on:
+      - semaphore-db
+    ports:
+      - "3001:3000"
+    environment:
+      SEMAPHORE_DB_DIALECT: postgres
+      SEMAPHORE_DB_HOST: semaphore-db
+      SEMAPHORE_DB_NAME: semaphore
+      SEMAPHORE_DB_USER: semaphore
+      SEMAPHORE_DB_PASS: ${SEMAPHORE_DB_PASSWORD:?set in .env}
+      SEMAPHORE_ADMIN: ${SEMAPHORE_ADMIN:-admin}
+      SEMAPHORE_ADMIN_PASSWORD: ${SEMAPHORE_ADMIN_PASSWORD:?set in .env}
+      SEMAPHORE_ADMIN_NAME: "Admin"
+      SEMAPHORE_ADMIN_EMAIL: ${SEMAPHORE_ADMIN_EMAIL:-admin@example.com}
+      SEMAPHORE_ACCESS_KEY_ENCRYPTION: ${SEMAPHORE_ACCESS_KEY_ENCRYPTION:?32-byte base64, set in .env}
+      # Persist the ansible run-log OFF the ephemeral per-job clone (it logs to ./.ansible/ansible.log there,
+      # lost every job) so it survives AND Vector can tail it (logging Layer 1; the docs/logging-architecture.md
+      # §3 Layer-0 "remaining durability enhancement"). Host dir created uid-1001/0750 by deploy-stack.
+      ANSIBLE_LOG_PATH: /ansible-log/ansible.log
+    # No repo mount: Semaphore CLONES the repo per its own model (git URL + the
+    # read-only deploy key in its Key Store). Collections are baked into the image;
+    # the SOPS age key + device SSH key are supplied via Semaphore's environment /
+    # Key Store (configured by the API setup, not mounted — avoids uid-mapping).
+    volumes:
+      # Persist config backups OFF the ephemeral job clone. backup-configs.yml is
+      # pointed here via config_backup_dir=/backups (set on its Semaphore template).
+      # Captures hold secrets — host dir is 0700, uid 1001. Created by deploy-stack.
+      - ${KONTROLL_BACKUPS_DIR:-/var/lib/kontroll/backups}:/backups
+      # The LOCAL CANONICAL git (instance source of truth) — Semaphore clones this
+      # via file:///srv/kontroll.git instead of GitHub, so the running instance needs
+      # no remote git. Operator-owned, seeded by local-canonical.yml. See
+      # docs/local-source-of-truth.md.
+      #
+      # Mount mode is gated: READ-ONLY by default, READ-WRITE only when the propose-then-promote
+      # system is armed (deploy-stack renders KONTROLL_CANONICAL_MODE=rw into docker/.env under
+      # api_privileged). The :rw mount is what lets the `promote-proposal` Semaphore task fast-forward
+      # main into a staged proposal as gid 1001 (no host root) — the C10 "approve" GUI action. A
+      # Semaphore breach then gains canonical-write (bounded: the canonical is a reconstructible cache;
+      # the dominant Semaphore residual — fleet root via the scoped age key — already dominates).
+      # SECURITY.md C10 / docs/privileged-mutation-enablement.md.
+      - ${KONTROLL_CANONICAL_GIT:-/srv/kontroll.git}:/srv/kontroll.git:${KONTROLL_CANONICAL_MODE:-ro}
+      # Persistent ansible run-log (ANSIBLE_LOG_PATH above) — Vector tails it RO. Created by deploy-stack.
+      - ${KONTROLL_ANSIBLE_LOG_DIR:-/var/lib/kontroll/ansible-log}:/ansible-log
+    networks:
+      - kontroll
+
+volumes:
+  semaphore-db:
+
+networks:
+  kontroll:
+    external: true
+    name: kontroll

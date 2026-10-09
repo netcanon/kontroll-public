@@ -1,0 +1,22 @@
+# Operational Semaphore template (manually-run) — the GUI "approve" half of C10's
+# propose-then-promote (docs/privileged-mutation-enablement.md). The network service
+# (API/GUI) can only PROPOSE a change (push proposed/<run_id>); running THIS template
+# fast-forwards main into that proposal. Reachable only by a Semaphore admin on the
+# mgmt VLAN — never by the API token — so a leaked token can never self-promote.
+#
+# The run_id is a survey variable: the operator enters the proposal's id (from the
+# onboard/capability/secret propose response) when launching the task. promote.yml
+# asserts its shape, previews the commits, then runs the tested FF-only promote.
+name: promote-proposal
+playbook: ansible/playbooks/promote.yml
+description: >-
+  Approve + promote a staged proposal (proposed/<run_id>) to main — C10. Fast-forward
+  only; refuses a non-fast-forward. Enter the run_id from the propose response.
+survey_vars:
+  - name: run_id
+    title: Proposal run_id
+    description: >-
+      The id of the proposed/<run_id> ref to promote (from the onboard / capability /
+      secret propose response, or `git ls-remote`). Letters, digits and hyphens only.
+    type: ""          # free-text (Semaphore passes it to the playbook as an extra-var)
+    required: true

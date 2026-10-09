@@ -1,0 +1,60 @@
+name: Bug report
+description: Report a defect in the control plane, a generator, a role, or the GUI
+title: "[bug] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Ground rules:
+
+        - **Never paste real addresses, hostnames, MACs, credentials or SOPS ciphertext.** Redact to the
+          documentation ranges (`192.0.2.x`, `example.com`, `00:00:5e:00:53:xx`) before pasting a log or config.
+        - A security vulnerability goes through the private advisory channel (see `SECURITY.md`), never here.
+        - If the generated artifacts are stale (`gen-*.py --check` red), run the generator first — that is a
+          contribution step, not a bug.
+
+  - type: input
+    id: version
+    attributes:
+      label: kontroll version / commit
+      description: "`git describe --tags --always` on the checkout, or the release tag"
+      placeholder: "v0.2.0 / abc1234"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - Generators / validate gate (tests/validate.sh, gen-*.py)
+        - Ansible role / playbook
+        - GUI (:8443) or API (:8444)
+        - Compose stack / deploy-stack
+        - Install path (bundle, installer image, kontroll-init)
+        - Docs
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, what you saw. Redacted output welcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The smallest module.yml / inventory snippet / command that shows it (TEST-NET addresses only).
+      render: shell
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python, ansible-core, docker versions; `trust_mode`; which modules are enabled.

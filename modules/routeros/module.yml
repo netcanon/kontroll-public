@@ -1,0 +1,37 @@
+# Device-class module: MikroTik RouterOS switch.
+key: routeros
+description: MikroTik RouterOS switch (API/SSH)
+status: staged                 # post-cutover core — enable at cutover, disable cisco_ios
+# F2 (de-bespoke, north-star Rung 4): this class's metrics/logs FLOOR is AUTO-DERIVED. community.routeros ships a
+# cliconf plugin → predicate.classify → the `netcommon_cli` backend, which confers the full network-gear floor
+# (telemetry [snmp, blackbox] + logs [syslog_push]) — a MikroTik switch derives the SAME floor as cisco_ios. This is
+# an ADDITIVE migration (the class carried no metrics/logs before) but the class is STAGED (commented out of the
+# fleet + inventory), so it is DORMANT — zero live scrape/log targets until it is enabled at cutover. While staged it
+# is NOT visited by gen-class-capabilities --check (which reads the enabled example fleet); its floor is gated by the
+# frozen-oracle unit test (test_derive_class_capabilities.py) until cutover. backup stays role-gated (not derived).
+derived: true
+collections:
+  - name: community.routeros
+    version: ">=3.0.0"
+role: routeros
+inventory_group: core_switch
+secrets_domain: network
+# Observability + logging FLOOR — DERIVED (gen-class-capabilities-owned). snmp interface counters + ICMP reachability
+# + RFC5424 syslog, exactly the cisco_ios floor. All `derived: true` (recomputed from facts.pinned.yml).
+metrics:
+  - {method: snmp, params: {module: if_mib}, derived: true}      # interface counters (snmp_exporter, v3 read-only)
+  - {method: blackbox, params: {probe: icmp}, derived: true}     # ICMP reachability (blackbox, no creds/agent)
+logs:
+  - {method: syslog_push, params: {transport: tcp}, derived: true}   # RouterOS syslog -> Vector -> Loki
+# Dashboards - the DERIVED Grafana-board FLOOR (Rung 4a): netcommon_cli derives [snmp, blackbox] -> snmp_if (gnet
+# 1124) + blackbox (gnet 13659), the same board floor as cisco_ios. STAGED -> gated by the frozen-oracle unit test,
+# not gen-class-capabilities --check, until cutover. `derived: true` = owned. See dashboards/derived/README.md.
+dashboards:
+  - {gnet: 1124, name: snmp_if, derived: true}     # snmp -> "SNMP Interface Throughput"
+  - {gnet: 13659, name: blackbox, derived: true}   # blackbox -> "Blackbox Exporter (HTTP prober)"
+# Discovery (read-spine, Rung 1a/2) — a RouterOS router keeps a DHCP-server lease table; ASK it read-only over its
+# REST API to surface un-onboarded hosts into the onboard inbox. DECLARED (opt-in per class; community.routeros drives
+# config over cliconf/SSH but is READ for leases over REST). Passive + read-only, reuses `network` AS-SCOPED, C18.
+# STAGED -> DORMANT until cutover, like the class's derived floor. A human onboards + promotes (C10). See discovery/.
+discovery:
+  - {method: dhcp_leases_routeros}

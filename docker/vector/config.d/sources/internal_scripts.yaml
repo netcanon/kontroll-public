@@ -1,0 +1,9 @@
+# config.d/sources/internal_scripts.yaml  → source id "internal_scripts", type file.
+# Operator-run scripts tee to ~/.local/state/kontroll/runs/<name>-<ts>.log (scripts/lib/run-log.sh). The bind
+# base is parameterized via ${KONTROLL_OPERATOR_HOME} in docker/services/vector.yaml.
+type: file
+include:
+  - /host/operator-runs/*.log
+read_from: beginning
+ignore_older_secs: 2592000               # ignore files untouched >30d (matches the run-log's own 30d prune)
+data_dir: /var/lib/vector

@@ -1,0 +1,85 @@
+# api — the typed kontroll onboarding API (api/main.py over the service layer). Reuses the kontroll
+# runner image (ansible + sops + age + baked collections + fastapi/uvicorn) so it has the exact
+# toolchain probe/classify need.
+#
+# DEPLOYED READ-ONLY (docs/api-architecture.md §9, SECURITY.md C9): no KONTROLL_API_TOKEN is set, so
+# the privileged routes are fail-closed (503) — only the inquiry routes (search/probe/classify/health)
+# serve. The content clone is provisioned ROOT-OWNED, so uid-1001 reads it but cannot write — that
+# filesystem-ownership is the read-only lock (independent of the mount flag). To enable live mutation, the
+# GATED privileged deploy (`-e api_privileged=true`; SECURITY.md C10 + docs/privileged-mutation-enablement.md)
+# renders the token, chowns the clone to uid-1001 + adds a `local` remote, and sets KONTROLL_STAGE_PUSHES — so
+# the API can only PROPOSE (push a proposed/<run_id> staging ref); a trusted `kontroll promote` lands it.
+# NO age key is mounted (the no-key posture — capability writes carry no creds). Bind to mgmt only; never WAN.
+#
+# Deploy via: ansible-playbook playbooks/deploy-stack.yml -e '{"stack_services":["api"]}'
+services:
+  api:
+    image: ${KONTROLL_CONTROL_IMAGE:-kontroll/semaphore:latest}   # ghcr digest if published; else local build
+    container_name: kontroll-api
+    restart: unless-stopped
+    # uid:gid both 1001 — the gid is needed (not just the uid) so that, when privileged, the container can
+    # write the group-1001 canonical /srv/kontroll.git (its setgid bare repo). In read-only mode this is inert
+    # (no token ⇒ 503; the content clone is root-owned ⇒ unwritable to uid-1001 regardless of gid). C10.
+    user: "1001:1001"
+    # Phase B (bake-code, Rung 1b): run api/ from the BAKED control image at /opt/kontroll when deployed with
+    # `-e bake_code=true` (deploy-stack renders KONTROLL_CODE_ROOT into .env); else the legacy /repo clone. The mutable
+    # C10 propose tree is the bind below, addressed via KONTROLL_WRITE_ROOT (paths.write_root()). `:-/repo` defaults
+    # keep an un-baked .env byte-identical. docs/reviews/2026-06-29-phase-b-baked-code/99-synthesis.md §5/§6.
+    working_dir: ${KONTROLL_CODE_ROOT:-/repo}
+    # TLS posture is per-instance (instance/instance.yml frontend.tls_mode, resolved by
+    # scripts/kontroll/frontend.py): deploy-stack renders KONTROLL_API_UVICORN_EXTRA into docker/.env as
+    # `--ssl-keyfile/--ssl-certfile` (self_signed) or `--forwarded-allow-ips=*` (byo_proxy/acme — serve
+    # HTTP behind a trusted reverse proxy that owns TLS). NOTE: keep both folded lines at the SAME indent
+    # so `>-` joins them with a SPACE, not a literal newline (a more-indented continuation would split the
+    # uvicorn args across `sh` commands).
+    command: >-
+      sh -c '. /opt/semaphore/apps/ansible/*/venv/bin/activate && exec uvicorn api.main:app
+      --host 0.0.0.0 --port 8444 ${KONTROLL_API_UVICORN_EXTRA}'
+    environment:
+      PYTHONPATH: ${KONTROLL_CODE_ROOT:-/repo}   # import api + the kontroll service layer (baked or the /repo clone)
+      # The WRITE root for paths.write_root() — every mutator + git op targets the propose clone, NOT the (baked,
+      # read-only) code at PYTHONPATH. /propose (baked) maps to the bind below; /repo (legacy, unset) == ROOT == the
+      # clone, byte-identical to before. MF-4: this var is rendered into the config-time .env (deploy-stack) — it must
+      # NOT live in a per-service env_file (compose interpolates it in the `volumes:` mount target at config time).
+      KONTROLL_WRITE_ROOT: ${KONTROLL_WRITE_ROOT:-/repo}
+      # PRIVILEGED-CAPABLE, gated by deploy-stack `api_privileged` (default off ⇒ empty ⇒ fail-closed 503).
+      # The app is fail-closed in code (api/auth.py); soft-default (`:-`) so the read-only deploy (empty token)
+      # can't break compose for other services in the include.
+      KONTROLL_API_TOKEN: ${KONTROLL_API_TOKEN:-}
+      # C10 propose-then-promote: when set (gated deploy), the canonical push targets a proposed/<run_id>
+      # STAGING ref, never main. Empty ⇒ direct push (moot in read-only mode — nothing writes).
+      KONTROLL_STAGE_PUSHES: ${KONTROLL_STAGE_PUSHES:-}
+      # Persistent (NOT /tmp) so the audit trail survives a container restart AND Vector can tail it (logging
+      # Layer 1). The host dir /var/lib/kontroll/api/audit is created uid-1001/0750 by deploy-stack.
+      KONTROLL_API_AUDIT_LOG: /audit/api-audit.log
+      # Audit-log rotation knobs (storage paradigm). Fail-closed in code (envguard.positive_int clamps an
+      # empty/garbage value to the default, NEVER 0 = no rotation = an unbounded C12 audit file). Default 5 MB x 5
+      # (== the prior hardcode), so this is behaviour-preserving until the operator tunes it.
+      KONTROLL_AUDIT_MAX_MB: ${KONTROLL_AUDIT_MAX_MB:-5}
+      KONTROLL_AUDIT_MAX_FILES: ${KONTROLL_AUDIT_MAX_FILES:-5}
+      ANSIBLE_COLLECTIONS_PATH: /usr/share/ansible/collections   # deep_probe finds the baked collections
+      ANSIBLE_HOST_KEY_CHECKING: "False"
+    ports:
+      - "${KONTROLL_MGMT_IP:?set in .env}:8444:8444"   # mgmt interface only, HTTPS — never 0.0.0.0 (:? fails closed)
+    volumes:
+      # The content clone. uid-1001 can WRITE it ONLY when the gated privileged deploy chowns it to uid-1001
+      # (C10); else it stays root-owned ⇒ effectively read-only (ownership is the lock, not the mount flag).
+      # The content clone == the C10 propose tree. The HOST dir stays …/api/repo (deploy-stack clones it unchanged);
+      # the CONTAINER mount target is the write-root — /repo (legacy) or /propose (baked, KONTROLL_WRITE_ROOT). When
+      # baked, code is read from /opt/kontroll (PYTHONPATH) and ONLY the instance-overlay propose writes land here.
+      - ${KONTROLL_STORAGE_ROOT:-/var/lib/kontroll}/api/repo:${KONTROLL_WRITE_ROOT:-/repo}
+      # The canonical, so the clone's `local` remote (file:///srv/kontroll.git) resolves INSIDE the container —
+      # the C10 staging push (proposed/<run_id>) writes it. Mode is GATED: :ro by default, :rw only when armed
+      # (deploy-stack renders KONTROLL_CANONICAL_MODE=rw under api_privileged). So the read-only deploy mounts it
+      # :ro — even a container RCE cannot update-ref the canonical directly; the :rw access (needed for the
+      # proposal push) exists only when the propose-then-promote system is armed. SECURITY.md C10.
+      - ${KONTROLL_CANONICAL_GIT:-/srv/kontroll.git}:/srv/kontroll.git:${KONTROLL_CANONICAL_MODE:-ro}
+      - ${KONTROLL_STORAGE_ROOT:-/var/lib/kontroll}/api/tls:/tls:ro       # api.crt + api.key (host-provisioned)
+      - ${KONTROLL_API_AUDIT_DIR:-/var/lib/kontroll/api/audit}:/audit     # API audit log (uid-1001, 0750) — Vector RO
+    networks:
+      - kontroll
+
+networks:
+  kontroll:
+    external: true
+    name: kontroll

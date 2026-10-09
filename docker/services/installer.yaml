@@ -1,0 +1,86 @@
+# installer.yaml — the EPHEMERAL compose-native installer service (Phase 1, the `init` service).
+#
+# Run via the launcher scripts/kontroll-installer.sh (which derives the operator identity, MF-1, and ensures the
+# host bind targets exist), NOT raw `docker compose`. The launcher invokes:
+#   docker compose -f docker/services/installer.yaml run --rm init <verb> [args…]
+#
+# DELIBERATELY a STANDALONE fragment, NOT in docker/compose.yaml's include: a pre-`.env` run (fresh-init / check
+# run BEFORE deploy-stack renders docker/.env) would otherwise trip the stack services' `${…:?set in .env}`
+# required-var validation, which compose evaluates for the WHOLE project even on a single-service `run`. Keeping
+# the installer in its own fragment lets the first-boot verbs run with no .env present. (Phase B integrates the
+# init services into the main compose with depends_on — synthesis §6.)
+#
+# SECURITY (synthesis §5): ephemeral (`run --rm`, no `restart:`), CLI-only, PORTLESS — the :rw docker socket is
+# host-root only for the run's duration. The crown jewels are HOST BIND files, never named volumes / image
+# layers. The age + ssh binds are :rw (this container is the privileged key-MINTER — bootstrap/fresh-init create
+# the control age key + the ansible ssh key here); the long-running network services keep their key binds :ro.
+# :rw here does not widen blast radius — the docker socket already makes this container host-root-equivalent.
+services:
+  init:
+    build:
+      context: ../..                       # repo ROOT (docker/installer/Dockerfile does COPY . /repo)
+      dockerfile: docker/installer/Dockerfile
+    # Local-build path (scripts/kontroll-installer.sh `run --build`) tags this `kontroll/installer:latest`. C1
+    # PUBLISHED path (scripts/kontroll, the bundle-as-compose launcher): KONTROLL_INSTALLER_IMAGE is set to the
+    # ghcr `@sha256:` digest (from docker/images.lock.yml) and the launcher does `pull init` + `run --no-build`, so
+    # the SAME fragment pulls the published image by digest instead of building — no separate compose file needed.
+    image: ${KONTROLL_INSTALLER_IMAGE:-kontroll/installer:latest}
+    container_name: kontroll-installer
+    network_mode: host                      # localhost:3001 (configure-semaphore) + the host docker daemon
+    user: "0:0"                             # root: drive the socket, become:true no-op, numeric-uid chowns (MF-1)
+    # SAME path in-container as on the host (below) — `docker compose up` runs here but binds against the HOST
+    # daemon, so the stack services' relative bind sources (e.g. prometheus ../../prometheus/prometheus.yml) MUST
+    # resolve to real HOST paths. If /repo != the host path, the daemon can't find them (dogfood-caught 2026-06-29:
+    # "mount /repo/prometheus/prometheus.yml ... not a directory"). Mirrors the storage-root same-path bind.
+    working_dir: ${KONTROLL_REPO_ROOT:?run via scripts/kontroll-installer.sh}
+    environment:
+      # MF-6: the playbooks skip their HOST-setup tasks (Docker install, qemu-guest-agent, OS packages) when this
+      # is set — those belong to scripts/install-prereqs.sh + scripts/host-systemd.sh on the host, not an
+      # ephemeral container. local-canonical also skips the named gid-1001 group/membership host gestures.
+      KONTROLL_IN_CONTAINER: "1"
+      # MF-1: the INVOKING host operator's identity (the launcher exports these from id -un/-u/-g + $HOME). The
+      # playbooks chown the canonical + render docker/.env to THIS uid/gid (numeric, user-DB-free) instead of the
+      # in-container root, so the operator's `git push local` + a non-root `docker compose up` work.
+      KONTROLL_OPERATOR_USER: ${KONTROLL_OPERATOR_USER:?run via scripts/kontroll-installer.sh}
+      KONTROLL_OPERATOR_UID: ${KONTROLL_OPERATOR_UID:?run via scripts/kontroll-installer.sh}
+      KONTROLL_OPERATOR_GID: ${KONTROLL_OPERATOR_GID:?run via scripts/kontroll-installer.sh}
+      KONTROLL_OPERATOR_HOME: ${KONTROLL_OPERATOR_HOME:?run via scripts/kontroll-installer.sh}
+      # Passed INTO the container (not just used for volume/working_dir interpolation) so entrypoint.sh resolves the
+      # repo at the host path — the same path the host daemon sees for the stack's relative bind sources.
+      KONTROLL_REPO_ROOT: ${KONTROLL_REPO_ROOT:?run via scripts/kontroll-installer.sh}
+      # MF-8: ONE in-container age-key path (this container is root ⇒ ~ == /root). community.sops + sops read it;
+      # SOPS_AGE_KEY_FILE (the file form), NEVER the literal SOPS_AGE_KEY env (synthesis §5.4).
+      SOPS_AGE_KEY_FILE: /root/.config/sops/age/keys.txt
+      # The image bakes the control-plane collections at /usr/share/ansible/collections, but ansible/ansible.cfg
+      # pins `collections_path = collections` (a RELATIVE path → /repo/ansible/collections, which the host /repo
+      # bind shadows EMPTY at runtime) — so the baked collections (and bootstrap's run-time fleet install, which
+      # also lands here) would be unresolvable without this override. Mirrors docker/services/onboard-gui.yaml.
+      # (Dogfood-caught 2026-06-29: `check` failed "couldn't resolve community.docker.docker_image_build".)
+      ANSIBLE_COLLECTIONS_PATH: /usr/share/ansible/collections
+      # Keep ansible's file log off the operator-owned /repo bind (the relative ansible.cfg log_path isn't writable
+      # there as root in some layouts → a noisy "log file not writeable, aborting" warning). An ephemeral path.
+      ANSIBLE_LOG_PATH: /tmp/kontroll-installer-ansible.log
+    volumes:
+      # The repo working tree (incl. the private instance/ overlay + instance/trust the L2b wrapper reads). :rw —
+      # fresh-init scaffolds instance/, local-canonical commits the worktree. Bound at the SAME path as on the host
+      # (NOT /repo) so the in-container `docker compose up` hands the HOST daemon real host bind sources.
+      - ${KONTROLL_REPO_ROOT:?run via scripts/kontroll-installer.sh}:${KONTROLL_REPO_ROOT}
+      # The host docker daemon — deploy-stack shells `docker compose` + builds the runner/vector images through it.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # The C10 local canonical — :rw because local-canonical INITS + seeds it (the installer is the privileged
+      # seeder; the network services keep the :ro-default backstop). Same host path the stack services bind.
+      - /srv/kontroll.git:/srv/kontroll.git
+      # The host storage root — SAME absolute path in-container as on the host, so the dirs deploy-stack provisions
+      # here (onboard-gui/age.key, tls, backups, logs, api-audit) resolve identically when the host daemon binds
+      # them into the stack containers.
+      - ${KONTROLL_STORAGE_ROOT:-/var/lib/kontroll}:${KONTROLL_STORAGE_ROOT:-/var/lib/kontroll}
+      # The control age key dir — :rw so bootstrap/fresh-init MINT keys.txt here (through the host bind, never an
+      # image layer). The launcher mkdir -p's it so docker doesn't create it root-owned.
+      - ${KONTROLL_OPERATOR_HOME}/.config/sops/age:/root/.config/sops/age
+      # The operator ssh dir — :rw so bootstrap mints ~/.ssh/ansible_ed25519 (the device-access key) here.
+      - ${KONTROLL_OPERATOR_HOME}/.ssh:/root/.ssh
+      # The scoped Semaphore age key, if the operator minted it (optional; configure-semaphore skips when absent).
+      - ${KONTROLL_OPERATOR_HOME}/.config/semaphore:/root/.config/semaphore:ro
+      # MF-2: the HOST group db (read-only) so `getent group systemd-journal` resolves the host journal GID for
+      # Vector's journald source (else Vector silently reads no journald — 30 §2.2).
+      - /etc/group:/etc/group:ro

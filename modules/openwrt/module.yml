@@ -1,0 +1,39 @@
+# Device-class module: OpenWrt AP (raw SSH — no collection).
+key: openwrt
+description: OpenWrt access point (raw SSH; no dedicated collection)
+status: active
+# F2 (de-bespoke, north-star Rung 4): this class's metrics FLOOR is AUTO-DERIVED. openwrt has no collection, so its
+# facts.pinned.yml is EMPTY → predicate.classify falls to the `raw_ssh` catch-all, which confers telemetry [blackbox,
+# host_node]. ADDITIVE migration (the AP had no metrics before) → it gains a committed blackbox (ICMP reachability)
+# target AND a node_exporter target. The AP runs no node_exporter by default, so the node target scrapes HONEST-DOWN
+# (blanks a panel; there is no up==0 alert rule) — it is not faked, and installing node_exporter on the AP turns it
+# green. host_node stays a paradigm-level confer of raw_ssh (docker_host genuinely runs it); it is NOT special-cased
+# off openwrt (one-seam). backup stays role-gated (not derived).
+derived: true
+collections: []                # intentionally empty — raw SSH via ansible.builtin
+role: openwrt
+inventory_group: wireless_ap
+secrets_domain: network
+# Observability FLOOR — DERIVED (gen-class-capabilities-owned): ICMP reachability + a node_exporter host target.
+# All `derived: true` (recomputed from the empty facts.pinned.yml via the raw_ssh confer list).
+metrics:
+  - {method: blackbox, params: {probe: icmp}, derived: true}    # ICMP reachability (blackbox, no creds/agent)
+  - {method: host_node, derived: true}                          # node_exporter host target (honest-DOWN until set up)
+# Dashboards - the DERIVED Grafana-board FLOOR (Rung 4a): raw_ssh confers [blackbox, host_node] -> reachability
+# (gnet 13659) + node_exporter (gnet 1860). The node board is honest-DOWN until node_exporter is installed on the AP
+# (a blank panel, never a faked board). `derived: true` = gen-class-capabilities-owned. See dashboards/derived/.
+dashboards:
+  - {gnet: 13659, name: blackbox, derived: true}   # blackbox -> "Blackbox Exporter (HTTP prober)"
+  - {gnet: 1860, name: node, derived: true}        # host_node -> "Node Exporter Full" (honest-DOWN until set up)
+# Backup — the secondary-capability block (instance #2). gen-backup -> a per-class Semaphore schedule running
+# backup-configs.yml --limit wireless_ap. capable mirrors the role's backup_capable. See capabilities/backup.yml.
+# (The AP sits on its own VLAN; until the mgmt->AP-VLAN rule lands it is unreachable — backup-configs tolerates that.)
+backup:
+  capable: true
+  schedule: "0 4 * * *"   # nightly 04:00
+# Discovery — DECLARED opt-in (discovery-inbox, C18). Read the AP's OWN dnsmasq DHCP lease file (/tmp/dhcp.leases)
+# read-only over a forced-command SSH key, surfacing un-onboarded hosts into the onboard inbox. OpenWrt has no
+# read-only lease GET (ubus/LuCI are HTTP POST); the forced-command `cat` is the tightest read. See
+# discovery/dhcp_leases_openwrt.yml + the openwrt_discovery_key wiring role (authorizes the read pubkey on the AP).
+discovery:
+  - {method: dhcp_leases_openwrt}

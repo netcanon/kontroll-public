@@ -1,0 +1,37 @@
+---
+# Authorize the passive-discovery sweep's READ-ONLY key on an OpenWrt AP, FORCED to `cat /tmp/dhcp.leases` — so the
+# sweep (scripts/kontroll-discover.py, dhcp_leases_openwrt) can read the dnsmasq lease file and NOTHING else: no
+# shell, no arbitrary file read, no port/agent/X11 forwarding, no tty. Sibling of roles/logging_file_tail_ssh (the
+# Vector journald-tail key); a DEDICATED forced-command key, NEVER the full-shell `ansible_ed25519` root key the fleet
+# uses to run arbitrary Ansible against the AP (group_vars/wireless_ap.yml). Uses ansible.builtin.lineinfile, NOT
+# ansible.posix.authorized_key — that collection is not a dependency and requirements are GENERATED (CLAUDE.md).
+#
+# Access chain used:   control node (mgmt VLAN) -> OpenWrt AP (SSH) authorizes a read-only forced-command key
+# May break:           none — adds ONE authorized_keys line scoped to `cat /tmp/dhcp.leases` (no shell, no sudo)
+# Fallback required:   no
+# Blast radius:        this host (a restricted read-only key; reversible — remove the line)
+# Idempotence:         lineinfile keys off the pubkey body — the same key = 0 changed on a 2nd run
+# no_log:              true (the pubkey is not secret but the line is noise; keeps the audit clean)
+# --check-safe:        lineinfile renders the diff in check_mode, applies nothing (run --check --diff first)
+- name: Authorize the discovery read-only forced-command key on the OpenWrt AP (gated on a pubkey being supplied)
+  when: openwrt_discovery_pubkey | default('') | length > 0
+  become: true
+  block:
+    - name: Ensure root's .ssh dir exists
+      ansible.builtin.file:
+        path: /root/.ssh
+        state: directory
+        mode: "0700"
+        owner: root
+
+    - name: Authorize the read-only, forced-command dhcp-lease key (no shell)
+      ansible.builtin.lineinfile:
+        path: /root/.ssh/authorized_keys
+        line: >-
+          command="cat /tmp/dhcp.leases",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty
+          {{ openwrt_discovery_pubkey }}
+        create: true
+        mode: "0600"
+        owner: root
+        regexp: "{{ openwrt_discovery_pubkey | regex_escape }}$"
+      no_log: true

@@ -1,0 +1,35 @@
+# Backend: netcommon_cli — generic config ops for ANY network_cli platform that
+# ships a cliconf plugin (ansible.netcommon.cli_command/cli_config). A device of
+# this backend needs zero per-vendor task code: it declares network_os + (optional)
+# the show/backup commands. `classify` is evaluated by the classifier with the same
+# predicate engine as vectors/*.yml. Adding a backend = drop a backends/<name>/ dir.
+name: netcommon_cli
+label: network_cli via cliconf (any platform with a cliconf plugin)
+order: 1
+classify:
+  any_of:
+    - {plugin: cliconf}
+# confers — the per-backend capability map (the ONE host->capability dispatch seam, like device_role). F2 adds
+# telemetry/logs: the method NAMES this execution paradigm can AUTO-DERIVE (gen-class-capabilities + onboard emit
+# them as a metrics:/logs: floor). A network_cli device universally supports agent-less snmp + blackbox + RFC5424
+# syslog — so a blind-onboarded switch is monitored + log-shippable on day one, no hand-typed module.
+confers: {actuate: true, backup: true, telemetry: [snmp, blackbox], logs: [syslog_push]}
+requires: [network_os]            # e.g. cisco.ios.ios — set per device class
+role: backend_netcommon_cli       # the execution role (device class's device_role)
+# Connection vars the onboard planner renders into the host/group (network_os is
+# the per-device param supplied at onboard time).
+connection:
+  ansible_connection: network_cli
+  ansible_network_os: "{{ network_os }}"
+  ansible_become: false
+# Self-describing credential SHAPE (F1 TIER-A): a network_cli device authenticates with an SSH LOGIN (+ optional
+# enable secret), never an API token. The onboard form derives exactly these fields from this block — no dead REST
+# boxes. Read by scripts/kontroll/authspec.py; `kind` is the closed CredField enum (drives widget + secret/SOPS).
+auth:
+  - {field: username, kind: identity, label: "username (SSH)", maps_to: ansible_user, required: true}
+  - {field: password, kind: password, label: "password (SSH)", maps_to: ansible_password}
+  - {field: ssh_private_key, kind: ssh_key, label: "SSH private key (PEM)", maps_to: ansible_ssh_private_key_file}
+  - {field: enable_password, kind: password, label: "enable secret (optional)", maps_to: ansible_become_password}
+defaults:
+  backend_liveness_command: show version
+  backend_backup_command: show running-config

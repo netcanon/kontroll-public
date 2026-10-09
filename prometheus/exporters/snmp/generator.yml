@@ -1,0 +1,47 @@
+# snmp_exporter generator INPUT SPEC — the committed source from which scripts/gen-snmp.py produces
+# prometheus/exporters/snmp/modules.generated.yml (the `modules:` block of the snmp_exporter config).
+#
+# no-bespoke-config tenet: the if_mib OID set is DERIVED from public IETF MIBs (vendored under ./mibs/,
+# pinned to net-snmp v5.9 + IANA), not hand-authored — so MIB/vendor churn is a reviewable diff, never
+# silent rot. Pinned toolchain: snmp_exporter generator v0.30.1 (built from source, CGO/libsnmp — see
+# README.md). The runtime image is pinned in lockstep at telemetry/snmp.yml exporter.image:v0.30.1.
+#
+# FAITHFUL MIGRATION (behavior-preserving): this reproduces EXACTLY the 7-OID / 6-metric shape the
+# hand-authored snmp.yml.j2 scraped — a NARROW walk of the 6 explicit columns + sysUpTime (which upstream
+# evicted from stock if_mib at v0.28.0 into a `system` module — re-added here), an ifName-ONLY lookup (NOT
+# stock's ifName/ifDescr/ifAlias — extra lookups would add labels and change every interface series'
+# identity), and ifName ignored as a label-only. tests/unit/test_gen_snmp.py pins this against a frozen oracle.
+#
+# auths: is a THROWAWAY here — the generator copies auths: verbatim into its output, but gen-snmp.py strips it
+# so the committed modules artifact is modules-only (the real SNMPv3 v3_kontroll USM creds are SOPS-templated
+# into the runtime snmp.yml at deploy, never committed). The generated MODULES block carries NO auth reference;
+# auth binds at scrape time via __param_auth=v3_kontroll (telemetry/snmp.yml).
+auths:
+  _generate_only_v2:        # discarded by gen-snmp.py — never reaches the committed artifact
+    version: 2
+
+modules:
+  if_mib:
+    walk:
+      - SNMPv2-MIB::sysUpTime    # 1.3.6.1.2.1.1.3        gauge   (scalar; re-added — left if_mib @ v0.28.0)
+      - IF-MIB::ifAdminStatus    # 1.3.6.1.2.1.2.2.1.7    gauge
+      - IF-MIB::ifOperStatus     # 1.3.6.1.2.1.2.2.1.8    gauge
+      - IF-MIB::ifName           # 1.3.6.1.2.1.31.1.1.1.1 (label via lookup; ignored as a metric below)
+      - IF-MIB::ifHCInOctets     # 1.3.6.1.2.1.31.1.1.1.6  counter
+      - IF-MIB::ifHCOutOctets    # 1.3.6.1.2.1.31.1.1.1.10 counter
+      - IF-MIB::ifHighSpeed      # 1.3.6.1.2.1.31.1.1.1.15 gauge
+    lookups:
+      # ONE lookup only — ifName. The raw ifIndex label is KEPT (no drop_source_indexes), matching the
+      # hand-authored config: every interface series carries both ifIndex and ifName.
+      - source_indexes: [ifIndex]
+        lookup: IF-MIB::ifName
+    overrides:
+      ifName:
+        ignore: true            # ifName is a LABEL (via the lookup), not a standalone metric
+      # ifAdminStatus/ifOperStatus are INTEGER enums; the hand-authored config scraped them as a bare numeric
+      # `gauge`. Force `gauge` so the modern generator does NOT default them to an EnumAsStateSet shape (which
+      # would emit per-state series + a `*_info` label set) — faithful to today's scrape (the migration oracle).
+      ifAdminStatus:
+        type: gauge
+      ifOperStatus:
+        type: gauge

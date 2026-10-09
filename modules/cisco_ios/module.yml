@@ -1,0 +1,50 @@
+# Device-class module: Cisco IOS-XE switch.
+key: cisco_ios
+description: Cisco IOS-XE switch (network_cli/SSH)
+status: active                 # current core (pre-cutover)
+# F2 (de-bespoke): this class's metrics:/logs: FLOOR is AUTO-DERIVED, not hand-typed — `derived: true` marks the
+# class as gen-class-capabilities-owned. scripts/gen-class-capabilities.py --check re-derives the floor from
+# facts.pinned.yml + the registries (backend netcommon_cli confers snmp+blackbox+syslog) and fails CI on drift. The
+# per-entry `derived: true` markers below are IGNORED by gen-observability/gen-logging (they read method/params
+# only) so the generated Prometheus targets + Vector drop-in are byte-identical to pre-migration. backup stays the
+# conferred-DECLARED block (gen-backup gates it on roles/cisco_ios/tasks/backup.yml — a role signal, not derived).
+derived: true
+collections:
+  - name: cisco.ios
+    version: ">=8.0.0"
+role: cisco_ios
+inventory_group: core_switch
+secrets_domain: network
+# Observability — SNMP (agent-less; the switch runs no node_exporter). gen-observability emits
+# prometheus/targets/network/cisco_ios.generated.yml; gen-prometheus-jobs the network job; gen-exporters the
+# snmp-exporter container. See telemetry/snmp.yml + modules/README.md.
+metrics:
+  - {method: snmp, params: {module: if_mib}, derived: true}     # interface counters (snmp_exporter, v3 read-only)
+  - {method: blackbox, params: {probe: icmp}, derived: true}    # ICMP reachability (blackbox, no creds/agent)
+# Dashboards - the DERIVED Grafana-board FLOOR (Rung 4a): gen-class-capabilities re-derives it from the metrics
+# floor + the dashboards/derived locks (snmp -> gnet 1124, blackbox -> gnet 13659); the id is DERIVED, not typed.
+# `derived: true` = gen-class-capabilities-owned; fetch-dashboards.py fetches. See dashboards/derived/README.md.
+dashboards:
+  - {gnet: 1124, name: snmp_if, derived: true}     # snmp -> "SNMP Interface Throughput"
+  - {gnet: 13659, name: blackbox, derived: true}   # blackbox -> "Blackbox Exporter (HTTP prober)"
+# Backup — the secondary-capability `backup:` block (instance #2). gen-backup.py turns it into a Semaphore
+# schedule (config/semaphore/schedules.generated.yml) that runs backup-configs.yml --limit core_switch. capable
+# mirrors roles/cisco_ios/defaults/main.yml backup_capable (a validate equality check pins them equal). See
+# capabilities/backup.yml + modules/README.md.
+backup:
+  capable: true            # this class HAS a role backup entrypoint (roles/cisco_ios/tasks/backup.yml)
+  schedule: "0 2 * * *"    # cron — nightly 02:00 capture of the switch running-config
+# Logging — the secondary-capability `logs:` block (instance #3). gen-logging.py turns each entry into a Vector
+# source+transform drop-in (docker/vector/generated/syslog_push_cisco_ios.generated.yaml); the switch ships
+# RFC5424 syslog to the collector (roles/logging_syslog_push). The worked example: cisco_ios is a cliconf device,
+# so the `logging` vector AUTO-SUGGESTS syslog_push — it exercises the suggested path, not just the declared one.
+# See capabilities/logging.yml + logging/syslog_push.yml + modules/README.md.
+logs:
+  - {method: syslog_push, params: {transport: tcp}, derived: true}   # switch syslog -> Vector -> Loki
+# Discovery (read-spine, Rung 3) — the core switch keeps an ARP (IP<->MAC neighbour) table; ASK it read-only over
+# SNMPv3 (ipNetToMediaTable) to surface un-onboarded hosts — including STATICALLY-addressed hosts + cross-VLAN
+# neighbours no DHCP-lease API sees — into the onboard inbox. DECLARED (opt-in per class), passive + read-only, reuses
+# the shared snmp_observability read cred AS-SCOPED, C18. A human still onboards + promotes (C10). See discovery/.
+discovery:
+  - {method: arp_neighbors_snmp}   # v4 ARP (ipNetToMediaTable — the near-universal legacy table)
+  - {method: neighbors_snmp}       # dual-stack (RFC-4293 ipNetToPhysicalTable — ALSO catches v6 ND neighbours)

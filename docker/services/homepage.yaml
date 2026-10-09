@@ -1,0 +1,42 @@
+# Homepage — the service portal / single pane of glass.
+# Config is provisioned from ../instance/dashboards/homepage — the per-instance overlay
+# (your portal tiles; config-as-code, one file per concern). The tool ships a generic stub
+# at instance.example/dashboards/homepage. API keys for widgets are injected via env from a
+# SOPS-decrypted .env at deploy time — never hard-coded here.
+
+services:
+  homepage:
+    image: ghcr.io/gethomepage/homepage:v1.13.2
+    container_name: homepage
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      HOMEPAGE_ALLOWED_HOSTS: "control.${KONTROLL_DOMAIN:-localhost},${KONTROLL_MGMT_IP:-127.0.0.1}:3000"
+      # Log to stdout (docker logs), not /app/config/logs — keeps the config mount
+      # free of runtime log churn (see .gitignore in the config dir).
+      LOG_TARGETS: stdout
+    env_file:
+      # widget tokens (decrypted from SOPS into ../.env at deploy). Optional so
+      # a fresh checkout / `compose config` validation doesn't require the file;
+      # Homepage simply renders without live widgets until .env exists.
+      - path: ../.env
+        required: false
+    volumes:
+      # Read-WRITE: current Homepage (Next 16) force-copies skeleton files into
+      # /app/config on startup and hard-fails (EROFS) on a read-only mount. The
+      # overlay dir is the config-as-code SOURCE; Homepage's generated runtime files
+      # (custom.css/js, docker.yaml, logs) are gitignored there so it stays clean.
+      # Path is ../../ : compose resolves an included file's relative paths from THIS
+      # file's dir (docker/services/), so two levels up reaches the repo root, then
+      # into the instance/ overlay (created by kontroll-init --fresh on a new node).
+      - ../../instance/dashboards/homepage:/app/config
+      # Docker socket (read-only) only if you enable the Docker widget later:
+      # - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - kontroll
+
+networks:
+  kontroll:
+    external: true
+    name: kontroll

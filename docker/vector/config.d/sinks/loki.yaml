@@ -1,0 +1,40 @@
+# config.d/sinks/loki.yaml  → sink id "loki", type loki. THE label choke-point (C12): the labels: block is a
+# fixed, low-cardinality, NON-SECRET allow-list. High-cardinality / sensitive fields stay in the JSON body,
+# queryable via LogQL filters but NEVER indexed as a label (10-research §3.1). No secret-valued labels — ever.
+# `inputs:` lists every internal transform; adding a source means adding its transform id here (the one wiring
+# touch). Capability-derived (generated) sources feed Loki via a GENERATED sibling sink (gen-logging.py), so a
+# generator never edits this hand-authored file.
+type: loki
+# inputs are the SHAPED transforms (not the raw sources) — Vector requires globally-unique component ids, so
+# each source `internal_<x>` is paired with a transform `internal_<x>_shape` that labels it (caught live on the
+# dogfood: a source and transform sharing a name collide, and a transform consuming its own name is a cycle).
+inputs:
+  - internal_containers_shape
+  - internal_journald_shape
+  - internal_gui_audit_shape
+  - internal_api_audit_shape
+  - internal_ansible_shape
+  - internal_scripts_shape
+endpoint: http://loki:3100               # in-network by service name (the kontroll network)
+path: /loki/api/v1/push                  # the Loki push API
+encoding:
+  codec: json                            # whole event as a JSON line → body searchable via LogQL
+compression: snappy
+out_of_order_action: accept              # Loki 3.x accepts unordered writes
+remove_label_fields: false               # keep the label-source fields in the body too (so they're filterable)
+healthcheck:
+  enabled: true                          # Vector validates Loki reachability at startup
+# THE CANONICAL LABEL SET (C12): source, host, service, level, run_id  (+ device on the capability sink only).
+# Low-cardinality, structural, never a credential. gen-logging.py + the method descriptors assert the same set.
+labels:
+  source: "internal"                     # static: distinguishes internal from capability-derived streams
+  host: "{{ host }}"                      # low-cardinality: a few VMs
+  service: "{{ service }}"                # low-cardinality: container/unit/audit-surface/script name
+  level: "{{ level }}"                    # bounded: info|warn|error|debug|audit
+  run_id: "{{ run_id }}"                  # bounded: present only on correlated streams; absent => empty label
+batch:
+  max_events: 5000
+  timeout_secs: 2
+request:
+  concurrency: adaptive
+  timeout_secs: 30

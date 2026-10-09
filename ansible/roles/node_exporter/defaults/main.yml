@@ -1,0 +1,10 @@
+---
+# node_exporter install — the package is `prometheus-node-exporter` on BOTH Debian and Alpine; only the
+# manager (apt/apk) + init (systemd/OpenRC) differ, so tasks/ dispatches by ansible_os_family. Both listen
+# on :9100 (the port the generated `node` scrape targets expect). Override per-host in host_vars/<host>.yml.
+node_exporter_package: prometheus-node-exporter            # Debian (apt)
+node_exporter_service_systemd: prometheus-node-exporter    # Debian systemd unit
+node_exporter_packages_alpine:                             # Alpine (apk): the binary + its OpenRC service
+  - prometheus-node-exporter
+  - prometheus-node-exporter-openrc
+node_exporter_service_openrc: node-exporter                # Alpine /etc/init.d/ service name

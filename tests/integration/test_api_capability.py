@@ -1,0 +1,139 @@
+"""The generalized capability route — /capability/{cap} (+ /suggest), api/routes/capability.py.
+
+The seam's HTTP surface (docs/observability/secondary-capability-dialog.md §3.5, master §6 acceptance). One
+route serves every capability via a path segment: GET /suggest is read-only detection; POST proposes (pure)
+or promotes (plan-hash-gated, audited, scoped commit). These pin: the surface is fail-closed (401 without a
+token); suggest returns the offerable methods for a class; propose writes nothing and hands back a token;
+promote with that token commits ONLY the plan's paths and writes a `capability-promote` audit line carrying
+NO value; a STALE token is a 409 (the anti-drift gate); and an unregistered cap / un-onboarded class are
+clean 404s. The git seam, deep-probe, and matrix cache are stubbed so nothing real is touched.
+"""
+from types import SimpleNamespace
+
+import pytest
+import yaml
+from fastapi.testclient import TestClient
+
+from api.audit import read_audit
+from api.main import create_app
+from api.settings import Settings
+from kontroll import catalog, gitio, paths, probe
+
+pytestmark = pytest.mark.integration
+
+TOKEN = "test-token-xyz"
+AUTH = {"Authorization": "Bearer " + TOKEN}
+
+
+def _fake_probe(collection):
+    """A cliconf (network_cli) collection's deep facts — the Cisco-switch shape, enough for the telemetry
+    vector + applies_when filter (offers snmp/blackbox/host_node)."""
+    return {"collection": collection, "version": "1.0.0", "origin": "local", "depth": "deep",
+            "plugins": {"cliconf": ["ios"]}, "modules": ["ios_command"], "module_options": {},
+            "description": "", "tags": [], "certified": False}
+
+
+@pytest.fixture
+def cap(tmp_repo, tmp_path, monkeypatch):
+    """A privileged TestClient over the capability surface: a token + tmp audit log, the git seam + deep-probe
+    stubbed, paths.ROOT on a throwaway tree carrying one onboarded class (demo_sw, no metrics block yet)."""
+    calls = []
+    monkeypatch.setattr(gitio, "_run", lambda cmd, cwd=None, quiet_args=0: calls.append(list(cmd)) or 0)
+    monkeypatch.setattr(catalog, "local_installed", lambda: {})
+    monkeypatch.setattr(probe, "deep_probe", _fake_probe)
+    monkeypatch.setattr(paths, "MATRIX_CACHE", str(tmp_path / "matrix.json"))
+    (tmp_repo / "modules" / "demo_sw").mkdir(parents=True)
+    (tmp_repo / "modules" / "demo_sw" / "module.yml").write_text(yaml.safe_dump({
+        "key": "demo_sw", "collections": [{"name": "cisco.ios"}], "inventory_group": "core_switch"}),
+        encoding="utf-8")
+    audit_log = str(tmp_path / "audit" / "api-audit.log")
+    app = create_app(Settings(api_token=TOKEN, audit_log=audit_log))
+    with TestClient(app) as c:
+        yield SimpleNamespace(client=c, audit_log=audit_log, repo=tmp_repo, calls=calls)
+
+
+def _module_text(cap, key="demo_sw"):
+    return (cap.repo / "modules" / key / "module.yml").read_text(encoding="utf-8")
+
+
+# --- fail-closed + 404s ------------------------------------------------------------------------------- #
+def test_suggest_requires_a_token(cap):
+    """GET /capability/telemetry/suggest with no token is 401 — the whole /capability prefix is privileged,
+    even the read-only detection. Guards the surface being open."""
+    assert cap.client.get("/capability/telemetry/suggest", params={"key": "demo_sw"}).status_code == 401
+
+
+def test_unknown_capability_is_404(cap):
+    """An unregistered cap segment is a 404 (no such capability), not a 500 — guards a typo'd ?cap= and the
+    registry-driven dispatch returning cleanly."""
+    assert cap.client.post("/capability/nope", headers=AUTH, json={"key": "demo_sw"}).status_code == 404
+
+
+def test_suggest_unonboarded_key_is_404(cap):
+    """Suggest for a class with no module.yml is a 404 (not onboarded) — the capability surface is
+    strictly-after onboarding (INVARIANT D*)."""
+    r = cap.client.get("/capability/telemetry/suggest", headers=AUTH, params={"key": "ghost"})
+    assert r.status_code == 404
+
+
+# --- suggest (read-only detection) -------------------------------------------------------------------- #
+def test_suggest_offers_methods_for_a_network_class(cap):
+    """Suggest returns the offerable methods for the cliconf class — snmp + the universal host_node/blackbox —
+    plus the suggester cell. Guards the Stage-0 detection wiring end-to-end (descriptor → suggester +
+    applies_when filter)."""
+    r = cap.client.get("/capability/telemetry/suggest", headers=AUTH, params={"key": "demo_sw"})
+    assert r.status_code == 200
+    body = r.json()
+    names = {m["name"] for m in body["offerable_methods"]}
+    assert {"snmp", "host_node"} <= names
+    snmp = next(m for m in body["offerable_methods"] if m["name"] == "snmp")
+    assert snmp["params"]["module"]["allowed"] == ["if_mib"]   # the picker gets the closed allow-list
+    assert body["suggestion"]["cell"]["state"] in ("yes", "maybe")
+
+
+# --- propose (pure) ----------------------------------------------------------------------------------- #
+def test_propose_writes_nothing_and_returns_a_token(cap):
+    """POST apply:false returns the plan + an anti-drift token and leaves the module.yml untouched and git
+    silent — the review step. Guards the propose/promote boundary at the route."""
+    before = _module_text(cap)
+    r = cap.client.post("/capability/telemetry", headers=AUTH,
+                        json={"key": "demo_sw", "selection": {"method": "snmp", "params": {"module": "if_mib"}}})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["applied"] is False and body["token"]
+    assert body["plan"]["method"] == "snmp" and body["plan"]["enact"]
+    assert _module_text(cap) == before          # nothing written
+    assert not cap.calls                         # no git
+
+
+# --- promote (apply, audited, scoped commit) ---------------------------------------------------------- #
+def test_promote_with_token_commits_only_plan_paths_and_audits(cap):
+    """A propose→promote round-trip: apply:true with the proposed token writes the metrics block, commits
+    (git mocked) only the plan's paths, and emits a `capability-promote` audit line. Guards the whole audited
+    write path AND that the commit is scoped to the plan's paths (not a blanket `git add -A`)."""
+    proposed = cap.client.post("/capability/telemetry", headers=AUTH,
+                               json={"key": "demo_sw", "selection": {"method": "snmp",
+                                                                     "params": {"module": "if_mib"}}}).json()
+    r = cap.client.post("/capability/telemetry", headers=AUTH,
+                        json={"key": "demo_sw", "apply": True, "token": proposed["token"],
+                              "selection": {"method": "snmp", "params": {"module": "if_mib"}}})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["committed"] is True and "- {method: snmp" in _module_text(cap)
+    add = next(c for c in cap.calls if "add" in c)
+    assert "modules/demo_sw/module.yml" in add and "-A" not in add   # scoped, not blanket
+    rows = read_audit(cap.audit_log, action="capability-promote")
+    assert rows and rows[0]["run_id"] == body["run_id"]
+    assert "if_mib" not in rows[0]["detail"] or "module" not in rows[0]["detail"]  # method name ok; no secret values
+
+
+def test_promote_with_a_stale_token_is_409(cap):
+    """apply:true with a token that does not match the (recomputed) plan is a 409 and writes nothing — the
+    anti-drift gate at the route. Guards a promote landing a plan the operator never reviewed."""
+    before = _module_text(cap)
+    r = cap.client.post("/capability/telemetry", headers=AUTH,
+                        json={"key": "demo_sw", "apply": True, "token": "stale-bogus-token",
+                              "selection": {"method": "host_node"}})
+    assert r.status_code == 409
+    assert _module_text(cap) == before
+    assert not any("commit" in " ".join(c) for c in cap.calls)

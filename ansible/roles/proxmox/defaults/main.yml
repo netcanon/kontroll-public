@@ -1,0 +1,5 @@
+---
+# See cisco_ios/defaults/main.yml for the backup_capable contract.
+# Uniform cross-role contract var — see cisco_ios/defaults/main.yml for why it
+# carries no role-name prefix. (Proxmox: guest .conf + node network/storage.)
+backup_capable: true  # noqa: var-naming[no-role-prefix]

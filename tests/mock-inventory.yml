@@ -1,0 +1,35 @@
+# Mock inventory for L2 check-mode dry-runs. The SINGLE seam for swapping
+# real ↔ fake (the kontroll analog of NetConfig's FakeCollector). Uses
+# loopback/RFC-5737 doc addresses so a stray live run hits nothing real.
+#
+#   ansible-playbook -i tests/mock-inventory.yml playbooks/backup-configs.yml --check
+#
+# Same group structure as inventory/hosts.yml so plays exercise identically.
+all:
+  vars:
+    ansible_connection: local        # never opens a real SSH/API session
+  children:
+    edge_firewall:
+      hosts:
+        mock-edge: { ansible_host: 192.0.2.1, device_role: cisco_ios }
+    core_switch:
+      hosts:
+        mock-switch: { ansible_host: 192.0.2.2, device_role: cisco_ios }
+    wireless_ap:
+      hosts:
+        mock-ap: { ansible_host: 192.0.2.3, device_role: openwrt }
+    hypervisors:
+      hosts:
+        mock-hv: { ansible_host: 192.0.2.10 }
+    docker_hosts:
+      hosts:
+        mock-docker: { ansible_host: 192.0.2.20 }
+    network_devices:
+      children:
+        edge_firewall:
+        core_switch:
+        wireless_ap:
+    compute:
+      children:
+        hypervisors:
+        docker_hosts:

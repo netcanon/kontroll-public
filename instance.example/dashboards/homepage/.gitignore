@@ -1,0 +1,12 @@
+# Homepage mounts this dir read-write and writes runtime files into it on start.
+# The config-as-code SOURCE is the tracked *.yaml we author (settings, services,
+# widgets, bookmarks). Everything Homepage auto-generates is runtime noise — keep
+# it out of git. To author one of these intentionally, `git add -f` it + drop the
+# line here.
+logs/
+*.log
+custom.css
+custom.js
+docker.yaml
+kubernetes.yaml
+proxmox.yaml

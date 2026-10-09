@@ -1,0 +1,352 @@
+"""Shared AST-based read-only-by-construction pins (#133).
+
+Instead of a brittle substring grep over source text — which trips on comments/strings and can't scope to a single
+function — these parse a module's AST and assert a named function calls NO write/actuation verb (nor opens a file
+for writing). Used by the read-only service reads (`fleet.list_services`, and the forthcoming `pending.*` /
+`backups.*`) to guard, IN CI, against any of them silently gaining an actuation path — the INVARIANT D* / C10
+read-only contract. One robust seam, not three copy-pasted greps (M9 / review §2.3).
+
+Leading-underscore module name ⇒ pytest does not collect it as a test; it is imported by the `test_*` files.
+
+#134 / P0b — the COMPLETENESS closure. The per-function pins above fail OPEN: each checks a function's calls against
+`WRITE_VERBS`, so a mutator the registry doesn't KNOW about is invisible — a read view could call an unregistered
+writer and the pin would pass. `assert_write_verbs_complete` closes that hole: it AST-scans the pinned layer
+(`scripts/kontroll/service/*.py` + `gitio.py`) for every DIRECT mutator (a write-mode `open`, a git-MUTATING argv,
+a SOPS write) and asserts each is registered in `WRITE_VERBS` — so a new writer that isn't registered breaks CI,
+making "add the verb in the same commit" an ENFORCED gate, not a convention. `assert_write_verbs_resolve` is the
+no-rot complement (every entry is a real `def` or a bare git verb). The 2026-06-24 sweep that introduced this found
+seven real gaps — incl. `sops_write_domain` (an UNPINNED secret-writer) — and registered them. (Tested in
+`test_readonly_completeness.py`, incl. proof the gate fires on a planted unregistered writer.)
+"""
+import ast
+import glob
+import os
+
+# tests/unit/_readonly_pins.py -> tests/unit -> tests -> repo root (three dirnames). Computed independently of
+# kontroll.paths.ROOT so a test that repoints paths.ROOT at a tmp tree never diverts the SOURCE read.
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Call names (a bare `f(...)` → `f`, or an attribute `obj.method(...)` → `method`) that MUTATE the repo / actuate.
+# A read-only view must call NONE of them. Explicit + conservative so the pin is meaningful, not a catch-all that
+# trips on benign helpers. NB: subprocess `run` is deliberately ABSENT — a read-only service may shell out to a
+# READ-only git (`for-each-ref`, `show`); pin those callers with `assert_no_git_write` instead.
+WRITE_VERBS = frozenset({
+    "commit", "commit_and_push", "push", "promote_ref", "_push_target",
+    "write_inventory_host", "apply_onboard_plan", "apply_secret_plan", "build_secret_plan",
+    "sops_set", "add_recipient", "seed_fresh_sops", "enable_in_fleet",
+    # GUI-paradigm write surfaces (P0b/M2 — added in the same commit as the verb that introduced them):
+    "apply_homepage_plan", "promote_board",
+    # Phase 4b (#139): the shared single-object promote orchestrator (token → no_drop → apply) + the host-var
+    # diff-producing merge. run_promote actuates (it calls apply_plan); owned_merge encodes the host-var mutation
+    # discipline — a read view must call neither.
+    "run_promote", "owned_merge",
+    # Phase 5 (#140): the fleet-removal mutation verb (settings.apply_plan's open:w is caught directly). A read
+    # surface must never disable a module.
+    "disable_in_fleet",
+    # Staging-isolation fix (F1, dogfood 2026-06-20): the content-clone roll-back to canonical main. A `reset
+    # --hard` is a working-tree mutation — a read-back must never call it (it runs only inside commit_and_push).
+    "_reset_content_clone_to_canonical",
+    # Proposal-rebase fix (task_fd3b458d, dogfood 2026-06-29): rebases the staged proposal onto current canonical
+    # main before the push (a `fetch` + `rebase` — both working-tree/ref mutations); runs only inside commit_and_push.
+    "_rebase_proposal_onto_canonical",
+    # #134 / P0b — the fail-CLOSED completeness sweep (assert_write_verbs_complete, below) found these DIRECT
+    # mutators were NOT registered, so assert_read_only (which fails OPEN) could not see them. Registering closes the
+    # hole: a read view that calls any of them now trips the pin. Each opens a file for writing or writes a SOPS
+    # secret. Landed 2026-06-24 with the completeness check that keeps the list honest going forward.
+    "sops_write_domain",          # gitio: re-encrypts a whole SOPS domain (the highest-stakes write) — was UNPINNED
+    "_write_new",                 # gitio: the leaf "write a new file" helper
+    "apply_plan",                 # the per-domain reconfigure apply step (backup/hostvars/identity/settings) writes module.yml/inventory/instance
+    "apply_telemetry_plan", "apply_logging_plan",   # observe/logsvc: write the capability block into module.yml
+    "add_capture_exception",      # capture_exception: writes config/capture-exceptions.yml
+    "service_refresh",            # refresh: writes the catalog matrix cache (a read view must not refresh as a side effect)
+    # R5 — the FIRST app-store WRITE verb: actuation.apply_actuation_plan writes the unit's committed configure-values
+    # file (instance/actuation/<key>/vars.yml), which the route stages to proposed/<run_id>. Registered in the same
+    # commit as the verb (P0b/#134) so a read view that calls it trips assert_read_only. `stage_plan` is the
+    # orchestrator (recompute + verify_token + apply) — not a DIRECT mutator (so the completeness gate doesn't
+    # require it), but registered too (R5 review GAP-3 / 30+34) so a read view that calls the stage orchestrator
+    # — writing by delegation — also trips the pin (defense-in-depth for the delegation residual).
+    "apply_actuation_plan", "stage_plan",
+    # The app-store CREATE write verb: actuation.apply_create_unit writes the AUTHORED unit descriptor
+    # (instance/actuation/<key>/unit.yml) the route stages to proposed/<run_id> — the seam that fills the empty
+    # registry the R3/R4/R5 stages read. Registered in the same commit as the verb (P0b/#134). `stage_create_unit`
+    # is the orchestrator (recompute + verify_token + apply) — registered too (defense-in-depth, like stage_plan).
+    "apply_create_unit", "stage_create_unit",
+    # FF-race Move 2 — the discard reaper: discard.discard_proposal deletes a STALE `proposed/<run_id>` ref from the
+    # canonical (a `git update-ref -d` compare-and-delete). It is the ONE write in the pending surface, kept OUT of
+    # the read-only pending.py in its own module; registered here in the SAME commit as the verb (P0b/#134) so a read
+    # view that ever calls it trips assert_read_only, and so the fail-closed completeness gate (which detects the
+    # `update-ref` argv) is satisfied. C10-safe: un-stage != promote (it removes Key-1's own output, never advances main).
+    "discard_proposal",
+})
+
+
+def _looks_like_mode(s):
+    """A file-open MODE token (`w`, `wb`, `a+`, `rb`, …) vs a filename: short + only mode chars. Lets _open_is_write
+    find the mode in BOTH `open(file, 'w')` (builtin, arg 1) and `Path(p).open('w')` (method, arg 0) without
+    mistaking a filename like `/var/w.txt` (has `/`, `.`) for a mode."""
+    return isinstance(s, str) and 0 < len(s) <= 3 and set(s) <= set("rwxabt+U")
+
+
+def _open_is_write(call):
+    """True if an `open(...)` / `.open(...)` Call names a write/append/create/update mode. Position-aware: the
+    BUILTIN `open(file, mode)` takes the mode at positional arg 1 (arg 0 is ALWAYS the filename, so a 1-arg
+    `open('x')` read is NOT a write); the METHOD form `Path(p).open('w')` / `io.open(p, 'w')` takes the mode at arg
+    0 OR 1, disambiguated from a filename by MODE-SHAPED filtering. The `mode=` kwarg counts in both forms."""
+    modes = [kw.value.value for kw in call.keywords if kw.arg == "mode" and isinstance(kw.value, ast.Constant)]
+    if isinstance(call.func, ast.Name):                          # builtin open(file, mode) — mode is positional 1
+        if len(call.args) >= 2 and isinstance(call.args[1], ast.Constant):
+            modes.append(call.args[1].value)
+    else:                                                        # `.open(...)` — mode at arg 0 (Path) or 1 (io); a
+        modes += [a.value for a in call.args                     # filename won't pass _looks_like_mode
+                  if isinstance(a, ast.Constant) and _looks_like_mode(a.value)]
+    return any(isinstance(m, str) and any(c in m for c in ("w", "a", "x", "+")) for m in modes)
+
+
+def _called_names(func_node):
+    """Every called name inside func_node: a bare `Call` → `func.id`; an attribute `Call` → `func.attr`; an
+    `open(...)` in a write mode → the literal `open:w`."""
+    names = set()
+    for n in ast.walk(func_node):
+        if not isinstance(n, ast.Call):
+            continue
+        f = n.func
+        if isinstance(f, ast.Name):
+            names.add("open:w" if (f.id == "open" and _open_is_write(n)) else f.id)
+        elif isinstance(f, ast.Attribute):
+            names.add(f.attr)
+    return names
+
+
+def find_function(module_rel, func_name):
+    """The `ast.FunctionDef` for func_name in the module at ROOT-relative module_rel (asserts if absent)."""
+    path = os.path.join(ROOT, module_rel)
+    tree = ast.parse(open(path, encoding="utf-8").read(), filename=path)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == func_name:
+            return node
+    raise AssertionError("function %s not found in %s" % (func_name, module_rel))
+
+
+def assert_read_only(module_rel, func_name, forbidden=WRITE_VERBS):
+    """Assert func_name in module_rel calls none of the `forbidden` write/actuation verbs and opens no file for
+    writing. The read-only-by-construction guard: a read view must never gain an actuation path."""
+    called = _called_names(find_function(module_rel, func_name))
+    hits = sorted((called & set(forbidden)) | ({"open(write-mode)"} if "open:w" in called else set()))
+    assert not hits, "%s.%s must be read-only but calls write verb(s): %s" % (module_rel, func_name, ", ".join(hits))
+
+
+# git subcommands that MUTATE the repo / working tree (the conservative blacklist a `subprocess.run(["git", …])`
+# literal must avoid) and the read-only allow-list a chokepoint helper's call sites must pick their verb from. A
+# read-only service that shells git rides its verb on a subprocess ARG LIST — invisible to assert_read_only's
+# call-NAME check — so it is pinned here on the verb itself (review §2.3 / the _readonly_pins module docstring).
+GIT_WRITE_VERBS = frozenset({
+    "commit", "commit-tree", "add", "rm", "mv", "push", "fetch", "pull", "clone", "init", "update-ref",
+    "symbolic-ref", "update-index", "write-tree", "reset", "checkout", "switch", "restore", "stash", "branch",
+    "tag", "merge", "rebase", "cherry-pick", "apply", "am", "gc", "prune", "reflog", "filter-branch", "replace",
+    "fast-import", "repack", "worktree", "notes", "config", "remote",
+})
+GIT_READONLY_VERBS = frozenset({
+    "log", "show", "diff", "ls-files", "ls-tree", "rev-parse", "rev-list", "cat-file", "for-each-ref",
+    "show-ref", "describe", "status", "shortlog", "blame", "name-rev",
+})
+
+
+def _list_str_elems(node):
+    """The string-constant elements of an ast.List literal (None if `node` isn't a static list); a Starred / Name
+    element yields None for that slot so a dynamic verb can't masquerade as a constant."""
+    if not isinstance(node, ast.List):
+        return None
+    out = []
+    for el in node.elts:
+        out.append(el.value if isinstance(el, ast.Constant) and isinstance(el.value, str) else None)
+    return out
+
+
+def assert_no_git_write(module_rel, chokepoint="_git", readonly=GIT_READONLY_VERBS, write=GIT_WRITE_VERBS):
+    """Pin a read-only service that shells git: (A) NO `subprocess.run(["git", …])` literal anywhere in the module
+    names a mutating subcommand, and (B) EVERY call to the module's git chokepoint (`_git(cap, [<verb>, …])`)
+    picks its verb from a STATIC list whose first element is a read-only verb. (B) is the strong guard — it refuses
+    a dynamically-built verb (a non-constant first element fails) so a future edit can't smuggle `git rm` through
+    the chokepoint. Complements assert_read_only (which can't see a verb riding a subprocess arg list)."""
+    path = os.path.join(ROOT, module_rel)
+    tree = ast.parse(open(path, encoding="utf-8").read(), filename=path)
+    choke_sites = 0
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call):
+            continue
+        fn = n.func
+        # (A) a direct `subprocess.run(["git", …])` / `run(["git", …])` literal must contain no write verb.
+        is_run = (isinstance(fn, ast.Attribute) and fn.attr == "run") or (isinstance(fn, ast.Name) and fn.id == "run")
+        if is_run and n.args:
+            elems = _list_str_elems(n.args[0])
+            if elems and elems[0] == "git":
+                bad = sorted(set(e for e in elems if e in write))
+                assert not bad, "%s: subprocess git call uses write verb(s): %s" % (module_rel, ", ".join(bad))
+        # (B) every chokepoint call must pass a static list whose first element is an allow-listed read-only verb.
+        if isinstance(fn, ast.Name) and fn.id == chokepoint:
+            choke_sites += 1
+            listarg = next((a for a in n.args if isinstance(a, ast.List)), None)
+            elems = _list_str_elems(listarg)
+            assert elems and elems[0] in readonly, (
+                "%s: %s(...) call site #%d must pass a static [<read-only verb>, …]; got %r"
+                % (module_rel, chokepoint, choke_sites, None if elems is None else elems[:1]))
+    assert choke_sites, "%s: no %s(...) call sites found — wrong chokepoint name?" % (module_rel, chokepoint)
+
+
+# --- #134 / P0b: the fail-CLOSED completeness sweep -------------------------------------------------------------- #
+# assert_read_only / assert_no_git_write fail OPEN: a verb NOT in WRITE_VERBS is invisible to them, so a read view
+# that calls an UNREGISTERED mutator silently passes. assert_write_verbs_complete closes that hole — it is the
+# per-commit discipline (#134/P0b): if a new function in the pinned layer performs a direct write and is not
+# registered, CI fails here, forcing the same-commit WRITE_VERBS update that makes assert_read_only exhaustive.
+
+# git subcommands that ALWAYS mutate. A STRICTER subset of GIT_WRITE_VERBS that DELIBERATELY excludes the dual-use
+# verbs (`remote get-url`, `config --get`, `branch`/`tag` list forms, `symbolic-ref HEAD`, `stash/notes/reflog/
+# worktree list`) which also have read forms — those would false-positive a read helper (e.g. gitio.offsite_remote_
+# exists shells `git remote get-url`). assert_no_git_write keeps the broader blacklist; completeness uses this.
+GIT_MUTATING_VERBS = frozenset({
+    "commit", "commit-tree", "add", "rm", "mv", "push", "fetch", "pull", "clone", "init", "update-ref",
+    "update-index", "write-tree", "reset", "checkout", "switch", "restore", "merge", "rebase", "cherry-pick",
+    "apply", "am", "gc", "filter-branch", "replace", "fast-import", "repack",
+})
+_SOPS_WRITE_FLAGS = frozenset({"--set", "--encrypt", "-e", "--rotate", "-r"})   # `--decrypt` is a READ; these mutate
+_SOPS_WRITE_CALLS = frozenset({"sops_set", "sops_write_domain"})                # the named sops-write chokepoints
+# Filesystem-write METHODS whose names DON'T collide with a common builtin, so detecting them by bare `.attr` is
+# safe (a `pathlib.Path(p).write_text(...)`, `shutil.rmtree(...)`).
+_FS_WRITE_METHODS = frozenset({"write_text", "write_bytes", "rmtree"})
+# The collision-PRONE fs-write methods (`os.rename`/`os.replace`/`shutil.move` — the atomic-write idiom) detected
+# ONLY when receiver-qualified (`os.<m>` / `shutil.<m>`), so `str.replace`/`dict.copy`/`list.remove`/`os.path.join`
+# never false-positive. This shrinks the atomic-write residual the review flagged (a writer using `os.replace` is no
+# longer invisible). `mkdir`/`makedirs` are deliberately EXCLUDED (dir setup often precedes a read-cache).
+_OS_WRITE_METHODS = frozenset({"rename", "replace", "remove", "unlink", "truncate"})
+_SHUTIL_WRITE_METHODS = frozenset({"move", "copy", "copy2", "copyfile", "copytree"})
+
+# Functions allow-listed as NON-verbs despite touching a write/subprocess primitive — each a documented, intentional
+# exception (NOT a forgotten registration). Keep this SHORT and justified.
+WRITE_COMPLETENESS_ALLOWLIST = frozenset({
+    "_run",   # gitio's NEUTRAL subprocess chokepoint: it runs whatever git argv it is GIVEN (read OR write), so it
+              # is not itself a verb — a read view legitimately calls it for `git log`/`for-each-ref`. Its callers'
+              # argv is pinned per-verb by assert_no_git_write instead.
+})
+
+
+def _pinned_layer():
+    """The layer where mutators + read-views coexist and the read-only pins apply: the service modules + the gitio
+    I/O chokepoint. Routes (api/, gui/app.py) and CLIs orchestrate these and are NOT read-pinned ⇒ out of scope."""
+    svc = sorted(os.path.relpath(p, ROOT).replace("\\", "/")
+                 for p in glob.glob(os.path.join(ROOT, "scripts", "kontroll", "service", "*.py")))
+    return ["scripts/kontroll/gitio.py"] + svc
+
+
+def _static_list_prefix(node):
+    """The leading string constants of a list literal, tolerating a `["git","commit"] + extra` BinOp prefix (gitio's
+    idiom). Returns the static prefix (with None for non-constant slots) or None if `node` isn't list-ish."""
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _list_str_elems(node.left)   # the static prefix carries the verb; the dynamic `+ paths` tail is moot
+    return _list_str_elems(node)
+
+
+def _git_verb(elems):
+    """The git subcommand in a `["git", <opts>, <verb>, …]` argv: skip a leading `git`, then skip option tokens
+    (`-x`/`--x`, and the value after `-C`/`-c`), returning the first bare token = the verb (None if undeterminable)."""
+    if not elems or elems[0] != "git":
+        return None
+    i = 1
+    while i < len(elems):
+        tok = elems[i]
+        if tok is None:
+            return None                      # a dynamic token in the verb position — can't determine
+        if tok in ("-C", "-c"):
+            i += 2; continue                 # these take a following value
+        if tok.startswith("-"):
+            i += 1; continue
+        return tok
+    return None
+
+
+def _own_nodes(fn):
+    """Every node inside fn's body that belongs to fn — NOT descending into a nested def/lambda (those are their own
+    scopes, visited as their own FunctionDefs by the caller's walk)."""
+    stack = list(ast.iter_child_nodes(fn))
+    while stack:
+        n = stack.pop()
+        yield n
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        stack.extend(ast.iter_child_nodes(n))
+
+
+def _is_direct_mutator(fn):
+    """True if fn DIRECTLY performs a write primitive: opens a file for writing (bare or attribute-form, mode-gated),
+    calls a fs-write method (`write_text`/`write_bytes`/`rmtree`, or a receiver-qualified `os.rename`/`os.replace`/
+    `shutil.move`/…), shells a git-MUTATING subcommand on a statically-recoverable argv, or writes a SOPS secret
+    (`sops --set/--encrypt/--rotate`, or a named sops-write chokepoint). 'Direct' = in fn's OWN body, not via a
+    nested scope. This is the signal that fn must be a WRITE_VERBS member. RESIDUAL (narrow): a write whose primitive
+    is reached via an ALIASED import (`from os import replace`) or a non-`os`/`shutil` receiver isn't auto-detected —
+    such a writer is a style deviation from the codebase's `open('w')` idiom that a human reviewer catches."""
+    for n in _own_nodes(fn):
+        if not isinstance(n, ast.Call):
+            continue
+        f = n.func
+        # a write-mode open() — bare `open(...,'w')` OR attribute-form `io.open(...,'w')` / `Path(p).open('w')`
+        # (mode-gated, so a read `Path(p).open()` is NOT flagged).
+        if (isinstance(f, ast.Name) and f.id == "open") or (isinstance(f, ast.Attribute) and f.attr == "open"):
+            if _open_is_write(n):
+                return True
+        name = f.id if isinstance(f, ast.Name) else (f.attr if isinstance(f, ast.Attribute) else None)
+        if name in _SOPS_WRITE_CALLS:
+            return True
+        if isinstance(f, ast.Attribute):
+            if f.attr in _FS_WRITE_METHODS:                                # path.write_text/write_bytes, .rmtree
+                return True
+            if isinstance(f.value, ast.Name) and (                        # receiver-qualified os.* / shutil.* writes
+                    (f.value.id == "os" and f.attr in _OS_WRITE_METHODS) or
+                    (f.value.id == "shutil" and f.attr in _SHUTIL_WRITE_METHODS)):
+                return True
+        if name in ("run", "_run") and n.args:
+            elems = _static_list_prefix(n.args[0])
+            if elems:
+                if elems[0] == "git" and _git_verb(elems) in GIT_MUTATING_VERBS:
+                    return True
+                if elems[0] == "sops" and any(e in _SOPS_WRITE_FLAGS for e in elems):
+                    return True
+    return False
+
+
+def assert_write_verbs_complete():
+    """Fail CLOSED: every DIRECT mutator in the pinned layer (service/*.py + gitio.py) MUST be named in WRITE_VERBS
+    (or the documented WRITE_COMPLETENESS_ALLOWLIST). assert_read_only/assert_no_git_write fail OPEN — a verb they
+    don't know is invisible — so this is the same-commit discipline (#134/P0b) that keeps the read-only/C10
+    guarantee from silently eroding: a new writer that isn't registered breaks CI here, naming the exact file:func.
+    SCOPE (documented residual): it pins DIRECT write primitives + the sops/git-write chokepoint callers; a pure
+    DELEGATING orchestrator (one that only calls another registered verb, never writes itself) is NOT required —
+    those (capability.promote, the routes) are not read-pinned surfaces, and requiring them would cascade to routes.
+    The one known unpinned write PATH is the `observe/logsvc/backup.regenerate_*` → `gen-*.py` generator delegation
+    (the generators write the repo but live OUTSIDE the pinned layer); those callers are pure delegators reachable
+    only from the registered `apply_*` verbs, so no read view reaches them — accepted as a documented residual."""
+    missing = []
+    for rel in _pinned_layer():
+        tree = ast.parse(open(os.path.join(ROOT, rel), encoding="utf-8").read(), filename=rel)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            if node.name in WRITE_VERBS or node.name in WRITE_COMPLETENESS_ALLOWLIST:
+                continue
+            if _is_direct_mutator(node):
+                missing.append("%s:%s" % (rel, node.name))
+    assert not missing, (
+        "these DIRECT mutators (write-open / git-write / sops-write) are NOT in WRITE_VERBS — register each in the "
+        "SAME commit (P0b/#134) so assert_read_only can catch a read view that calls it:\n  " + "\n  ".join(sorted(missing)))
+
+
+def assert_write_verbs_resolve():
+    """No-rot: every WRITE_VERBS entry is EITHER a real `def` somewhere under scripts/ OR a bare git-mutating
+    subcommand (`commit`/`push`/… guard a hypothetical git-LIBRARY `.commit()` call, not a python def). Catches a
+    typo or a rename that silently drops a verb from the pin (a dead entry = a verb that no longer guards anything)."""
+    defined = set()
+    for p in glob.glob(os.path.join(ROOT, "scripts", "**", "*.py"), recursive=True):
+        for node in ast.walk(ast.parse(open(p, encoding="utf-8").read(), filename=p)):
+            if isinstance(node, ast.FunctionDef):
+                defined.add(node.name)
+    orphan = sorted(v for v in WRITE_VERBS if v not in defined and v not in GIT_MUTATING_VERBS)
+    assert not orphan, ("WRITE_VERBS entries resolve to no `def` under scripts/ and are not bare git verbs "
+                        "(typo / dead after a rename?): %s" % ", ".join(orphan))

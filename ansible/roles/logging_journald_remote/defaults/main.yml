@@ -1,0 +1,8 @@
+---
+# Journald wiring defaults. The persistent-journal step is universal + always safe; the remote-upload step is
+# OPT-IN (default OFF) until the collector-side journal-remote receiver is built (docs/logging-architecture.md
+# tracks it) — so the MVP default only guarantees the journal persists (which Vector's bind-mounted journald
+# source reads on the control VM). noqa: var-naming[no-role-prefix] — read by the shared wiring playbook.
+logging_collector_host: ""                 # noqa: var-naming[no-role-prefix]  passed by wire-logging.yml
+logging_journald_upload_enabled: false     # noqa: var-naming[no-role-prefix]  opt-in remote ship (see README)
+logging_journald_upload_port: 19532        # noqa: var-naming[no-role-prefix]  systemd-journal-remote default

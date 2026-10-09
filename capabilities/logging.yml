@@ -1,0 +1,71 @@
+# capabilities/logging.yml — the SECONDARY-CAPABILITY descriptor for LOG INGESTION (instance #3 of the
+# generalized dialog seam, isomorphic to telemetry/backup). It parameterizes the ONE shared post-onboard
+# dialog / route / promote spine for logging with ZERO `if cap=="logging"` branching anywhere. Registering it
+# touches ZERO spine file (capability.py / promote.py / api/routes/capability.py / the GUI shell / the generic
+# INVARIANT-D pins) — the same proof backup.yml gave. Schema: docs/observability/secondary-capability-dialog.md
+# §2; the logging-specific design: docs/observability/logging-capability-vector.md.
+name: logging   # registry key == filename stem == route segment & ?cap= value
+label: "log ingestion (device/service logs into Loki via Vector)"   # dialog header + nudge copy
+order: 30   # after telemetry (10) and backup (20)
+
+# --- detection (read-only suggester; a HINT, never a gate) --------------------------------------------- #
+vector: logging   # vectors/logging.yml (order 5) — eval_vector reads its cell. DELIBERATELY WEAK: "has logs?"
+                  # is near-universal and mostly a host/service fact, not a collection-plugin fact.
+suggester:   # resolved by IMPORT-BY-CONVENTION, not a hand-maintained map
+  module: classify   # scripts/kontroll/service/classify.py
+  suggest: suggest_logging       # facts -> {cell, candidates, note}  (PURE; declared methods dominate)
+  declared: declared_logs_methods   # the DECLARED-side reconciliation (reads the logs: LIST block)
+  hint:   # = classify._LOGGING_HINT, carried here AS DATA (a test pins them equal so they cannot drift).
+          # THIN: only network gear (cliconf/netconf) gives a real "can ship syslog" signal; journald/file/
+          # rest are operator-DECLARED, never suggested (mirrors host_node).
+    cliconf: ["syslog_push"]
+    netconf: ["syslog_push"]
+
+# --- graceful-export probe (S6) — OPTIONAL, read-only, NON-GATING; config-as-data, NOT a gate -------------- #
+probe:   # A *post-onboard*, explicit "sharpen this suggestion" action MAY run this read-only read against a
+         # reachable cliconf/netconf device and feed the result to suggest_logging(evidence=...). It is NEVER on
+         # the onboard/promote path (INVARIANT-D): capability.suggest() calls suggest_logging with NO evidence,
+         # so detection is byte-identical with the probe absent. DESCRIPTIVE config-as-data — the show-command
+         # per plugin is declared HERE, never as logic in classify.py (a future method overrides the read here).
+         # A test pins module/fn -> a real fail-soft callable so this field can't drift from the code.
+  module: probe                       # scripts/kontroll/probe.py
+  fn: logging_export_probe            # READ-ONLY + FAIL-SOFT: unreachable/unknown-cmd -> {state: maybe}, never raises
+  show:   # the read-only command per management plugin (the live read is S7 — needs_real_device)
+    cliconf: "show running-config | include logging host"
+    netconf: "show logging"
+
+# --- the declared block this capability owns in modules/<key>/module.yml ------------------------------- #
+block_key: logs   # the `logs:` LIST (sibling of metrics:/backup:/role/inventory_group)
+block_shape: list   # a class emits SEVERAL log sources (journald + a file + syslog) -> a LIST; ADD-ONLY write
+
+# --- the write half: resolved by IMPORT-BY-CONVENTION (the spine calls module.build_plan/apply_plan) ---- #
+service:
+  module: logsvc   # scripts/kontroll/service/logsvc.py — build_plan(key, selection) + apply_plan(plan) +
+                   # offerable_methods(facts). NOT named `logging` (stdlib clash). The spine dispatches ZERO if-cap.
+
+# --- Stage 1: method picker ---------------------------------------------------------------------------- #
+method_source: registry   # a logging/<method>.yml row (like telemetry; UNLIKE backup's role_entrypoint)
+method_registry: logging   # which registry the picker fills from (catalog.load_logging())
+render_method_stage: true   # logging is plural -> render the picker (filtered by applies_when, mostly UNIVERSAL)
+
+# --- Stage 3: the per-capability "second concern" (none — retention rides as a Stage-1 method param) --- #
+resource_stage:   # the shipped dialog shell renders NO Stage-3 form (it renders method+params+propose only),
+  testid: cap-logging-policy   # so source_kind: none (mirrors backup). The retention/parse POLICY is a CLOSED
+  source_kind: none            # `retention` param on the logs: entry (a preset allow-list) — no GUI stage, no
+  fields: []                   # forbidden shell edit. (V1 must-fix #1; the testid is descriptor data, unrendered.)
+
+# --- generation + enactment ---------------------------------------------------------------------------- #
+generator:
+  script: scripts/gen-logging.py
+  lockfile_glob: "docker/vector/generated/*.generated.yaml"   # the validate.sh `gen-logging --check` step covers it
+enact_kind: vector_reload   # DESCRIPTIVE ONLY — no consumer switches on it (verified: capability.py + the route
+                            # read plan["enact"], never enact_kind). The instance-local builder
+                            # logsvc.logging_enact_commands emits a Vector reload + the device-side wiring play —
+                            # NEVER a Prometheus HUP.
+
+# --- trust posture (the dialog renders trust_note; the audit logs the secret-domain NAME only) -------- #
+secret_domain_field: descriptor_field   # the SOPS domain (if any) is named by the METHOD descriptor. Most
+                                        # methods (journald/file) carry none, like host_node; rest_pull names one.
+trust_note: "Logs can CONTAIN secrets; Vector ships already-shaped streams with a low-cardinality, non-secret
+  label allow-list (source/host/service/level/run_id/device — C12). Device-side forwarder creds stay
+  SOPS-encrypted (no_log), audited by NAME only. Loki + Grafana stay mgmt-VLAN-only; no listener is WAN-exposed."

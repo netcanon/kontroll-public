@@ -1,0 +1,21 @@
+# Pre-commit secret guard — the test-after-change gate's first hook (QA plan §4,
+# docs/qa-and-release-pipeline.md). Install once on a dev/instance machine:
+#     pipx install pre-commit && pre-commit install
+#
+# gitleaks is managed BY pre-commit (no manual binary install), so it blocks committing
+# a plaintext secret on any platform — the primary guard now that state flows to the
+# canonical / backups / bundles / snapshots (SECURITY.md C8). Broader hooks (ruff,
+# ansible-lint, pytest) land as the QA plan rolls out and the toolchain standardizes.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks                       # uses .gitleaks.toml (SOPS ciphertext + local/ allowlisted)
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: detect-private-key             # PEM/SSH private keys (complements the age rule)
+      - id: check-added-large-files        # block accidental blobs (e.g. an unstripped bundle)
+      - id: end-of-file-fixer
+      - id: trailing-whitespace

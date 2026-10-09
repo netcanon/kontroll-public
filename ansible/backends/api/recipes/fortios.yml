@@ -1,0 +1,27 @@
+# API recipe: fortios — FortiOS REST (FortiGate). Pure DATA consumed by
+# roles/backend_api. The token is NOT here — it's named (token_var) and resolved
+# from the host's SOPS-backed vars at runtime, so this file stays secret-free.
+# Derivable from the FortiOS spec; see docs/capability-matrix.md §5.2.
+name: fortios
+description: FortiOS REST API (FortiGate firewall)
+port: 443
+validate_certs: false
+
+auth:
+  type: bearer                 # bearer | basic | apikey_header
+  token_var: fortios_api_token # name of the in-scope var holding the secret
+
+# Liveness probe (read-only).
+check:
+  method: GET
+  path: /api/v2/monitor/system/status
+
+# Full-configuration capture (read-only). `extract: body` = the response body IS
+# the config. label/suffix shape the capture filename (kept identical to the
+# pre-generalization fortigate role so the nightly artifact name is stable).
+backup:
+  method: GET
+  path: /api/v2/monitor/system/config/backup?scope=global
+  extract: body
+  label: FortiGate
+  suffix: full-configuration.conf

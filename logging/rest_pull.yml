@@ -1,0 +1,33 @@
+# Logging method: Vector PULLS logs from a device/service REST/log endpoint. The OPNsense/FortiGate log API, or
+# any app that exposes a log-query endpoint, is polled by Vector's `http_client` source. PULL direction -> NO
+# device-side push to configure (Vector reaches OUT), so no wiring play unless the endpoint needs a token grant.
+# This is the method the vector is DELIBERATELY SILENT on (httpapi does NOT imply a log endpoint); it is
+# DECLARED, not suggested. Schema: logging/README.md.
+name: rest_pull
+label: REST pull (Vector http_client polls a device/service log endpoint)
+order: 3
+kind: http_client
+direction: pull
+source:
+  endpoint: "https://${DEVICE_ADDR}/api/v1/logs"   # gen-logging templates the device addr; mgmt-routed only
+  method: GET
+  scrape_interval_secs: 60
+  decoding: {codec: json}
+labels: [host, service]
+# NO applies_when at the collection layer (a log endpoint is a device fact, not a plugin shape) -> UNIVERSAL,
+# DECLARED-only. The operator declares it on a class known to expose a log API.
+params:
+  format:
+    allowed: [json, ndjson]
+    required: true
+  retention:
+    allowed: ["7d", "30d", "90d"]
+    required: false
+wiring_role: null                       # PULL — nothing to configure ON the device (no push to set up)
+secret_domain: logging_rest             # the API token Vector uses to poll — SOPS-encrypted, injected as ${ENV}
+                                        # at deploy (no_log), NEVER committed; audited by NAME only (C12)
+access_chain:
+  chain: control VM (kontroll net) -> Vector http_client -> HTTPS GET to the device log API (read-only)
+  may_break: nothing — a read-only poll; a creds/reach failure blanks a stream, not the lab
+  fallback: "no"
+  blast_radius: control node only (an HTTP GET reads logs; actuates NOTHING on the device)

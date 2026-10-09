@@ -1,0 +1,17 @@
+# config.d/transforms/internal_containers.yaml  → transform id "internal_containers_shape".
+# Shapes docker_logs events to the canonical label set (source/host/service/level/run_id). High-cardinality /
+# sensitive fields stay in the body (never a label).
+type: remap
+inputs: [internal_containers]
+source: |
+  .source = "internal"
+  .service = string(.container_name) ?? "unknown"          # low-cardinality: the container name
+  .host = string(.host) ?? get_env_var("HOSTNAME") ?? "control-vm"
+  # Promote a structured `level` ONLY if the line is JSON with one; else leave unset (sink default).
+  parsed, err = parse_json(.message)
+  if err == null && is_object(parsed) {
+    .level = string(parsed.level) ?? string(parsed.severity) ?? "info"
+  }
+  # run_id correlation: many container lines carry a kontroll_run_id token; extract it best-effort.
+  rid = parse_regex(.message, r'kontroll_run_id[=:]\s*(?P<rid>[A-Za-z0-9._-]+)') ?? {}
+  if rid.rid != null { .run_id = rid.rid }

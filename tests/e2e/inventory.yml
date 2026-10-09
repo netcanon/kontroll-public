@@ -1,0 +1,34 @@
+---
+# E2E ONBOARDING PROOF — the "non-human path" end to end.
+#
+# A host is onboarded under the MACHINE-SCAFFOLDED class modules/ios_xe_auto
+# (galaxy.py search -> classify -> scaffold; no human wrote a Cisco task). It backs
+# up via the GENERIC backend_netcommon_cli backend — ansible.netcommon.cli_command,
+# not cisco.ios.ios_command. The only human input is the inventory host + creds
+# (the "Joe provides credentials" step). Run from ansible/:
+#
+#   ansible-playbook playbooks/backup-configs.yml \
+#     -i ../tests/e2e/inventory.yml --limit ios-xe-auto-test
+#
+all:
+  children:
+    onboard_test:
+      hosts:
+        ios-xe-auto-test:
+          ansible_host: 192.0.2.252         # the example Catalyst (TEST-NET), onboarded fresh
+      vars:
+        # From modules/ios_xe_auto: role = backend (becomes device_role) + params.
+        device_role: backend_netcommon_cli
+        backend_backup_label: IOSXEauto
+        backend_backup_command: show running-config
+        ansible_connection: network_cli
+        ansible_network_os: cisco.ios.ios
+        ansible_become: false
+        # Credentials (the operator-supplied bit) — decrypted from the network domain.
+        _e2e_net: >-
+          {{ lookup('community.sops.sops',
+          inventory_dir ~ '/../../instance/secrets/network.sops.yml') | from_yaml }}
+        ansible_user: "{{ _e2e_net.cisco_username }}"
+        ansible_password: "{{ _e2e_net.cisco_password }}"
+        # Capture lands in a local, gitignored output dir for inspection.
+        config_backup_dir: "{{ inventory_dir }}/_out"

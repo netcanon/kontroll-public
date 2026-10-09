@@ -1,0 +1,58 @@
+# Discovery method: read a Layer-3 switch/router's OWN ARP (IP<->MAC neighbour) table read-only over SNMPv3, to surface
+# un-onboarded hosts into the onboard inbox. Rung 3 — the FIRST discovery method that is NOT JSON-over-HTTPS: it needs
+# a second TRANSPORT (SNMP) and a new parse SHAPE (`arp_table`). Vendor-NEUTRAL by design: ipNetToMediaTable is the
+# RFC-1213 universal ARP table (every IOS/IOS-XE, RouterOS, FortiGate L3 agent serves it), so a vendor literal in the
+# method name would be the no-bespoke smell to avoid — the vendor-ness lives in the OFFER (a declared `discovery:` block
+# on modules/cisco_ios/module.yml), never here. Complements the DHCP-lease methods: the ARP table surfaces STATICALLY-
+# addressed hosts + cross-VLAN neighbours a DHCP-lease API never sees. PASSIVE + read-only by construction: an SNMP
+# WALK reads a table the switch already keeps; it reaches ONLY the onboarded device's :161 agent, never the network (no
+# scan, no CIDR). SECURITY C18 (the same trust boundary as the DHCP methods, under a second transport).
+#
+# TRANSPORT (Rung 3): `source.transport: snmp` -> the sweep's `_run_snmp` walks `source.walk_oid` via net-snmp's
+# read-only `snmpbulkwalk` (GETBULK; there is NO snmpset path). There is NO url/endpoint and NO ${DEVICE_ADDR} template
+# — the host is passed positionally to the fetcher (host:161). One WALK of the ipNetToMediaPhysAddress column yields
+# BOTH fields: the row index is <ifIndex>.<a.b.c.d>, so the IPv4 is the last 4 sub-identifiers of every instance OID
+# (parse.shape `arp_table` reads it from the suffix) and the MAC is the value.
+#
+# Auth/cred flow (C12 / MF-PROV): SNMPv3 authPriv, reusing the SHARED read-only `kontroll_ro` v3 user from the EXISTING
+# snmp_observability SOPS domain (the same read cred the snmp_exporter + gen-validate-live use — a monitoring GET, never
+# actuation; reused AS-SCOPED, never widened, no new domain). The OPERATOR exports KONTROLL_SNMP_V3_USER/AUTH_PASS/
+# PRIV_PASS (decrypted from that domain) before running the on-demand sweep on the control VM, exactly as for
+# gen-validate-live — they are NOT deploy-provisioned into a .env. ANY unset => the source is recorded `no-creds` and
+# skipped (honest, non-fatal, fail-closed — never a v1/v2c/authNoPriv fallback). The values enter ONLY at the fetcher
+# boundary as list argv (never shell-interpolated, never audited/artifacted; the audit carries NAMES + counts only).
+#
+# F11 (dogfood-confirmed-not-CI-confirmed, mirrors the DHCP methods): the OID + walk shape are the documented public
+# IP-MIB ipNetToMediaTable; CI pins the parser against a mocked net-snmp golden (tests/fixtures/discovery/
+# cisco_ios_arp_walk.txt). A live-cisco_ios dogfood confirms/corrects with a 1-line edit. IPv4-only is a FIT (the read
+# side is IPv4-only; a v6 neighbour would be parsed-then-dropped — a v6 rung is a future clean drop-in).
+name: arp_neighbors_snmp
+label: SNMP ARP neighbours (read an L3 switch/router's own ipNetToMediaTable, read-only)
+order: 40
+source:
+  transport: snmp                              # the sweep dispatches this NAME to _run_snmp (default is http)
+  walk_oid: "1.3.6.1.2.1.4.22.1.2"             # ipNetToMediaPhysAddress column: value=MAC, OID-suffix=<ifIndex>.<ipv4>
+  auth:
+    strategy: snmp_v3                           # SNMPv3 authPriv (SHA / AES), read-only
+    user_env: KONTROLL_SNMP_V3_USER            # env NAMES the operator exports; the value enters at the fetcher only
+    auth_pass_env: KONTROLL_SNMP_V3_AUTH_PASS
+    priv_pass_env: KONTROLL_SNMP_V3_PRIV_PASS
+    auth_proto: SHA
+    priv_proto: AES
+# The parse SHAPE is a NAME the sweep's `_PARSERS` table keys on — NO function knows "cisco" (de-bespoke). `arp_table` =
+# net-snmp walk lines -> {ip (last 4 OID sub-ids), mac (the value), hostname:null}; incomplete/expired ARP rows
+# (all-zero/broadcast MAC) are dropped as noise. An ARP neighbour has no hostname (that is fine — the IP is the key).
+parse:
+  shape: arp_table
+secret_domain: snmp_observability              # REUSE the existing SNMPv3 read domain; audited by NAME only (C12).
+# CREDS ARE OPERATOR-EXPORTED at sweep time (there is deliberately NO secret_env_map): gen-secret-env renders .env
+# from metrics:/logs: only, never discovery:. The operator exports KONTROLL_SNMP_V3_USER/AUTH_PASS/PRIV_PASS from the
+# snmp_observability domain (the SAME env vars gen-validate-live + the snmp_exporter already use — its fields are the
+# hand-authored secret-forms/snmp_observability.yml: snmp_v3_username/auth_password/priv_password). See
+# discovery/README.md § Extending. Unset => `no-creds`, skipped.
+# NO applies_when -> DECLARED-only (opt-in per class, like the DHCP methods): a class opts in via a `discovery:` block.
+access_chain:
+  chain: "control VM -> sweep snmp_walk -> SNMPv3 authPriv WALK of <switch>:161 ipNetToMediaTable (read-only)"
+  may_break: nothing — a read-only SNMP WALK reads the ARP table; a creds/reach failure records `no-creds`/`unreachable`
+  fallback: "no"
+  blast_radius: control node only (an SNMP GETBULK reads the ARP table; actuates NOTHING on the switch)

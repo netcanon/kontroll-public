@@ -1,0 +1,38 @@
+---
+# Backup entrypoint — capture the user's current authorized_keys as the rollback reference BEFORE adding the
+# tail key. Read-only slurp; written control-side. A missing file is fine (nothing to roll back to).
+#
+# Access chain used:   control VM (mgmt VLAN) -> target host (SSH) — read-only slurp of authorized_keys
+# May break:           none (read-only)
+# Fallback required:   no
+# Blast radius:        none — pure read
+# Idempotence:         capture overwritten each run; no host state change
+- name: Stat the user's authorized_keys
+  ansible.builtin.stat:
+    path: "{{ logging_tail_home }}/.ssh/authorized_keys"
+  register: _ak
+  become: true
+
+- name: Capture authorized_keys (rollback reference) when present
+  when: _ak.stat.exists
+  become: true
+  block:
+    - name: Read authorized_keys
+      ansible.builtin.slurp:
+        src: "{{ logging_tail_home }}/.ssh/authorized_keys"
+      register: _ak_content
+
+    - name: Ensure the control-side capture dir exists
+      ansible.builtin.file:
+        path: "{{ config_backup_dir }}"
+        state: directory
+        mode: "0750"
+      delegate_to: localhost
+
+    - name: Write the authorized_keys capture
+      ansible.builtin.copy:
+        content: "{{ _ak_content.content | b64decode }}"
+        dest: "{{ config_backup_dir }}/authorized_keys_{{ inventory_hostname | replace('.', '-') }}.bak"
+        mode: "0600"
+      delegate_to: localhost
+      no_log: true

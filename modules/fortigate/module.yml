@@ -1,0 +1,43 @@
+# Device-class module: FortiGate / FortiOS firewall.
+key: fortigate
+description: FortiGate / FortiOS firewall (httpapi/REST)
+status: active                 # current edge (pre-cutover)
+# F2 (de-bespoke, north-star Rung 4): this class's UNIVERSAL metrics FLOOR is AUTO-DERIVED, not hand-typed —
+# `derived: true` marks the class gen-class-capabilities-owned. scripts/gen-class-capabilities.py --check re-derives
+# the floor from facts.pinned.yml + the registries (fortinet.fortios ships an httpapi plugin → the `api` backend,
+# which confers telemetry [blackbox] only) and fails CI on drift. The per-entry `derived: true` marker is IGNORED by
+# gen-observability (it reads method/params only) so the generated Prometheus targets are byte-identical to
+# pre-migration. `snmp` STAYS a BARE (non-derived) curated override: an httpapi device's plugin shape does not prove
+# SNMP, so `api` cannot confer it — the interface-counter scrape is the operator-declared vendor residual. backup
+# stays the conferred-DECLARED block (gen-backup gates it on the role, a role signal, not derived).
+derived: true
+collections:
+  - name: fortinet.fortios
+    version: ">=2.3.0"
+role: fortigate
+inventory_group: edge_firewall
+secrets_domain: network
+# Observability — SNMP (agent-less; the firewall runs no node_exporter). gen-observability emits
+# prometheus/targets/network/fortigate.generated.yml; the SAME generated `network` job + snmp-exporter
+# (shared v3_kontroll auth, the kontroll_ro read-only v3 user) scrape it. SNMP GET is read-only — the edge
+# firewall is the highest-blast-radius device and is NEVER actuated. See telemetry/snmp.yml + modules/README.md.
+metrics:
+  - {method: snmp, params: {module: if_mib}}                   # BARE curated override (api can't confer snmp)
+  - {method: blackbox, params: {probe: icmp}, derived: true}   # DERIVED floor (api confers blackbox)
+# Dashboards - the DERIVED Grafana-board FLOOR (Rung 4a): api confers only blackbox, so the sole derived board is
+# the reachability board (gnet 13659). snmp is a BARE metrics override -> it gets NO derived board (add a curated
+# {gnet, name} for an snmp panel if wanted). `derived: true` = gen-class-capabilities-owned. See dashboards/derived/.
+dashboards:
+  - {gnet: 13659, name: blackbox, derived: true}   # blackbox -> "Blackbox Exporter (HTTP prober)"
+# Backup — the secondary-capability block (instance #2). gen-backup -> a per-class Semaphore schedule running
+# backup-configs.yml --limit edge_firewall. capable mirrors the role's backup_capable. See capabilities/backup.yml.
+backup:
+  capable: true
+  schedule: "30 2 * * *"   # nightly 02:30 (staggered off the switch)
+# Discovery (read-spine, Rung 1a/2) — this class can be ASKED for its own DHCP lease table read-only, to surface
+# un-onboarded hosts on the network into the onboard inbox. DECLARED (not facts-derived): the offer is opt-in per
+# class — note fortigate DOES ship an httpapi plugin (a `{plugin: httpapi}` predicate WOULD match it), so declared is
+# the deliberate choice, not a workaround, so onboarding a firewall never silently starts reading its leases. Passive
+# + read-only, reuses the `network` SOPS domain AS-SCOPED, C18. A human still onboards + promotes (C10). See discovery/.
+discovery:
+  - {method: dhcp_leases_fortigate}

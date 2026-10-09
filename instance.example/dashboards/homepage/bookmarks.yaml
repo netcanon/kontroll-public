@@ -1,0 +1,9 @@
+# Homepage bookmarks — external quick-links (not lab services; those are tiles in
+# services.yaml). Add a bookmark = add a list item under a group. Kept lean.
+- Lab:
+    - kontroll repo:
+        - abbr: GH
+          href: https://github.com/netcanon/kontroll
+    - Homepage docs:
+        - abbr: HP
+          href: https://gethomepage.dev/configs/services/

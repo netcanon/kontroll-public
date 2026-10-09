@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Contributing guide
+    url: https://github.com/netcanon/kontroll/blob/main/CONTRIBUTING.md
+    about: How to add a device-class module, a telemetry/logging method, or fix the docs.
+  - name: Security vulnerabilities
+    url: https://github.com/netcanon/kontroll/security/advisories/new
+    about: Report security issues privately — never open a public issue for a vulnerability.

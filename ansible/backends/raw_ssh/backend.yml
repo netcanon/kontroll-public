@@ -1,0 +1,27 @@
+# Backend: raw_ssh — bespoke appliances with no usable collection (e.g. OpenWrt).
+# A device declares the exact command to capture its config; backup capability
+# therefore depends on that command being meaningful (hence backup: maybe until a
+# command is set). The catch-all when no structured backend fits.
+name: raw_ssh
+label: raw SSH command (bespoke appliances — no collection)
+order: 9
+classify:
+  none_of:
+    - {plugin: cliconf}
+    - {plugin: httpapi}
+    - {plugin: netconf}
+    - {module_suffix: _config}
+# F2 confers: a plain SSH box is pingable (blackbox) AND a node_exporter candidate (host_node); journald log
+# methods stay operator-declared (no probe signal). backup stays `maybe` (depends on backend_backup_command).
+confers: {backup: maybe, telemetry: [blackbox, host_node], logs: []}
+requires: [backend_backup_command]   # e.g. "uci export"
+role: backend_raw_ssh
+connection:
+  ansible_connection: ssh
+  ansible_user: root
+# Self-describing credential SHAPE (F1 TIER-A): a raw-SSH appliance authenticates with an SSH login or key (root by
+# default — overridden if a username is supplied). No API token. Read by scripts/kontroll/authspec.py.
+auth:
+  - {field: username, kind: identity, label: "username (SSH; default root)", maps_to: ansible_user}
+  - {field: password, kind: password, label: "password (SSH)", maps_to: ansible_password}
+  - {field: ssh_private_key, kind: ssh_key, label: "SSH private key (PEM)", maps_to: ansible_ssh_private_key_file}

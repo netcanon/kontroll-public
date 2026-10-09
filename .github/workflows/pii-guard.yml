@@ -1,0 +1,66 @@
+name: PII guard
+
+# The public-tree identifier gate (SECURITY.md C21; design-of-record in the 2026-10-08 public-split review's
+# 99-synthesis.md).
+# Fails the build if any shippable, tracked file carries a real network identifier (an RFC-1918 address in any
+# spelling, a non-documentation MAC or global IPv6, a real age recipient/secret key), the maintainer's personal
+# email or an operator-machine user-profile path — or one of THIS instance's own names (hostnames, domain) supplied
+# privately. Same scanner as `tests/validate.sh` step `pii-guard` and the pytest twin tests/unit/test_leak_guard.py:
+# one gate, run everywhere. Runs on every PR and push to main.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Read-only: this job only inspects the checked-out tree.
+permissions:
+  contents: read
+
+jobs:
+  scan-tracked-files:
+    name: No leaked personal identifiers
+    # ALWAYS GitHub-hosted (deliberately not the KONTROLL_RUNS_ON variable): the scan needs nothing but python3 + git,
+    # and a secret-bearing step must not run on a shared self-hosted box.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Provide the instance-token list (repository secret KONTROLL_LEAK_TOKENS; absent on fork PRs)
+        # The names that identify the maintainer's deployment live in a repository SECRET, one regex per line, so
+        # the public repo's CI catches a real hostname/domain without ever publishing the list. Fork PRs have no
+        # secrets: the layer then runs on the shipped canaries and the structural layer still enforces.
+        env:
+          TOKENS: ${{ secrets.KONTROLL_LEAK_TOKENS }}
+        run: |
+          if [ -n "$TOKENS" ]; then
+            printf '%s\n' "$TOKENS" > "$RUNNER_TEMP/leak-tokens.txt"
+            echo "KONTROLL_LEAK_TOKENS_FILE=$RUNNER_TEMP/leak-tokens.txt" >> "$GITHUB_ENV"
+            n=$(grep -cvE '^\s*(#|$)' "$RUNNER_TEMP/leak-tokens.txt")
+            echo "instance-token layer: repository secret ($n pattern(s))"
+          else
+            echo "instance-token layer: no KONTROLL_LEAK_TOKENS secret (fork PR or unset) — shipped canaries only"
+          fi
+
+      - name: Scan every shippable tracked file (structural + instance-token layers)
+        run: python3 -I tests/_leak_guard.py --tree
+
+      - name: The private overlay is never tracked in a public tree
+        # Path-based companion to the content scan. When the checkout's .gitignore ignores instance/ (the public
+        # cut does; the private instance repo tracks its overlay and does not), no instance/ path may be tracked —
+        # a `git add -f`, a bad merge or a stale pre-cut commit would slip past the ignore rule. Fails closed.
+        run: |
+          # probe a FILE path under the dir: `instance/` is a directory pattern, and a bare `instance` probe does
+          # not match it when the directory does not exist (exactly the public case) — the check would be vacuous
+          if git check-ignore -q -- instance/leak-tokens.txt; then
+            tracked=$(git ls-files -- instance)
+            if [ -n "$tracked" ]; then
+              echo "::error::instance/ paths are tracked in a tree whose .gitignore excludes the overlay:"
+              echo "$tracked"; exit 1
+            fi
+            echo "instance/ guard: clean — the overlay is ignored and nothing under it is tracked."
+          else
+            echo "instance/ guard: this checkout tracks its overlay (private instance repo) — not applicable."
+          fi

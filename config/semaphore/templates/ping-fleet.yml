@@ -1,0 +1,6 @@
+# Operational Semaphore template (manually-run, not scheduled) — see ./README.md.
+# Per-class fleet liveness. The former inline ping-fleet, now a drop-in so adding an
+# operational task is a new file here, never an edit to scripts/configure-semaphore.py.
+name: ping-fleet
+playbook: ansible/playbooks/ping.yml
+description: Per-class liveness across the fleet

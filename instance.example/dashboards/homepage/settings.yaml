@@ -1,0 +1,15 @@
+# Homepage global settings. Layout/order only — services live in services.yaml,
+# widget data-sources in widgets.yaml. Split by concern (modularity). Edit to taste.
+title: kontroll — homelab
+theme: dark
+headerStyle: clean
+layout:
+  Control plane:
+    style: row
+    columns: 4
+  Infrastructure:
+    style: row
+    columns: 4
+  Fleet:              # the scripts/gen-homepage.py generated group (B3); orders it last (layout is optional —
+    style: row        # a group absent from layout: still renders, just at gethomepage's default position)
+    columns: 4

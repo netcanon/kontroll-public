@@ -1,0 +1,23 @@
+# blackbox_exporter probe modules — STATIC, committed, NO secret (a ping/connect/GET carries no credential,
+# unlike the snmp exporter's v3 creds). Mounted read-only into the blackbox-exporter container at
+# /etc/blackbox_exporter/config.yml by the generated compose fragment (scripts/gen-exporters.py). The
+# generated `blackbox` job's per-target __param_module label selects which module a probe uses: `icmp` for
+# device reachability (the default for switches/firewalls); tcp_connect/http_2xx for port/endpoint checks.
+modules:
+  icmp:
+    prober: icmp
+    timeout: 5s
+    icmp:
+      preferred_ip_protocol: ip4
+  tcp_connect:
+    prober: tcp
+    timeout: 5s
+    tcp:
+      preferred_ip_protocol: ip4
+  http_2xx:
+    prober: http
+    timeout: 5s
+    http:
+      method: GET
+      preferred_ip_protocol: ip4
+      valid_status_codes: []        # empty = any 2xx is healthy

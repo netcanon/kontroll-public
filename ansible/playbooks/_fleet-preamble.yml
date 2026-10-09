@@ -1,0 +1,12 @@
+---
+# The fleet-play PREAMBLE: imported FIRST by every play that opens fleet SSH connections (ping / backup-configs /
+# wire-logging / install-node-exporter). Composes the two pre-run steps those plays need: (1) stamp the run
+# correlation id, then (2) materialize each SSH-key-auth host's private key from SOPS to a 0600 file so the
+# connection can use it (the unified password-OR-key seam). NON-fleet plays (deploy-stack / promote /
+# reload-observability) import _log-run-id.yml DIRECTLY — they open no fleet SSH, so they must NOT materialize
+# per-device keys (MF-5: keep credential materialization off the non-fleet plays).
+- name: Stamp the run correlation id
+  ansible.builtin.import_playbook: _log-run-id.yml
+
+- name: Materialize per-host SSH private keys (key-auth onboarded hosts)
+  ansible.builtin.import_playbook: _render-ssh-keys.yml

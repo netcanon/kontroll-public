@@ -1,0 +1,23 @@
+# Fleet profile TEMPLATE — declare which device-class modules THIS instance runs, then
+# `kontroll-init --fresh` scaffolds it to instance/fleet.yml (or copy it yourself). The
+# catalog below is every module shipped under modules/; enabling one installs its
+# collection(s) and activates its role / inventory-group / secrets.
+#
+# To support hardware not listed here: add a modules/<key>/ directory with a module.yml
+# (see modules/README.md) and reference <key> here. No other file changes.
+
+enabled_modules:
+  # --- compute (stable across any edge) ---
+  - proxmox        # Proxmox VE hypervisors          (community.proxmox)
+  - docker_host    # Docker hosts over SSH           (community.docker)
+
+  # --- edge firewall: pick ONE ---
+  - fortigate      # FortiGate / FortiOS             (fortinet.fortios)
+  # - opnsense     # OPNsense                        (ansibleguy.opnsense)
+
+  # --- core switch: pick ONE ---
+  - cisco_ios      # Cisco IOS-XE                    (cisco.ios)
+  # - routeros     # MikroTik RouterOS               (community.routeros)
+
+  # --- wireless ---
+  - openwrt        # OpenWrt AP (raw SSH, no collection)

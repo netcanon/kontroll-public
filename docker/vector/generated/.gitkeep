@@ -1,0 +1,3 @@
+# gen-logging.py writes <method>_<key>.generated.yaml + _capability_sink.generated.yaml here. This .gitkeep
+# keeps the (otherwise-empty) config-dir present so Vector's `--config-dir /etc/vector/generated` never points
+# at a missing dir. Vector ignores non-.yaml/.toml/.json files, so this is inert. Do NOT hand-edit generated files.

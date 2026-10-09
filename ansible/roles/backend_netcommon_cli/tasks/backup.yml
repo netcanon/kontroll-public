@@ -1,0 +1,52 @@
+---
+# Generic config backup for ANY network_cli platform — captures via the cliconf
+# plugin (ansible.netcommon.cli_command), no vendor module. A device class points
+# here by declaring `role: backend_netcommon_cli` + network_os; optional overrides
+# backend_backup_command / backend_backup_label.
+#
+# Access chain used:   control node -> device mgmt (network_cli / SSH)
+# May break:           none (read-only show)
+# Fallback required:   no
+# Blast radius:        none — pure read
+# Idempotence:         capture file overwritten each run; no device state changes
+# no_log:              running-config carries secret hashes (enable secret, SNMP)
+
+- name: Record skip when this class is not backup-capable
+  ansible.builtin.set_fact:
+    kontroll_backup_result: "skipped — class not backup-capable"
+  when: not (backup_capable | default(true) | bool)
+
+- name: Capture config (network_cli, generic)
+  when:
+    - backup_capable | default(true) | bool
+    - not (molecule_test | default(false) | bool)
+  block:
+    - name: Resolve capture filename
+      ansible.builtin.set_fact:
+        _backup_file: "{{ backend_backup_label | default(device_role) }}_{{ ansible_host | replace('.', '-') }}.cfg"
+
+    - name: Ensure the capture dir exists (backend is self-sufficient)
+      ansible.builtin.file:
+        path: "{{ config_backup_dir }}"
+        state: directory
+        mode: "0750"
+      delegate_to: localhost
+
+    - name: Pull config via cli_command
+      ansible.netcommon.cli_command:
+        command: "{{ backend_backup_command | default('show running-config') }}"
+      register: _cfg
+      changed_when: false
+      no_log: true
+
+    - name: Write capture
+      ansible.builtin.copy:
+        content: "{{ _cfg.stdout }}\n"
+        dest: "{{ config_backup_dir }}/{{ _backup_file }}"
+        mode: "0640"
+      delegate_to: localhost
+      no_log: true
+
+    - name: Record successful capture
+      ansible.builtin.set_fact:
+        kontroll_backup_result: "captured -> {{ _backup_file }}"

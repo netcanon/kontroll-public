@@ -1,0 +1,87 @@
+---
+# Pre-run: materialize each SSH-KEY-AUTH host's PRIVATE key from SOPS to a 0600 file, so per-host
+# `ansible_ssh_private_key_file` (set by the onboard drop-in to `{{ kontroll_device_key_dir }}/<cred_key>.key`)
+# resolves to a real key in WHICHEVER runner executes the fleet play. Imported FIRST (via _fleet-preamble.yml) by
+# every play that opens fleet SSH connections. The unified password-OR-key seam: ONLY hosts onboarded with a key
+# carry `kontroll_ssh_key_domain` (a NON-secret hostvar) — password/token hosts are skipped entirely (the `when`),
+# so their drop-ins and this play are inert for them (backward-compatible, additive).
+#
+# Semaphore-correct: runs IN the same ansible-playbook process Semaphore launches, which holds SOPS_AGE_KEY +
+# baked sops/age + community.sops — so it decrypts for itself, no cross-container key handoff. A domain the runner
+# CANNOT decrypt (e.g. `compute` is control-node-only, NOT on the scoped Semaphore key) fails LOUDLY here (the
+# assert below), never silently leaving no key (which would surface as a misleading "Permission denied (publickey)").
+#
+# delegate_to: localhost on EVERY task — load-bearing: a fleet host's `ansible_connection` (network_cli/ssh/httpapi,
+# set by its backend + group_vars) OVERRIDES a play's `connection: local` keyword (Ansible var-beats-keyword
+# precedence), which would route these LOCAL file ops over the DEVICE connection (a switch can't run `file`/`copy`).
+# Delegating pins every task to the controller/runner regardless; `inventory_hostname` stays the real host, so the
+# per-host key path + SOPS domain templating are unaffected. (Caught by the scratch-VM dogfood — see test below.)
+#
+# Access chain used:   control node / Semaphore runner -> community.sops decrypt of the host's SOPS domain (local)
+# May break:           nothing on the fleet — writes a LOCAL 0600 key file; a fleet connection only USES it after
+# Fallback required:   no — re-runnable; a hard-aborted run leaves a 0600 file the cleanup / next run clears
+# Blast radius:        the runner's own per-run ephemeral key dir (outside the repo; no_log; run-uid-owned)
+- name: Materialize per-host SSH private keys from SOPS (unified password-OR-key seam)
+  hosts: all
+  gather_facts: false
+  connection: local
+  tasks:
+    - name: The key dir MUST be an absolute path OUTSIDE the repo clone (a key in the working copy = a C1 leak)
+      ansible.builtin.assert:
+        that:
+          - kontroll_device_key_dir is match('^/')
+          - not kontroll_device_key_dir.startswith(playbook_dir | dirname | dirname)
+        fail_msg: "kontroll_device_key_dir ({{ kontroll_device_key_dir }}) must be an absolute path OUTSIDE the repo"
+        quiet: true
+      delegate_to: localhost
+      when: kontroll_ssh_key_domain is defined
+
+    - name: Ensure the per-run ephemeral key dir exists (0700, run-uid-owned)
+      ansible.builtin.file:
+        path: "{{ kontroll_device_key_dir }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      when: kontroll_ssh_key_domain is defined
+
+    - name: Probe whether this key-auth host's key is decryptable in THIS runner context (no_log — handles the secret)
+      ansible.builtin.set_fact:
+        _ssh_key_present: >-
+          {{ (lookup('community.sops.sops',
+                     inventory_dir ~ '/../secrets/' ~ kontroll_ssh_key_domain ~ '.sops.yml', errors='ignore')
+              | from_yaml | default({}, true)).get(inventory_hostname | replace('-', '_') ~ '_ssh_private_key', '')
+             | length > 0 }}
+      delegate_to: localhost
+      no_log: true
+      when: kontroll_ssh_key_domain is defined
+
+    - name: Fail LOUDLY if a key-auth host's key cannot be decrypted here (never a silent no-key)
+      ansible.builtin.assert:
+        that: _ssh_key_present | bool
+        fail_msg: >-
+          Host {{ inventory_hostname }} is SSH-key-auth (SOPS domain '{{ kontroll_ssh_key_domain }}') but its key
+          could NOT be decrypted in this runner context. The domain is likely control-node-only (e.g. 'compute' is
+          NOT readable by the Semaphore runner). Run this play on the control node, or use password auth for this
+          host's Semaphore-automated path.
+        quiet: true
+      delegate_to: localhost
+      when: kontroll_ssh_key_domain is defined
+
+    - name: Materialize this host's SSH private key to a 0600 file (no_log — the key never reaches a log/diff)
+      ansible.builtin.copy:
+        # `content: |` (literal block) + `| trim` is load-bearing: the community.sops lookup strips the decrypted
+        # file's trailing newline, which (given yaml.safe_dump's encoding of a value ending in '\n') drops the KEY's
+        # own trailing newline on `from_yaml` reparse — and OpenSSH rejects a key with no final newline ("error in
+        # libcrypto", Permission denied). `| trim` normalizes any trailing whitespace, then the literal block re-adds
+        # exactly one '\n'. (Caught + byte-verified by the scratch-VM dogfood; with `>-` the materialized key was 1
+        # byte short and SSH key-auth failed.)
+        content: |
+          {{ (lookup('community.sops.sops',
+                     inventory_dir ~ '/../secrets/' ~ kontroll_ssh_key_domain ~ '.sops.yml', errors='ignore')
+              | from_yaml | default({}, true)).get(inventory_hostname | replace('-', '_') ~ '_ssh_private_key', '')
+             | trim }}
+        dest: "{{ kontroll_device_key_dir }}/{{ inventory_hostname | replace('-', '_') }}.key"
+        mode: "0600"
+      delegate_to: localhost
+      no_log: true
+      when: kontroll_ssh_key_domain is defined

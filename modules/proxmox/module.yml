@@ -1,0 +1,94 @@
+# Device-class module: Proxmox VE hypervisors.
+key: proxmox
+description: Proxmox VE hypervisors (SSH + API token)
+status: active                 # active | staged
+collections:
+  - name: community.proxmox    # dedicated collection (proxmox_* migrated out of community.general)
+    version: ">=1.0.0"
+role: proxmox                  # ansible/roles/proxmox
+inventory_group: hypervisors   # group in instance/inventory/hosts.yml
+secrets_domain: proxmox        # instance/secrets/proxmox.sops.yml
+# Vendor DEFAULTS — public device-class facts, captured here ONCE so no consumer hardcodes them (no-bespoke-config
+# tenet). Both the logging pull (logging/proxmox_api.yml `tls`) AND the telemetry exporter (telemetry/pve.yml
+# PVE_VERIFY_SSL) derive their TLS posture from this via scripts/kontroll/endpoints.py — the fact lives once, a
+# vendor change is a one-line edit here (a reviewable diff), not a hunt through descriptors. The INSTANCE decision
+# to harden (pin a CA) is operator data (instance.yml `device_trust.proxmox.tls_ca_file`), NOT a vendor fact.
+vendor_defaults:
+  tls_posture: self_signed     # PVE installs a self-signed cert on :8006 by default (public PVE fact). A `--check`
+                               # drift-probe (online) confirms the live cert still matches; pin a CA to harden.
+# The ONLINE validate leg of the no-bespoke tenet (scripts/gen-validate-live.py, control-VM/on-demand): a `validate:`
+# SIBLING key (top-level — kept OUT of vendor_defaults, which gen-exporters/endpoints consume as a closed posture
+# map) listing checks that confirm the LIVE device still matches the facts pinned above. cert_posture handshakes
+# :8006 read-only and judges the served cert against the resolved posture (self-signed -> a system-trust verify
+# SHOULD fail; a pinned CA -> MUST verify). Dispatched by `check:` name with zero vendor branch.
+validate:
+  - {check: cert_posture, port: 8006}
+# Credential-provisioning PREREQUISITES — the manual step(s) a blind operator must do ONCE that are NOT covered
+# by "give me an IP + creds" (the blind-joe constraint): here, the PVE API token must carry the PVEAuditor role
+# so the read-only task/log pull + the pve-exporter can READ. SURFACED at onboarding (scripts/.../onboard.py reads
+# this via catalog.module_provisioning) so it's never buried in a doc, and NON-GATING (the operator can still
+# onboard with a wrong scope). `grant` is STRUCTURED — the one datum the validate seam's token-scope/A' check also
+# reads (DRY: surface=prevent, validate=detect); `note` is rendered VERBATIM (no per-vendor prose synthesis).
+provisioning:
+  - grant: PVEAuditor
+    note: >-
+      Create the PVE API token with role PVEAuditor (Sys.Audit on /, propagate) — read-only access to the cluster
+      task/log history and VM/storage stats. Datacenter > Permissions > API Tokens, then add the same token as a
+      permission.
+    docs_url: "https://pve.proxmox.com/wiki/User_Management#pveum_tokens"
+# Self-describing credential SHAPE (F1 seam S1, Rung 1) — the curated class NAMES its exact credential set so a blind
+# onboard shows it as ONE grouped fieldset, not the generic single api-token box. A PVE API token has three coherent
+# parts (user@realm + token id + token secret): you can't half-authenticate, so they form one `auth_set` the planner
+# validates all-or-none. They are SHARED domain creds (the ONE read-only PVEAuditor token per proxmox domain, not one
+# per host), so they store FLAT under the `sops_stem` names telemetry/pve.yml's secret_env_map reads (proxmox_api_user
+# / _token_id / _token_secret) — onboarding a PVE node thereby FEEDS the pve-exporter automatically and Grafana
+# populates (closing the empty-Grafana dogfood symptom). No SSH-key box: PVE telemetry is API-only. Read by
+# scripts/kontroll/authspec.py on the reuse path; the name lineup is pinned by test_proxmox_*.
+auth:
+  - field: api_user
+    kind: identity
+    label: PVE API token user (e.g. root@pam)
+    auth_set: proxmox_api
+    required: true
+    shared: true
+    sops_stem: proxmox_api_user
+    help: The token's owning user and realm, e.g. monitor@pve.
+  - field: api_token_id
+    kind: identity
+    label: PVE API token ID
+    auth_set: proxmox_api
+    required: true
+    shared: true
+    sops_stem: proxmox_api_token_id
+    help: The API token name (Datacenter > API Tokens).
+  - field: api_token_secret
+    kind: token
+    label: PVE API token secret
+    auth_set: proxmox_api
+    required: true
+    shared: true
+    sops_stem: proxmox_api_token_secret
+    help: The token's secret value, shown once at creation.
+# Observability shape — each entry references a telemetry method (telemetry/<name>.yml) by name;
+# scripts/gen-observability.py fans it over THIS class's inventory hosts to generate
+# prometheus/targets/<job>/proxmox.generated.yml. Declare the shape once here. See modules/README.md.
+metrics:
+  - {method: host_node}        # host CPU/mem/disk — node_exporter runs ON each pve host (target host:9100)
+  - {method: pve}              # VM/LXC/storage — prometheus-pve-exporter queries the PVE API (read-only); the
+                               # proxmox job relabels the device addr onto pve-exporter. Cluster-wide; per-node for HA.
+# Curated Grafana.com community dashboards for this class — scripts/fetch-dashboards.py fetches + provisions
+# them (pinned to the Prometheus datasource). gnet = grafana.com/grafana/dashboards/<id>.
+dashboards:
+  - {gnet: 10347, name: proxmox}   # "Proxmox via Prometheus" (the pve-exporter dashboard)
+  - {gnet: 1860, name: node}       # "Node Exporter Full" (host metrics — populates once node_exporter is up)
+# Backup — the secondary-capability block (instance #2). gen-backup -> a per-class Semaphore schedule running
+# backup-configs.yml --limit hypervisors. capable mirrors the role's backup_capable. See capabilities/backup.yml.
+backup:
+  capable: true
+  schedule: "0 3 * * *"   # nightly 03:00
+# Logging — the secondary-capability `logs:` block (instance #3). proxmox_api pulls the PVE cluster TASK history
+# read-only via the existing audit-scoped API token (gen-logging fans it into docker/vector/generated/;
+# Vector http_client GET /cluster/tasks -> Loki). DECLARED (a log API is a class fact, not auto-suggested). See
+# capabilities/logging.yml + logging/proxmox_api.yml + modules/README.md.
+logs:
+  - {method: proxmox_api}   # Vector pulls /cluster/tasks (read-only, PVEAPIToken; token via SOPS proxmox domain)

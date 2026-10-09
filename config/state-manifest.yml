@@ -1,0 +1,36 @@
+# The CODE / STATE boundary (docs/local-source-of-truth.md, Phase B).
+#
+# STATE = per-instance, operator-owned, authoritative. A code update
+# (scripts/update.sh, a merge — never a reset) must never clobber it. Everything NOT
+# matched here is product CODE (roles, playbooks, scripts, gui, built-in modules,
+# backends, tests) — shipped, versioned, updated by the merge.
+#
+# This is the contract the no-clobber update relies on: code & state live in DISJOINT
+# files, so the merge is conflict-free. It is also the exact set Phase C's state
+# backup/DR snapshots (a wiped instance is restored = base image ⊕ these paths).
+
+state_paths:
+  - instance/inventory/onboarded-*.yml     # onboarded hosts — additive drop-ins (galaxy.py onboard)
+  - instance/inventory/group_vars/         # per-group connection + SOPS creds wiring
+  - instance/secrets/*.sops.yml            # encrypted secrets, per instance
+  - ansible/backends/api/recipes/          # derived / custom API recipes (galaxy.py openapi)
+  - instance/fleet.yml                     # which device classes are enabled (the selection)
+  - config/capture-exceptions.yml          # sparse capture-behaviour exceptions (operator/GUI-extended)
+  - instance/instance.yml                  # source-of-truth posture + backup targets (this instance)
+  - config/state-manifest.yml              # this file — the boundary itself
+  - instance/dashboards/homepage/          # portal customization (services/widgets/bookmarks) — instance overlay
+
+# Caveats, kept honest:
+notes:
+  modules: >
+    modules/ holds BOTH built-in classes (CODE, shipped) and onboarded classes (STATE,
+    operator-created). Onboarded classes are additive new dirs, so a merge preserves
+    them automatically and they need no entry here; built-ins are updated by the merge.
+    Keep onboarded keys distinct from built-in names so the two never collide.
+  hosts_yml: >
+    instance/inventory/hosts.yml is the migration MIRROR (code-ish, hand-maintained
+    upstream); onboarded hosts never touch it — they land in onboarded-*.yml. So it is
+    intentionally NOT state.
+  precedence: >
+    On the rare shared-file edit (e.g. instance/fleet.yml touched both upstream and
+    locally), the merge SURFACES a conflict rather than clobbering — resolve by hand.

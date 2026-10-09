@@ -1,0 +1,53 @@
+# Telemetry method: proxy-exporter prometheus-pve-exporter — a control-node exporter queries the PVE API
+# (read-only) on the device's behalf (the old `via: proxy`). The scrape target is the DEVICE address; the
+# proxmox job's relabel in prometheus.yml proxies it onto pve-exporter:9221?target=<device>. Schema:
+# docs/observability/telemetry-method-registry.md. The exporter wiring (exporter_address / metrics_path /
+# target_param) is DATA below; scripts/gen-prometheus-jobs.py derives the proxmox job from it into
+# prometheus/jobs.d/ (Phase 2a — the relabel left prometheus.yml).
+name: pve
+label: Proxmox VE (prometheus-pve-exporter, read-only API)
+order: 20
+kind: proxy-exporter
+job: proxmox               # prometheus/targets/proxmox/<key>.generated.yml
+target_shape: device       # target = "<ansible_host>" (no port); the job relabel supplies the exporter
+labels: [host]
+# Proxy wiring — gen-prometheus-jobs.py derives the multi-target relabel from these (the job that used to be
+# hand-written in prometheus.yml). One method per prometheus job.
+metrics_path: /pve                    # the exporter's scrape path
+exporter_address: pve-exporter:9221   # the relabel rewrites __address__ to this (the control-node exporter)
+target_param: target                  # ?target=<device> — which node the exporter queries
+# Picker offerability (Stage-1 filter) — pve is the Proxmox-specific API exporter; offer it ONLY for the
+# Proxmox collection (a proxmox_* module is its distinctive deep-probe signal). Other classes use
+# host_node/snmp/blackbox. Offerability, not a gate (proxmox also DECLARES pve in its module.yml).
+applies_when:
+  module_suffix: proxmox_kvm
+secret_domain: proxmox     # reuses the existing read-only *.Audit token (no new secret); rendered into .env
+                           # by deploy-stack. The descriptor-driven .env render loop lands in Phase 3 (§4.0.6).
+# Exporter container — gen-exporters.py renders docker/services/pve-exporter.generated.yaml from this block.
+# No host port (kontroll-net-only, SECURITY C3). PVE_* env reads docker/.env (rendered no_log by deploy-stack
+# from the proxmox SOPS domain — the existing read-only *.Audit token).
+exporter:
+  image: prompve/prometheus-pve-exporter:3.9.0
+  container_name: pve-exporter
+  env:
+    PVE_USER: ${PVE_EXPORTER_USER:-}
+    PVE_TOKEN_NAME: ${PVE_EXPORTER_TOKEN_NAME:-}
+    PVE_TOKEN_VALUE: ${PVE_EXPORTER_TOKEN_VALUE:-}
+    # NO hardcoded PVE_VERIFY_SSL — the verify posture is the SAME device-class fact logging/proxmox_api.yml
+    # derives (no-bespoke-config tenet). gen-exporters injects it from the consuming class's
+    # vendor_defaults.tls_posture (modules/proxmox: self_signed -> "false") ⊕ the instance CA pin, via
+    # tls_verify_env below + scripts/kontroll/endpoints.py — the ONE fact, both consumers, no drift.
+  tls_verify_env: PVE_VERIFY_SSL   # gen-exporters fills this env from the class TLS posture (the shared resolver)
+  access_chain:
+    chain: control VM (kontroll net) -> https://<pve host>:8006 with the read-only *.Audit API token
+    may_break: nothing — a read-only scrape; a token/SSL failure degrades a Grafana panel, not the lab
+    fallback: "no"
+    blast_radius: control node only (queries the PVE API read-only; actuates NOTHING on the cluster)
+# {ENV_VAR: "<str.format template over the secret_domain's SOPS field NAMES>"}. gen-secret-env.py collects this
+# into the unified config/secret-env.manifest.generated.yml; deploy-stack's ONE render loop composes each line via
+# kontroll_render_token (no_log, fail-soft to ''). A 1-field map is the degenerate "{field}" template — the SAME
+# shape a logging method's multi-field token uses, so ONE filter renders both. NO hand-listed PVE_EXPORTER_* lines.
+secret_env_map:
+  PVE_EXPORTER_USER: "{proxmox_api_user}"
+  PVE_EXPORTER_TOKEN_NAME: "{proxmox_api_token_id}"
+  PVE_EXPORTER_TOKEN_VALUE: "{proxmox_api_token_secret}"

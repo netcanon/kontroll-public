@@ -1,0 +1,9 @@
+# Operational Semaphore template (manually-run) — the Tier-1 ENACT for observability (item F). After promoting a
+# new scrape target/job, run this to make Prometheus pick it up: it POSTs /-/reload (no restart, no docker
+# socket). No survey vars. The deploy/exporter-container enact (deploy-stack) stays operator-run by design — it
+# needs host Docker control; this reload does not. See ansible/playbooks/reload-observability.yml.
+name: reload-observability
+playbook: ansible/playbooks/reload-observability.yml
+description: >-
+  Reload Prometheus config without a restart (Tier-1 enact) — makes a freshly-promoted scrape target/job live.
+  No host root, no docker socket; POSTs the lifecycle reload endpoint over the shared network.

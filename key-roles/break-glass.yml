@@ -1,0 +1,20 @@
+# Key-role descriptor for the OFFLINE break-glass recovery key (the GUI keygen analogue of a secret-form).
+# Generating it MINTS a fresh age keypair: the PRIVATE half is shown ONCE and must be stored OFFLINE (never
+# on this box, never in the repo); the PUBLIC half is added as a recipient of EVERY domain so the key can
+# recover any secret. The service writes only the public recipient into /.sops.yaml — it never persists the
+# private key. Re-wrapping existing secrets to the new recipient (`sops updatekeys`) is a deferred operator
+# step (high blast), never auto-run. See key-roles/README.md + SECURITY.md.
+role: break-glass
+label: Break-glass recovery key (offline)
+description: A disaster-recovery key that can decrypt every domain. Generate it, store the private half OFFLINE.
+order: 10
+placement: offline            # the private key is NOT saved on this box — the operator stores it off-machine
+recipient_groups:             # the /.sops.yaml anchor groups the PUBLIC key joins (additive)
+  - base_recipients
+  - ops_recipients
+scope_label: every secret domain
+high_blast: true              # already-encrypted secrets must be re-wrapped (sops updatekeys) before it works
+warning: >-
+  This is the only time the private key is shown. Copy it now and store it OFFLINE on trusted media — it is
+  never written to this box or the repo. If you lose it, you lose this recovery path (not your secrets — the
+  control key still decrypts them).

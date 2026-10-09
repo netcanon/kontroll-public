@@ -1,0 +1,78 @@
+# --- Local-only artifacts: present on disk, NEVER tracked/pushed ---
+# Live discovery snapshots, scratch notes, anything that should stay on this box
+# when the repo is pushed to the private remote. SOPS-encrypt + move out of here
+# if you ever want a piece of it in git.
+local/
+
+# --- Secrets & keys: NEVER commit ---
+# age private key(s) — the master decryption key
+*.agekey
+keys.txt
+age/keys.txt
+**/sops/age/keys.txt
+
+# Decrypted secret outputs (SOPS encrypts in-place; decrypted copies are transient)
+*.dec
+*.decrypted
+*.plain.yml
+*.plain.yaml
+
+# Runtime env files for the docker stack (use *.env.example as the committed template)
+docker/.env
+docker/**/.env
+*.env
+!*.env.example
+
+# Ansible runtime artifacts
+ansible/*.retry
+ansible/collections/ansible_collections/
+# built by playbooks/bootstrap.yml + CI (gen-requirements.py); regenerated per-node, never committed
+ansible/collections/requirements.generated.yml
+# the never-brick trust sidecar (per-collection signature policy + sha256 anchor) — same generator, same rule
+ansible/collections/trust.generated.yml
+# the never-brick install wrapper's L2b digest lock + any provisioned keyring — per-node runtime trust state,
+# recorded at first install (TOFU), NEVER committed (the dir itself is kept via instance/trust/keys/.gitkeep)
+instance/trust/observed-digests.yml
+instance/trust/*.gpg
+# built by scripts/galaxy.py refresh
+capability-matrix.generated.json
+ansible/.ansible/
+*.log
+
+# Release bundles + DR snapshots (build/backup output, scripts/make-bundle.sh + state-snapshot.sh)
+dist/
+kontroll-state-*.tar.gz
+
+# Grafana/Prometheus runtime data (mounted volumes, not config-as-code)
+prometheus/data/
+dashboards/grafana/data/
+
+# snmp_exporter config — RENDERED at deploy from snmp.yml.j2 + the SOPS SNMPv3 creds (secret-bearing, 0600).
+# The .j2 template is committed; the rendered file is NEVER tracked (a tests/validate check enforces it).
+prometheus/exporters/snmp/snmp.yml
+
+# Python test/coverage artifacts (the code-half pytest suite, tests/unit + integration)
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Device config pulls land in a data dir. These captures contain SECRETS
+# (config password hashes, PSKs, SNMP communities, API artifacts), so they are
+# NEVER tracked. Off-box retention/versioning of backups is a separate, encrypted
+# concern (a future Semaphore job committing SOPS-wrapped captures to a private
+# store) — not raw files in this repo.
+ansible/backups/
+tests/e2e/_out/
+
+# --- the private instance overlay (public repository): never tracked here ---
+instance/

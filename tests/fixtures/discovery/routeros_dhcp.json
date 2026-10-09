@@ -1,0 +1,5 @@
+[
+  {".id": "*1", "address": "192.0.2.50", "mac-address": "00:00:5e:00:53:01", "host-name": "printer", "status": "bound", "server": "dhcp1"},
+  {".id": "*2", "address": "192.0.2.51", "mac-address": "00:00:5e:00:53:02", "host-name": "nas", "status": "bound", "server": "dhcp1"},
+  {".id": "*3", "address": "192.0.2.10", "mac-address": "00:00:5e:00:53:03", "host-name": "core-switch", "status": "bound", "server": "dhcp1"}
+]

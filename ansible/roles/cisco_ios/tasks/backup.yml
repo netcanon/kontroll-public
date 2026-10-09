@@ -1,0 +1,21 @@
+---
+# Config backup for the Cisco IOS-XE class — delegates to the generic
+# netcommon_cli backend (cli_command over the cliconf plugin). No vendor module:
+# this is the proof that the capability-backend path captures a real device just
+# like the old hand-written cisco.ios.ios_command did.
+#
+# Access chain used:   control VM (mgmt VLAN) -> switch mgmt <switch-mgmt-ip> (network_cli)
+# May break:           none (read-only `show`)
+# Fallback required:   no
+# Blast radius:        none — pure read
+# Idempotence:         capture file overwritten each run; no device state changes
+# no_log:              handled inside the backend (running-config carries secrets)
+# noqa: var-naming[no-role-prefix] — backend_* are shared cross-backend contract
+# params (uniform regardless of backend); prefixing would break the contract.
+- name: Capture running-config via the netcommon_cli backend  # noqa: var-naming[no-role-prefix]
+  ansible.builtin.include_role:
+    name: backend_netcommon_cli
+    tasks_from: backup
+  vars:
+    backend_backup_label: Cisco
+    backend_backup_command: show running-config

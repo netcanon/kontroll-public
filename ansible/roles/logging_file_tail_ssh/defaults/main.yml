@@ -1,0 +1,13 @@
+---
+# File-tail-SSH wiring defaults. The control-VM-LOCAL file tail needs NO wiring (Vector bind-mounts /var/log);
+# this role is the REMOTE case — it authorizes a read-only, forced-command key so a future Vector `exec` source
+# can ssh in and tail without an interactive shell. Gated on logging_tail_pubkey (default empty -> a safe no-op
+# until the operator supplies the collector's read key). noqa: var-naming[no-role-prefix] — read by the shared
+# wiring playbook (the cross-role contract convention).
+logging_collector_host: ""                            # noqa: var-naming[no-role-prefix]
+logging_tail_user: root                               # noqa: var-naming[no-role-prefix]  authorized_keys owner
+logging_tail_home: /root                              # noqa: var-naming[no-role-prefix]  home of that user
+logging_tail_pubkey: ""                               # noqa: var-naming[no-role-prefix]  collector read pubkey
+logging_tail_command: "journalctl -f -o json"         # noqa: var-naming[no-role-prefix]  the FORCED command (NDJSON
+                                                      # so Vector's exec source decodes full journald fields; the
+                                                      # SAME read journald_remote uses. Was -o short-iso pre-S11.)

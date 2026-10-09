@@ -1,0 +1,5 @@
+# kontroll onboarding API runtime deps. The service layer it wraps (scripts/kontroll/) is local
+# (on sys.path via api/__init__.py), so it isn't a pip dep. Kept tiny, like the GUI's.
+fastapi>=0.110
+uvicorn[standard]>=0.27
+PyYAML>=6

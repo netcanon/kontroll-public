@@ -1,0 +1,11 @@
+# config.d/transforms/internal_ansible.yaml  → transform id "internal_ansible_shape".
+type: remap
+inputs: [internal_ansible]
+source: |
+  .source = "internal"
+  .service = "ansible"
+  .host = get_env_var("HOSTNAME") ?? "control-vm"
+  .level = "info"
+  # The run carries `kontroll_run_id=<id>` (stamped by ansible/playbooks/_log-run-id.yml); extract best-effort.
+  rid = parse_regex(.message, r'kontroll_run_id[=:]\s*(?P<rid>[A-Za-z0-9._-]+)') ?? {}
+  if rid.rid != null { .run_id = rid.rid }

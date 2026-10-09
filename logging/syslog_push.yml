@@ -1,0 +1,46 @@
+# Logging method: device pushes SYSLOG to the collector. The device (Cisco switch / FortiGate / OPNsense) is
+# CONFIGURED (wiring role) to send RFC5424 syslog to Vector's `syslog` source, bound MGMT-only. AGENT-LESS on
+# the device (its built-in syslog client); the wiring is a config-plane change (--check first — it touches the
+# device). Schema: logging/README.md. Vector syslog source: 10-research-vector-loki.md §1.3.
+name: syslog_push
+label: Syslog push (device -> Vector syslog source, RFC5424)
+order: 1
+kind: syslog
+direction: push
+source:
+  mode: tcp                       # tcp|udp; tcp for delivery
+  address: "${MGMT_IP}:5514"      # gen-logging binds the collector MGMT IP only — NEVER 0.0.0.0 (C12).
+  max_length: 102400              # 5514 (not 514) so the Vector container needs no privileged port
+labels: [host, service, level]    # canonical non-secret subset (C12)
+# Data-driven shaping (S9): Vector's `syslog` source parses RFC5424 and emits the severity as a keyword in
+# `.severity` (err, warning, info, ...). Surface it as the canonical `.level` (the internal stack's RFC-keyword
+# level convention). gen-logging splices this BEFORE its `.level` default, so the real severity wins. The chain
+# must end INFALLIBLY (a trailing path read, NOT a fallible string()) — VRL rejects an unhandled fallible
+# assignment; the trailing `?? .level` leaves `.level` to the "info" floor when a line carried no severity.
+transform_vrl:
+  - '.level = string(.level) ?? string(.severity) ?? .level'
+# Picker offerability: scoped to CLI/NETCONF-managed network gear (which universally supports syslog export).
+applies_when:
+  any_of:
+    - {plugin: cliconf}
+    - {plugin: netconf}
+params:
+  transport:
+    allowed: [tcp, udp]
+    required: false
+  retention:                      # the Stage-3 "policy" rides as a method param (V1 must-fix #1: no GUI stage)
+    allowed: ["7d", "30d", "90d"]
+    required: false
+# F2 auto-derivation switch (PRESENT ⇒ AUTO-DERIVABLE for a CLI/NETCONF class that CONFERS it): the universal
+# transport default. Creds-free (plain syslog carries no collector cred). gen-class-capabilities / onboard emit
+# `{method: syslog_push, params: {transport: tcp}}` — note this default is what reproduces the curated cisco_ios
+# `logs:` floor byte-identically (its entry is `{method: syslog_push, params: {transport: tcp}}`).
+derive_default:
+  params: {transport: tcp}
+wiring_role: logging_syslog_push   # roles/logging_syslog_push — points the device's syslog at the collector
+secret_domain: null                # plain syslog carries no collector cred; TLS-syslog (deferred) would name one
+access_chain:
+  chain: control VM (mgmt VLAN) -> device mgmt (network_cli/netconf) sets `logging host <collector>`
+  may_break: device logging config only (a wrong host = logs go nowhere; no traffic/forwarding path severed)
+  fallback: "console for edge_firewall/core_switch (OPNsense HDMI / CRS310 MAC-Winbox) per CLAUDE.md; else no"
+  blast_radius: "this device's syslog config (reversible — re-run with the prior host, or `no logging host`)"

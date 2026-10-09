@@ -1,0 +1,3 @@
+# Template for a fresh instance/ overlay (kontroll-init copies instance.example/ → instance/): keeps
+# trust/keys/ present so the never-brick wrapper's L2b digest lock has a home and a future keyring has a
+# directory. FIX-KEYS, docs/reviews/2026-06-25-never-brick-supply-chain/. No key material here.

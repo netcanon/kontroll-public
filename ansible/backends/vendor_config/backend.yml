@@ -1,0 +1,19 @@
+# Backend: vendor_config — uses a collection's own *_config module that exposes a
+# `backup:` option (detected from ansible-doc). For platforms with a vendor config
+# module but no generic cliconf path. Lower priority than netcommon_cli.
+name: vendor_config
+label: vendor *_config module with a backup option
+order: 2
+classify:
+  any_of:
+    - {module_option: {suffix: _config, option: backup}}
+# F2 confers: a vendor *_config device is network_cli gear — the same agent-less floor (snmp + blackbox + syslog).
+confers: {actuate: true, backup: true, telemetry: [snmp, blackbox], logs: [syslog_push]}
+requires: [config_module]         # e.g. cisco.ios.ios_config
+# Self-describing credential SHAPE (F1 TIER-A): a vendor *_config device is reached over network_cli — SSH login
+# (+ optional enable), same as netcommon_cli. Read by scripts/kontroll/authspec.py.
+auth:
+  - {field: username, kind: identity, label: "username (SSH)", maps_to: ansible_user, required: true}
+  - {field: password, kind: password, label: "password (SSH)", maps_to: ansible_password}
+  - {field: ssh_private_key, kind: ssh_key, label: "SSH private key (PEM)", maps_to: ansible_ssh_private_key_file}
+  - {field: enable_password, kind: password, label: "enable secret (optional)", maps_to: ansible_become_password}

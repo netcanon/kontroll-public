@@ -1,0 +1,28 @@
+# Capability vector: telemetry (scrape — can this be monitored for metrics?). See vectors/actuate.yml
+# for the drop-in contract.
+#
+# SCOPE — read before adding a rule. A vector matches a COLLECTION's probe facts (modules/plugins), NOT a
+# live host. So `telemetry` can only SUGGEST a *proxy / agent-less exporter* fit from collection signals (an
+# httpapi/cliconf collection is the shape an SNMP/API exporter scrapes). It CANNOT detect that a managed host
+# runs a host-agent (node_exporter on :9100) — that is OPERATOR-DECLARED in modules/<key>/module.yml
+# (metrics: [{method: host_node}]), never probe-detected, because the host's OS is not a collection fact.
+# Treat `yes` as "a proxy/API exporter is plausible", `no` as "no scrape-shaped signal". The DECLARED method
+# (module.yml) is the source of truth; this vector is only the hint the onboarding flow offers
+# (service.classify.suggest_telemetry). Confidence is deliberately conservative: never `high`, because no
+# collection signal is strong evidence of scrapability.
+name: telemetry
+label: telemetry (scrape)
+symbol: telemetry
+order: 4
+match:
+  # An httpapi/REST collection is the canonical proxy-exporter shape: a control-node exporter
+  # (pve-exporter, exportarr, an API exporter) queries it. The strongest collection-visible scrape signal.
+  - rule: {plugin: httpapi}
+    confidence: medium
+  # A network_cli/SNMP-capable device (cliconf/netconf) is an agent-less candidate: snmp_exporter or a
+  # CLI-scrape exporter can pull metrics. Suggestive, not certain — the operator picks snmp/blackbox.
+  - rule: {any_of: [{plugin: cliconf}, {plugin: netconf}]}
+    confidence: low
+  # A *_facts module means structured read-out exists (a textfile/exporter could ship those) — weak hint.
+  - rule: {module_suffix: _facts}
+    confidence: low

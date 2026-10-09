@@ -1,0 +1,108 @@
+---
+# Generic config backup for REST/API devices and services — driven by a per-API
+# RECIPE (ansible/backends/api/recipes/<name>.yml), not a vendor module. A device
+# class points here via `role: backend_api` + `backend_api_recipe: <name>`. The
+# recipe declares auth + the backup endpoint; this role does a plain `uri` request
+# (delegated to localhost) and writes the body. Vendor-neutral: one role, N recipes.
+# This is the generalization of the proven roles/fortigate capture.
+#
+# Access chain used:   control node (localhost) -> device REST API (HTTPS)
+# May break:           none (recipe backup endpoints are read-only GET/export)
+# Fallback required:   no
+# Blast radius:        none — pure read
+# Idempotence:         capture file overwritten each run; no device state changes
+# no_log:              the token (request) and the returned config (response) are secret
+
+- name: Record skip when this class is not backup-capable
+  ansible.builtin.set_fact:
+    kontroll_backup_result: "skipped — class not backup-capable"
+  when: not (backup_capable | default(true) | bool)
+
+- name: Load the API recipe
+  ansible.builtin.set_fact:
+    _api_recipe: >-
+      {{ lookup('file', role_path | dirname | dirname
+         ~ '/backends/api/recipes/' ~ backend_api_recipe ~ '.yml') | from_yaml }}
+  when:
+    - backup_capable | default(true) | bool
+    - backend_api_recipe is defined
+
+- name: Record skip when no recipe / no backup endpoint
+  ansible.builtin.set_fact:
+    kontroll_backup_result: "skipped — api backend needs backend_api_recipe with a backup endpoint"
+  when:
+    - backup_capable | default(true) | bool
+    - (backend_api_recipe is not defined) or (_api_recipe.backup is not defined)
+
+- name: Capture config via the API recipe
+  when:
+    - backup_capable | default(true) | bool
+    - backend_api_recipe is defined
+    - _api_recipe.backup is defined
+    - not (molecule_test | default(false) | bool)
+  block:
+    - name: Resolve auth token
+      ansible.builtin.set_fact:
+        _api_token: "{{ lookup('vars', _api_recipe.auth.token_var) if _api_recipe.auth.token_var is defined else '' }}"
+      no_log: true
+
+    - name: Build request headers (bearer / apikey_header)
+      ansible.builtin.set_fact:
+        _api_headers: "{{ {(_api_recipe.auth.header_name | default('Authorization')):
+          (('Bearer ' ~ _api_token) if _api_recipe.auth.type == 'bearer' else _api_token)} }}"
+      when: _api_recipe.auth.type in ['bearer', 'apikey_header']
+      no_log: true
+
+    - name: Ensure the capture dir exists (backend is self-sufficient)
+      ansible.builtin.file:
+        path: "{{ config_backup_dir }}"
+        state: directory
+        mode: "0750"
+      delegate_to: localhost
+
+    - name: Resolve capture filename
+      ansible.builtin.set_fact:
+        _backup_file: "{{ _api_recipe.backup.label | default(backend_backup_label | default(device_role)) }}_{{
+          ansible_host | replace('.', '-') }}_{{ _api_recipe.backup.suffix | default('config') }}"
+
+    - name: Pull config via the recipe's backup endpoint
+      ansible.builtin.uri:
+        url: "https://{{ ansible_host }}:{{ _api_recipe.port | default(443) }}{{ _api_recipe.backup.path }}"
+        method: "{{ _api_recipe.backup.method | default('GET') }}"
+        headers: "{{ _api_headers | default({}) }}"
+        url_username: >-
+          {{ lookup('vars', _api_recipe.auth.username_var)
+             if _api_recipe.auth.username_var is defined else omit }}
+        url_password: >-
+          {{ lookup('vars', _api_recipe.auth.password_var)
+             if _api_recipe.auth.password_var is defined else omit }}
+        force_basic_auth: "{{ _api_recipe.auth.type == 'basic' }}"
+        validate_certs: "{{ _api_recipe.validate_certs | default(false) }}"
+        return_content: true
+      delegate_to: localhost
+      register: _api_resp
+      changed_when: false
+      failed_when: false                 # branch on status below — don't abort the host
+      no_log: true                       # request carries the token, response the config
+
+    - name: Record capture failure (reported in summary, not a hard abort)
+      ansible.builtin.set_fact:
+        kontroll_backup_result: >-
+          FAILED: HTTP {{ _api_resp.status | default('?') }} from the {{ backend_api_recipe }}
+          backup endpoint {{ _api_recipe.backup.path }} — check the API token's permissions.
+        kontroll_backup_failed: true
+      when: (_api_resp.status | default(0)) != 200
+
+    - name: Write capture
+      ansible.builtin.copy:
+        content: "{{ _api_resp.content }}"
+        dest: "{{ config_backup_dir }}/{{ _backup_file }}"
+        mode: "0640"
+      delegate_to: localhost
+      no_log: true                       # content is the secret-bearing config
+      when: (_api_resp.status | default(0)) == 200
+
+    - name: Record successful capture
+      ansible.builtin.set_fact:
+        kontroll_backup_result: "captured -> {{ _backup_file }}"
+      when: (_api_resp.status | default(0)) == 200

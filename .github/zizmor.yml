@@ -1,0 +1,17 @@
+# zizmor site config — kontroll hybrid action-pinning policy (mirrors netcanon).
+#
+# unpinned-uses fires only on THIRD-PARTY action publishers. First-party publishers
+# (`actions/*`, `github/*`) may use tag-pins — GitHub controls those repos and force-push
+# protections apply. Third-party publishers must SHA-pin (a hijacked tag in a third-party
+# org is a real, if low-probability, supply-chain compromise vector). Without this policy
+# the rule re-fires on every `actions/checkout@v6` call, drowning real findings in noise.
+#
+# kontroll currently uses ONLY first-party actions (actions/checkout, actions/setup-python),
+# so this keeps the scan quiet until a third-party action is added — which must then SHA-pin.
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        "actions/*": ref-pin   # GitHub-owned, force-push protected
+        "github/*": ref-pin    # GitHub-owned
+        "*": hash-pin          # third-party publishers: SHA required

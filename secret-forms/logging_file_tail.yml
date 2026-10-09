@@ -1,0 +1,21 @@
+# Secret-onboarding FORM descriptor for the `logging_file_tail` SOPS domain — the SSH PRIVATE key Vector's
+# exec-ssh source uses to PULL a remote host's journald (logging/file_tail_ssh.yml: `ssh -i <key> … journalctl
+# -f -o json`). A READ credential locked to a forced-command (no shell, no arbitrary file read). Fields only;
+# recipiency is base (control + break-glass) per /.sops.yaml.
+# This form covers the PRIVATE-key PASTE into SOPS (the half Vector reads). The rest of the keypair lifecycle is
+# OUT-OF-BAND, by design: MINT the keypair (ssh-keygen), AUTHORIZE its PUBLIC half on each target host (the
+# `logging_file_tail_ssh` wiring role adds it to authorized_keys with the forced command), and PIN the target
+# host keys (device_trust.<key>.ssh_known_hosts_file). The GUI does not model SSH-keypair minting (keygen is age-only).
+domain: logging_file_tail
+label: file_tail_ssh read key (SSH private key)
+description: The SSH PRIVATE key Vector uses to pull a remote host's journald (forced-command journalctl read).
+order: 51
+recipients: base
+fields:
+  - key: ssh_private_key
+    label: SSH private key (PEM)
+    type: textarea
+    required: true
+    help: >-
+      Paste the PRIVATE key whose PUBLIC half is authorized (forced-command) on the target hosts. Mint the keypair
+      and authorize the public half out-of-band (the file_tail_ssh wiring role does the authorized_keys step).

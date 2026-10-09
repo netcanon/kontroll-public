@@ -1,0 +1,16 @@
+---
+# GENERATED/maintained by scripts/gen-dashboard-floor.py --resolve — DO NOT hand-edit id/revision/sha.
+# The dashboard-floor pin (north-star Rung 4a): the grafana.com board DERIVED for this telemetry
+# method's derive_dashboard: selector, frozen so gen-dashboard-floor.py --check validates it OFFLINE
+# (BRICK-1). Re-derive with --resolve (network, operator-run); the diff is the reviewable churn.
+schema: 1
+method: blackbox
+name: blackbox
+id: 13659
+revision: 1
+datasource: prometheus
+content_sha256: "sha256:c3feeec99db4260c3f5bcfa7db22a96c121656a55e35517093df7f15c6292498"
+requires_series: probe_success
+chosen_by: prefer_gnet
+search: "blackbox exporter"
+resolved_at: "2026-07-02"

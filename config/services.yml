@@ -1,0 +1,28 @@
+# The control-plane services kontroll itself stands up — the data behind the GUI Index panel's
+# "Control-plane services" section (read by kontroll.service.fleet.list_services). Each URL is
+# templated from THIS instance's ${MGMT_IP} / ${DOMAIN} (the GUI's KONTROLL_MGMT_IP /
+# KONTROLL_DOMAIN env — the same source the capability Grafana deep-links use, #122).
+#
+# This file is SHIPPED + repo-tracked, NOT an instance overlay: the set is a property of the
+# product, not of your lab (only the mgmt-IP/domain differ per instance, and those come from env).
+# Run a service you don't want listed here? Delete its entry. Add one = add a list item
+# (config-as-data — no code change). Ports match docs/SETUP.md §6's control-plane URL table.
+services:
+  - name: Onboarding GUI
+    url_template: https://${MGMT_IP}:8443
+    description: Device & secret onboarding (this GUI)
+  - name: Semaphore
+    url_template: http://${MGMT_IP}:3001
+    description: Ansible automation
+  - name: Homepage
+    url_template: https://control.${DOMAIN}
+    description: Portal — mgmt-bound, unauthenticated by design
+  - name: Grafana
+    url_template: https://${MGMT_IP}:3002
+    description: Metrics dashboards
+  - name: Prometheus
+    url_template: http://${MGMT_IP}:9090
+    description: Metrics TSDB
+  - name: API
+    url_template: https://${MGMT_IP}:8444
+    description: kontroll REST API (read-only until armed)

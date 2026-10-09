@@ -1,0 +1,9 @@
+# config.d/sources/internal_gui_audit.yaml  → source id "internal_gui_audit", type file.
+# TSV `ts<TAB>ip<TAB>action<TAB>detail` (gui/app.py _audit). Audit lines never carry creds by design, so
+# shipping them is C8/C12-safe. Picks up the rotated backups (.1 … .5) too.
+type: file
+include:
+  - /host/gui-audit/onboard-gui-audit.log
+  - /host/gui-audit/onboard-gui-audit.log.[0-9]
+read_from: beginning
+data_dir: /var/lib/vector

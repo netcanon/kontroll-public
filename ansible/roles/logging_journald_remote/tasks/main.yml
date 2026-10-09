@@ -1,0 +1,55 @@
+---
+# Enable persistent systemd-journald on the target host (so the journal survives reboots and Vector reads a
+# complete journal) and OPTIONALLY ship it to the collector via systemd-journal-upload. The control-VM-LOCAL
+# journal needs NO wiring (Vector bind-mounts /var/log/journal directly — docker/services/vector.yaml); this
+# role guarantees persistence everywhere + handles the REMOTE-host upload (opt-in; see README + the access
+# chain below).
+#
+# Access chain used:   control VM (mgmt VLAN) -> target host (SSH, root key ~/.ssh/ansible_ed25519)
+# May break:           none on the LOCAL host (a read-only mount + Storage=persistent); REMOTE upload adds one
+#                      uploader unit. NO network/forwarding/mgmt change.
+# Fallback required:   no
+# Blast radius:        this host (a persistent journal dir + optionally a journal-upload unit; reversible)
+# Idempotence:         lineinfile + systemd are idempotent — a 2nd run = 0 changed once persistent + enabled
+# no_log:              true on any task carrying an upload cred (none in the MVP — upload is unauthenticated on
+#                      the mgmt VLAN; a future TLS/cred variant adds it from the SOPS domain)
+# --check-safe:        lineinfile/systemd render diffs in check_mode, apply nothing (run --check --diff first)
+- name: Ensure the systemd journal is stored persistently (survives reboot; Vector reads a complete journal)
+  ansible.builtin.lineinfile:
+    path: /etc/systemd/journald.conf
+    regexp: '^#?\s*Storage='
+    line: "Storage=persistent"
+    backup: true
+  become: true
+  notify: Restart systemd-journald
+
+- name: Ship the journal to the collector (REMOTE hosts; opt-in until the receiver is built)
+  when: logging_journald_upload_enabled | default(false) | bool
+  become: true
+  block:
+    - name: Fail loudly if upload is enabled without a collector host
+      ansible.builtin.assert:
+        that:
+          - logging_collector_host | default('') | length > 0
+        fail_msg: "logging_journald_upload_enabled needs logging_collector_host (the collector's mgmt IP)"
+        quiet: true
+
+    - name: Install systemd-journal-remote (provides systemd-journal-upload)
+      ansible.builtin.package:
+        name: systemd-journal-remote
+        state: present
+
+    - name: Point journal-upload at the collector
+      ansible.builtin.lineinfile:
+        path: /etc/systemd/journal-upload.conf
+        regexp: '^#?\s*URL='
+        line: "URL=http://{{ logging_collector_host }}:{{ logging_journald_upload_port }}"
+        create: true
+        mode: "0644"
+      notify: Restart systemd-journal-upload
+
+    - name: Enable + start systemd-journal-upload
+      ansible.builtin.systemd:
+        name: systemd-journal-upload
+        enabled: true
+        state: started

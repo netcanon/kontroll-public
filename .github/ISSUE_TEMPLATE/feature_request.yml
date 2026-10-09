@@ -1,0 +1,43 @@
+name: Feature request
+description: Propose a new device class, method, capability, or a change to the doctrine
+title: "[feature] "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, check the "add an X" test in PLAN.md §2.5: most additions are a **new file** in a
+        registry (`modules/`, `telemetry/`, `logging/`, `discovery/`, `capabilities/`) and need no code change.
+        If that is your case, a pull request is welcome directly — see `CONTRIBUTING.md`.
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options:
+        - New device class (module + role)
+        - New telemetry / logging / discovery method
+        - New capability or GUI/API surface
+        - Change to doctrine / hard rules / security controls
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem or gap
+      description: What can't be done today, and why it matters for a homelab control plane.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: How it would fit the registries / the two-key propose → promote spine. Which hub file would it NOT touch?
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

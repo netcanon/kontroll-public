@@ -1,0 +1,29 @@
+# yamllint config — L1 lint layer. Relaxed where Ansible/compose idioms conflict
+# with strict YAML (e.g. truthy on/off, long lines in inventory).
+extends: default
+
+rules:
+  line-length:
+    max: 120
+    level: warning
+  truthy:
+    allowed-values: ["true", "false", "yes", "no"]   # Ansible/compose booleans
+    check-keys: false
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: disable   # required for ansible-lint compatibility
+  octal-values:                   # required for ansible-lint compatibility
+    forbid-implicit-octal: true
+    forbid-explicit-octal: true
+  document-start: disable
+  braces:
+    max-spaces-inside: 1        # allow `{ type: radarr, ... }` flow maps
+
+ignore: |
+  ansible/collections/
+  **/.molecule/
+  ansible/backups/
+  ansible/secrets/
+  instance/secrets/
+  docker/vector/generated/
+  prometheus/exporters/snmp/modules.generated.yml

@@ -1,0 +1,28 @@
+---
+# Generic config PUSH for ANY network_cli platform — applies config lines via the cliconf plugin
+# (ansible.netcommon.cli_config), no vendor module. A method/class role points here by declaring
+# `backend_config_lines` (+ optional backend_config_label). The lines themselves are the CALLER's
+# responsibility (vendor syntax lives in the caller, never branched here) — mirrors backend_backup_command.
+#
+# Access chain used:   control node -> device mgmt (network_cli / SSH)
+# May break:           ONLY the config subsystem the pushed lines touch (e.g. syslog host). cli_config diffs
+#                      against running-config (idempotent) and is --check-safe (check_mode renders the diff,
+#                      applies nothing). State-changing -> the caller MUST run --check --diff FIRST (CLAUDE.md).
+# Fallback required:   per the calling method (e.g. console for edge_firewall/core_switch)
+# Blast radius:        the device config subsystem named by the pushed lines (reversible — re-push the prior
+#                      lines, or their negation). NO traffic/forwarding/mgmt-reachability change.
+# Idempotence:         cli_config compares against running-config — same lines on a 2nd run = 0 changed
+# no_log:              true on the push (the session carries the device login + the diff may echo a secret line)
+# noqa: var-naming[no-role-prefix] — backend_* are the shared cross-backend contract params (uniform name
+# regardless of backend), like backup_capable / backend_backup_command.
+- name: Apply config lines via the netcommon_cli backend  # noqa: var-naming[no-role-prefix]
+  ansible.netcommon.cli_config:
+    config: "{{ backend_config_lines | join('\n') }}"
+  register: _cli_config
+  no_log: true
+
+- name: Record the configure result (non-secret — the changed flag only, never the diff)
+  ansible.builtin.set_fact:
+    kontroll_configure_result: >-
+      {{ backend_config_label | default('config') }}:
+      {{ 'changed' if _cli_config is changed else 'already-applied' }}

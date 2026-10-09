@@ -1,0 +1,18 @@
+---
+# Backup entrypoint for logging_syslog_push — capture the device's CURRENT syslog config BEFORE a change, as the
+# rollback reference (read-only `show logging`). Mirrors cisco_ios/tasks/backup.yml (delegates to the backend).
+#
+# Access chain used:   control VM (mgmt VLAN) -> device mgmt (network_cli) — read-only `show logging`
+# May break:           none (read-only show)
+# Fallback required:   no
+# Blast radius:        none — pure read
+# Idempotence:         capture overwritten each run; no device state change
+# no_log:              handled in the backend (the show output may carry a secret)
+# noqa: var-naming[no-role-prefix] — backend_* are the shared cross-backend contract params.
+- name: Capture current `show logging` as the rollback reference  # noqa: var-naming[no-role-prefix]
+  ansible.builtin.include_role:
+    name: backend_netcommon_cli
+    tasks_from: backup
+  vars:
+    backend_backup_label: syslog-push-pre
+    backend_backup_command: show logging

@@ -1,0 +1,56 @@
+# Telemetry method: proxy-exporter blackbox_exporter — a control-node exporter probes a device's REACHABILITY
+# (ICMP/TCP/HTTP) on Prometheus's behalf. AGENT-LESS, READ-ONLY, NO CREDENTIAL: a ping/connect, never a login
+# and never actuation. Complements snmp (which needs v3 creds + a live agent): blackbox answers "is the device
+# up / reachable" even when SNMP is silent, with ZERO device-side provisioning. The scrape target is the DEVICE
+# address; the generated `blackbox` job's relabel proxies it onto blackbox-exporter:9115, and the per-target
+# __param_module label (emitted by gen-observability from `params.probe`) selects the probe module
+# (icmp/tcp_connect/http_2xx). Schema: docs/observability/telemetry-method-registry.md.
+name: blackbox
+label: Blackbox (blackbox_exporter, reachability — icmp/tcp/http, no creds)
+order: 22
+kind: proxy-exporter
+job: blackbox              # its OWN job — a separate exporter + metrics_path from snmp's `network` job:
+                          # prometheus/targets/blackbox/<key>.generated.yml + the generated `blackbox` job
+target_shape: device       # target = "<ansible_host>" (the device addr); the job relabel proxies it
+labels: [host]
+metrics_path: /probe
+exporter_address: blackbox-exporter:9115
+target_param: target       # ?target=<device>
+# Per-class params — a CLOSED allow-list (the config-injection guard: a value not in `allowed` is REJECTED at
+# generate time, NEVER interpolated). `probe` -> the __param_module target label -> Prometheus passes
+# ?module=<m> to blackbox_exporter (a __param_* target label is auto-used as a query arg) to pick the prober.
+params:
+  probe:
+    allowed: [icmp, tcp_connect, http_2xx]   # the modules in prometheus/exporters/blackbox/blackbox.yml
+    required: true
+    label_as: __param_module
+# F2 auto-derivation switch (PRESENT ⇒ AUTO-DERIVABLE for any backend that confers it): the universal reachability
+# default for the required `probe` param. Creds-free (an ICMP/TCP probe carries no credential). gen-class-capabilities
+# / onboard emit `{method: blackbox, params: {probe: icmp}}`.
+derive_default:
+  params: {probe: icmp}
+# Rung-4a dashboard-floor SELECTOR (scripts/gen-dashboard-floor.py) — DERIVE the grafana.com board (even its id)
+# from a search, never a hand-typed gnet. Resolved + PINNED to dashboards/derived/blackbox.lock.yml; the honest
+# floor board for the reachability series this method probes. `prefer_gnet` is a SOFT tie-break (13659 "Blackbox
+# Exporter (HTTP prober)"); `requires_series` (probe_success) is the fail-closed series-fit gate.
+derive_dashboard:
+  search: "blackbox exporter"
+  datasource: prometheus
+  requires_series: probe_success
+  prefer_gnet: [13659]
+  name: blackbox
+# No static_labels and no secret: ICMP/TCP/HTTP probes carry NO credential (unlike snmp's __param_auth).
+# No applies_when: blackbox is UNIVERSALLY offerable in the Stage-1 picker — any addressable device can be
+# ICMP/TCP/HTTP-probed with zero provisioning. (The ?target set is still GENERATED from inventory — SSRF-bounded.)
+secret_domain: null
+exporter:
+  image: prom/blackbox-exporter:v0.28.0
+  container_name: blackbox-exporter
+  config_mount: ../../prometheus/exporters/blackbox/blackbox.yml   # static, committed (NO secret)
+  config_container_path: /etc/blackbox_exporter/config.yml
+  cap_add: [NET_RAW]        # ICMP needs a raw socket; CAP_NET_RAW is least-privilege for ping in a container
+  access_chain:
+    chain: control VM -> blackbox-exporter -> ICMP/TCP/HTTP probe of <device> (mgmt VLAN)
+    may_break: nothing — a read-only reachability probe; a probe failure blanks a panel, not the lab
+    fallback: "no"
+    blast_radius: control node only (?target set is GENERATED from inventory — SSRF-bounded; actuates nothing)

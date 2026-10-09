@@ -1,0 +1,17 @@
+# Capability vector: actuate (read-write — can change device state).
+# A vector is a drop-in: add vectors/<name>.yml and the prober/search pick it up.
+# `match` rules are evaluated against a collection's probe facts; the vector is
+# present if ANY rule matches, at that rule's confidence (highest wins).
+name: actuate
+label: actuate (R/W)
+symbol: actuate
+order: 1
+match:
+  - rule: {plugin: cliconf}            # ansible.netcommon cli_config can push config
+    confidence: high
+  - rule: {module_suffix: _config}     # vendor *_config module
+    confidence: high
+  - rule: {module_suffix: _resource}   # resource modules (state: present/absent)
+    confidence: medium
+  - rule: {plugin: httpapi}            # REST actuation
+    confidence: medium

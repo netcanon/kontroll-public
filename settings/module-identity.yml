@@ -1,0 +1,60 @@
+# settings/module-identity.yml — the per-knob RECONFIGURE METADATA for a device-class module's IDENTITY keys
+# (the top-level keys of modules/<key>/module.yml). This is the DATA half of design 22 §10's descriptor
+# contract: each identity key declares the SEVERITY of changing its value + a blast-radius note, so
+# service/_diff.compute_changes can UPGRADE a value change from a plain `modify` to the `identity` gate (the
+# type-to-confirm reconfig-identity-confirm). The classification is DATA here, never per-key code — adding a
+# reconfigurable identity knob is a drop-in row, never a differ edit (the no-bespoke-config tenet / "add a knob"
+# test). Phase 4b (#139). NOT instance config — this ships with the tool (a repo-level descriptor, sibling of
+# capabilities/ + secret-forms/); it carries NO values, only the reconfigure metadata.
+#
+# severity (design 22 §7):  modify (a value replaced — overwrite-confirm) < identity (a re-classify that
+# re-homes hosts / orphans creds — the type-to-confirm reconfig-identity-confirm). An `add` (first-set) is
+# NEVER upgraded — only a change to an EXISTING value carries the heavier gate (design 22 §10).
+area: module-identity
+file: "modules/{key}/module.yml"
+knobs:
+  - key: secrets_domain
+    type: text
+    pattern: "[a-z][a-z0-9_]*"
+    reconfigurable: true
+    severity: identity
+    blast_radius: orphan-creds
+    help: "The SOPS secret domain this class's hosts read their credentials from."
+    confirm_text: >-
+      Re-pointing secrets_domain ORPHANS this class's existing credentials in the old domain — the hosts read
+      creds from the NEW domain after promote, so re-encrypt them there (or the next run fails to authenticate).
+  - key: inventory_group
+    type: text
+    pattern: "[a-z][a-z0-9_]*"
+    reconfigurable: true
+    severity: identity
+    blast_radius: re-home-hosts
+    help: "The Ansible inventory group this class's hosts belong to (the dispatch seam: selects role + collection)."
+    confirm_text: >-
+      Changing inventory_group RE-HOMES every host of this class at the one dispatch seam: a different role and
+      collection set will manage them after promote. Verify the new group's role fits the device.
+  - key: backend
+    type: text
+    pattern: "[a-z][a-z0-9_]*"
+    reconfigurable: true
+    severity: identity
+    blast_radius: re-connect
+    help: "The connection backend — HOW the control node reaches the device (ssh / api / network_cli)."
+    confirm_text: >-
+      Changing backend re-classifies how the control node CONNECTS to every host of this class; an incompatible
+      backend (wrong transport / missing creds) fails the next run.
+  - key: role
+    type: text
+    pattern: "[a-z][a-z0-9_]*"
+    reconfigurable: true
+    severity: identity
+    blast_radius: re-classify
+    help: "The Ansible role applied to this class's hosts (device_role)."
+    confirm_text: >-
+      Changing role swaps the play set applied to every host of this class on the next run.
+  - key: status
+    type: enum
+    allowed: [staged, active]
+    reconfigurable: true
+    severity: modify
+    help: "Lifecycle status — staged (onboarded; dry-run before use) or active (verified, in production)."

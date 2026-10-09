@@ -1,0 +1,11 @@
+# FortiGate/FortiOS backs up via the REST monitor config-backup endpoint, not a
+# standard *_config `backup:` option or a cliconf plugin — so the prober honestly
+# can't see it. We've implemented + verified that capture (roles/fortigate), so
+# correct the record here.
+collection: fortinet.fortios
+capabilities:
+  backup:
+    state: yes
+    confidence: high
+    evidence: "REST config/backup via the api backend + fortios recipe (byte-identical, verified)"
+note: "Backup is via the FortiOS REST API (api backend + fortios recipe), invisible to structural probing."

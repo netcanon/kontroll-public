@@ -1,0 +1,5 @@
+---
+# The mgmt port the journal-upload receiver listens on (matches the SENDER's logging_journald_upload_port +
+# systemd-journal-remote's conventional ingest port). logging_collector_host has NO default — it is REQUIRED
+# (asserted) so the socket can never silently bind 0.0.0.0 (C3/C12).
+logging_journald_upload_port: 19532   # noqa: var-naming[no-role-prefix]  cross-role wiring var (cf the sender role)

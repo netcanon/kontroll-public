@@ -1,0 +1,18 @@
+---
+# Rollback reference: capture the current receiver service unit (read-only slurp -> control-side), so a bad
+# receiver change can be reverted to the prior unit. Mirrors the sender role's `backup` entrypoint.
+- name: Slurp the current journal-remote receiver unit (if any)
+  ansible.builtin.slurp:
+    src: /etc/systemd/system/kontroll-journal-remote.service
+  register: _jr_unit
+  failed_when: false
+  become: true
+
+- name: Stash the unit control-side as the rollback reference
+  ansible.builtin.copy:
+    content: "{{ _jr_unit.content | default('') | b64decode }}"
+    dest: "{{ playbook_dir }}/../../local/backups/kontroll-journal-remote.service.bak"
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  when: _jr_unit.content is defined

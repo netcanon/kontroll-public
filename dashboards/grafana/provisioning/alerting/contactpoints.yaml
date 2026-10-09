@@ -1,0 +1,15 @@
+# A single benign DEFAULT contact point so the alert rules provision cleanly without forcing the operator to
+# wire Slack/email up front (21-design-logging-continuation.md §2.2). It is DEFINED but not routed by a
+# notification policy here, so it never actually sends — the homelab operator watches the Grafana Alerting
+# panel; an actual notifier (Slack/email/webhook) is an opt-in later drop-in, NOT a blocker. Keeping this file
+# present is also what stops provisioning from failing on a rule that resolves to a missing contact point.
+apiVersion: 1
+contactPoints:
+  - orgId: 1
+    name: kontroll-logging-default
+    receivers:
+      - uid: kontroll-logging-noop
+        type: email
+        disableResolveMessage: true
+        settings:
+          addresses: root@localhost     # placeholder; unrouted (no notification policy points here) => inert

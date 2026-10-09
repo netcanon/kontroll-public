@@ -1,0 +1,71 @@
+# scripts/lib/canonical-group.sh — provision/verify the C10 canonical's owning group (gid 1001).
+#
+# WHY this is a shared HOST gesture: the canonical bare repo /srv/kontroll.git is group-gid-1001 (the uid:gid the
+# privileged api/onboard-gui write proposals as). To MANAGE those uid-1001-pushed proposal refs — the operator's
+# `kontroll-promote` advances main + DELETES the consumed proposed/<run_id> ref — the operator must be a member of
+# that group, else the delete fails "Permission denied" (live-caught 2026-06-29 on the .52 baked prod box, F-CANON;
+# task_51334deb). ansible/playbooks/local-canonical.yml provisions the named group + the operator's membership on a
+# HOST-DIRECT run, but SKIPS them inside the installer container (KONTROLL_IN_CONTAINER=1 — the published-kit and
+# local-build launchers both run the deploy in-container) because a container-local group dies with the ephemeral
+# installer and the operator name isn't in the container's /etc/passwd. So the HOST gesture lives here, shared by the
+# root host-floor installer (install-prereqs.sh — creates it) and the operator launchers (kontroll.sh /
+# kontroll-installer.sh — ensure-or-warn). POSIX sh (no bashisms; sourced under sh or bash); every function is
+# idempotent. SECURITY.md C10.
+
+KONTROLL_CANONICAL_GID="${KONTROLL_CANONICAL_GID:-1001}"
+KONTROLL_CANONICAL_GROUP="${KONTROLL_CANONICAL_GROUP:-kontroll}"
+
+# canonical_group_satisfied <operator> — 0 iff a group at the canonical gid EXISTS and <operator> is an EFFECTIVE
+# member of it (primary or supplementary). Conservative: a usermod'd-but-not-relogged-in member reads as unsatisfied
+# (id reflects only the current session), so the launcher's ensure path is idempotently re-tried — harmless.
+canonical_group_satisfied() {
+  _op="$1"
+  getent group "$KONTROLL_CANONICAL_GID" >/dev/null 2>&1 || return 1
+  _grp="$(getent group "$KONTROLL_CANONICAL_GID" | cut -d: -f1)"
+  id -nG "$_op" 2>/dev/null | tr ' ' '\n' | grep -qx "$_grp"
+}
+
+# canonical_group_ensure <operator> [noninteractive] — create the gid-1001 group (named 'kontroll' unless that gid
+# already exists under another name) and add <operator> to it. Runs the privileged commands directly when root, else
+# via sudo (`sudo -n`, never prompting, when arg 2 is "noninteractive" — for an unattended launcher). Idempotent: the
+# groupadd is skipped if a group already holds the gid, the usermod if <operator> is already a member or is root.
+# Returns non-zero if it could not complete (no root + no usable sudo, or the command failed) so the caller can warn.
+canonical_group_ensure() {
+  _op="$1"; _mode="${2:-}"
+  if [ "$(id -u)" -eq 0 ]; then
+    _sudo=""
+  elif command -v sudo >/dev/null 2>&1; then
+    if [ "$_mode" = noninteractive ]; then _sudo="sudo -n"; else _sudo="sudo"; fi
+  else
+    return 1                                   # not root and no sudo — caller warns with the manual one-liner
+  fi
+  if ! getent group "$KONTROLL_CANONICAL_GID" >/dev/null 2>&1; then
+    # shellcheck disable=SC2086  # $_sudo is an intentional 0-or-2-word prefix; must word-split
+    $_sudo groupadd -g "$KONTROLL_CANONICAL_GID" "$KONTROLL_CANONICAL_GROUP" >/dev/null 2>&1 || return 1
+    echo "    created the gid-$KONTROLL_CANONICAL_GID $KONTROLL_CANONICAL_GROUP group (the C10 canonical's owning group)."
+  fi
+  _grp="$(getent group "$KONTROLL_CANONICAL_GID" | cut -d: -f1)"
+  if [ -n "$_op" ] && [ "$_op" != root ] \
+     && ! id -nG "$_op" 2>/dev/null | tr ' ' '\n' | grep -qx "$_grp"; then
+    # shellcheck disable=SC2086
+    $_sudo usermod -aG "$_grp" "$_op" >/dev/null 2>&1 || return 1
+    echo "    added $_op to the $_grp group (effective next login; the canonical is also operator-owned, so the first promote works now)."
+  fi
+  return 0
+}
+
+# canonical_group_ensure_or_warn <operator> — launcher convenience: if already satisfied, silent; else try a
+# non-interactive ensure; if that can't run (no root/sudo), print a LOUD, actionable warning with the exact manual
+# one-liner so the gap can't silently bite at promote time. NEVER fatal (returns 0) — the install proceeds; only
+# out-of-band promote of a uid-1001 proposal needs the group, and the canonical is operator-OWNED for the first one.
+canonical_group_ensure_or_warn() {
+  _op="$1"
+  canonical_group_satisfied "$_op" && return 0
+  if canonical_group_ensure "$_op" noninteractive; then return 0; fi
+  echo "kontroll: WARNING — the C10 canonical group (gid $KONTROLL_CANONICAL_GID) is missing or '$_op' is not a member." >&2
+  echo "          The stack will install, but PROMOTING a GUI-staged proposal will fail 'Permission denied' (the" >&2
+  echo "          operator can't delete the consumed proposed/<run_id> ref) until you run this one-time gesture:" >&2
+  echo "            sudo groupadd -g $KONTROLL_CANONICAL_GID $KONTROLL_CANONICAL_GROUP; sudo usermod -aG $KONTROLL_CANONICAL_GROUP $_op" >&2
+  echo "          then log out/in (or run kontroll-promote as root). SECURITY.md C10." >&2
+  return 0
+}

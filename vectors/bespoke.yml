@@ -1,0 +1,15 @@
+# Capability vector: bespoke (no standard backend fits — needs custom/local logic,
+# e.g. raw-SSH appliances). It is the negative space: true when none of the
+# standard-backend signals are present. See vectors/actuate.yml for the contract.
+name: bespoke
+label: bespoke
+symbol: bespoke
+order: 3
+match:
+  - rule:
+      none_of:
+        - {plugin: cliconf}
+        - {plugin: httpapi}
+        - {plugin: netconf}
+        - {module_suffix: _config}
+    confidence: medium

@@ -1,0 +1,7 @@
+---
+# OpenWrt discovery-key wiring defaults. This role authorizes a DEDICATED read-only, forced-command SSH key on an
+# OpenWrt AP so the passive-discovery sweep can `cat /tmp/dhcp.leases` and NOTHING else (never the full-shell
+# ansible root key). Gated on openwrt_discovery_pubkey (default empty -> a safe no-op until the operator supplies
+# the read key's PUBLIC half). The AP account is always root (group_vars/wireless_ap.yml), so the authorized_keys
+# path is fixed at /root/.ssh. noqa: var-naming[no-role-prefix] — read by the shared wiring playbook convention.
+openwrt_discovery_pubkey: ""                          # noqa: var-naming[no-role-prefix]  the read key PUBLIC half

@@ -1,0 +1,59 @@
+# SOPS creation rules — which age keys encrypt which files. THIS IS A TEMPLATE.
+#
+# `kontroll-init --fresh` copies this to instance/.sops.yaml and REPLACES the
+# placeholder recipient below with YOUR freshly-minted control key — so your secrets
+# encrypt to YOUR key ONLY, never inherited from another instance.
+#
+# Recipients (age PUBLIC keys), least-privilege per domain:
+#   1. control key   — minted by kontroll-init (~/.config/sops/age/keys.txt). On EVERY domain.
+#   2. break-glass   — offline recovery key; add via the GUI 'Keys' dialog (SETUP §5.2). EVERY domain.
+#   3. semaphore key — scoped runner key; ops domains (network, proxmox) ONLY.
+# Items 2 and 3 are added AFTER --fresh, then re-wrap:
+#   sops --config instance/.sops.yaml updatekeys instance/secrets/*.sops.yml
+#
+# path_regex is BASENAME-anchored ((^|/)<domain>\.sops\.ya?ml$): sops matches it
+# RELATIVE to this file's own directory, so a path prefix would fall through to the
+# catch-all and silently drop the scoped key. (SECURITY.md / genericization notes.)
+
+creation_rules:
+  # Operational domains — also decryptable by the scoped Semaphore key (add it later).
+  - path_regex: (^|/)network\.sops\.ya?ml$
+    key_groups: &ops_recipients
+      - age:
+          # YOUR control key — kontroll-init --fresh fills this in.
+          - "age1exampleexampleexampleexampleexampleexampleexampleexa"   # REPLACE
+          # After --fresh, add via the GUI 'Keys' dialog (then re-wrap):
+          #   - break-glass recovery key (offline)
+          #   - scoped Semaphore runner key (operational domains only)
+
+  - path_regex: (^|/)proxmox\.sops\.ya?ml$
+    key_groups: *ops_recipients
+
+  # Non-operational domains — control + break-glass only (no Semaphore key).
+  - path_regex: (^|/)compute\.sops\.ya?ml$
+    key_groups: &base_recipients
+      - age:
+          # YOUR control key — kontroll-init --fresh fills this in (+ break-glass later).
+          - "age1exampleexampleexampleexampleexampleexampleexampleexa"   # REPLACE
+
+  - path_regex: (^|/)dashboards\.sops\.ya?ml$
+    key_groups: *base_recipients
+
+  - path_regex: (^|/)semaphore\.sops\.ya?ml$
+    key_groups: *base_recipients
+
+  - path_regex: (^|/)acme\.sops\.ya?ml$
+    key_groups: *base_recipients
+
+  - path_regex: (^|/)snmp_observability\.sops\.ya?ml$
+    key_groups: *base_recipients
+
+  # logging_file_tail — the read-only SSH keypair Vector uses for the file_tail_ssh log method (PULL a remote
+  # host's journald over SSH, forced to `journalctl -f`). A monitoring READ key; control + break-glass only, NOT
+  # the Semaphore key (deploy-stack renders the private key on the control node). Same posture as snmp_observability.
+  - path_regex: (^|/)logging_file_tail\.sops\.ya?ml$
+    key_groups: *base_recipients
+
+  # Catch-all: any other *.sops.yml uses control + break-glass.
+  - path_regex: .*\.sops\.ya?ml$
+    key_groups: *base_recipients

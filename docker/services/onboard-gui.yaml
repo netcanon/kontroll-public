@@ -1,0 +1,111 @@
+# onboard-gui — the onboarding web surface (alpha), a thin shell over gui/app.py →
+# scripts/galaxy.py. Reuses the kontroll runner image (ansible + sops + age + baked
+# collections + flask) so it has the exact toolchain onboard needs.
+#
+# STATUS: staged. The VERIFIED alpha runs gui/app.py directly on the control VM
+# (see gui/README.md). This fragment packages it for the composed stack; deploy via
+#   ansible-playbook playbooks/deploy-stack.yml -e '{"stack_services":["onboard-gui"]}'
+# after the runner image carries flask (rebuilt by deploy-stack).
+#
+# PRIVILEGED: it can write the repo, encrypt secrets, push, and run Ansible against
+# the lab. Bind to mgmt only; no public exposure; add auth before beta (SECURITY.md).
+# C10 (network-service tier): when the gated deploy enables privileged mutation
+# (`-e api_privileged=true`), the clone gets a `local` remote + KONTROLL_STAGE_PUSHES=1, so a
+# capability-promote can only PROPOSE (push proposed/<run_id>) — a trusted promote lands it on main.
+# Read-only by default: the clone stays root-owned ⇒ uid-1001 reads but cannot write/push.
+services:
+  onboard-gui:
+    image: ${KONTROLL_CONTROL_IMAGE:-kontroll/semaphore:latest}   # ghcr digest if published; else local build
+    container_name: onboard-gui
+    restart: unless-stopped
+    # The repo lives in the image? No — onboard mutates + commits it, so mount a
+    # writable clone from the host. The host clone holds the age key + (optional)
+    # write-capable deploy key for --push.
+    # uid:gid both 1001 (not just the uid) — the gid lets the container write the group-1001 canonical
+    # /srv/kontroll.git (its setgid bare repo) when a capability-promote stages a proposed/<run_id> ref. C10,
+    # mirrors api.yaml. Inert in read-only mode (the clone has no `local` remote ⇒ there is nothing to push).
+    user: "1001:1001"
+    # Phase B (bake-code, Rung 2): run gui/ from the BAKED control image at /opt/kontroll when deployed with
+    # `-e bake_code=true` (deploy-stack renders KONTROLL_CODE_ROOT into .env); else the legacy /repo clone. The mutable
+    # C10 propose tree is the repo bind below, addressed via KONTROLL_WRITE_ROOT (paths.write_root()). `:-/repo`
+    # defaults keep an un-baked .env byte-identical. docs/reviews/2026-06-29-phase-b-baked-code/99-synthesis.md §5.
+    working_dir: ${KONTROLL_CODE_ROOT:-/repo}
+    command: >-
+      sh -c '. /opt/semaphore/apps/ansible/*/venv/bin/activate &&
+             exec python3 ${KONTROLL_CODE_ROOT:-/repo}/gui/app.py'
+    environment:
+      GUI_BIND: "0.0.0.0"               # container-internal; the port publish scopes exposure
+      GUI_PORT: "8443"
+      # Phase B WRITE root (paths.write_root()) — every mutator + git op (onboard/secrets/keygen/actuation/
+      # reconfigure/regen) targets the propose clone, NOT the baked read-only code at KONTROLL_CODE_ROOT. /propose
+      # (baked) maps to the repo bind below; /repo (legacy, unset) == ROOT == the clone, byte-identical to before.
+      # MF-4: rendered into the config-time .env (compose interpolates it in the `volumes:` mount target).
+      KONTROLL_WRITE_ROOT: ${KONTROLL_WRITE_ROOT:-/repo}
+      # Auth: the APP is fail-closed (gui/app.py refuses to start without GUI_PASSWORD). The compose
+      # var is a SOFT default (not `:?`) so an unset GUI_PASSWORD can't break `docker compose`
+      # operations for OTHER services in the include; the app — not compose — enforces fail-closed.
+      GUI_USER: ${GUI_USER:-admin}
+      GUI_PASSWORD: ${GUI_PASSWORD:-}
+      # TLS is mode-aware: deploy-stack renders these into .env from frontend.tls_mode. self_signed serves
+      # HTTPS from the host-provisioned cert (/tls/gui.crt, mounted below); byo_proxy/acme render them EMPTY so
+      # the app serves HTTP and the operator's reverse proxy / Caddy owns TLS. `-` (not `:-`) keeps an explicit
+      # empty value; an UNSET var (older .env) falls back to the self_signed cert path.
+      GUI_TLS_CERT: ${GUI_TLS_CERT-/tls/gui.crt}
+      GUI_TLS_KEY: ${GUI_TLS_KEY-/tls/gui.key}
+      # Persistent, OFF the code/propose tree (M11) so the audit trail is writable under a read-only baked
+      # /opt/kontroll AND survives the content-clone `reset --hard`. The host dir KONTROLL_GUI_AUDIT_DIR is created
+      # uid-1001/0755 by deploy-stack; Vector tails it (logging Layer 1). Mirrors api's /audit bind.
+      GUI_AUDIT_LOG: /audit/onboard-gui-audit.log
+      # Audit-log rotation knobs (shared with the API; fail-closed in code via envguard.positive_int, default
+      # 5 MB x 5 — empty/garbage clamps to the default, never 0 = no rotation = an unbounded C12 audit file).
+      KONTROLL_AUDIT_MAX_MB: ${KONTROLL_AUDIT_MAX_MB:-5}
+      KONTROLL_AUDIT_MAX_FILES: ${KONTROLL_AUDIT_MAX_FILES:-5}
+      # C10 propose-then-promote: when set (by the gated deploy), a capability promote pushes a
+      # proposed/<run_id> STAGING ref instead of main; `kontroll promote <run_id>` lands it. Soft-default
+      # (`:-`) so an unset value can't break compose — empty ⇒ direct push (the current behaviour).
+      KONTROLL_STAGE_PUSHES: ${KONTROLL_STAGE_PUSHES:-}
+      # Deploy identity — lets the capability dialog build a Grafana deep-link (#122) after a telemetry promote
+      # (observe._grafana_base: by-IP http://<mgmt>:3002, or the reverse-proxied domain form). Soft defaults
+      # (`-`) so an unset value just omits the link, never breaks compose.
+      KONTROLL_MGMT_IP: ${KONTROLL_MGMT_IP-}
+      KONTROLL_DOMAIN: ${KONTROLL_DOMAIN-}
+      # C14 backup viewer — the IN-CONTAINER path of the `:ro` captures mount (below). DISTINCT from the .env
+      # KONTROLL_BACKUPS_DIR (the HOST path the volume interpolates): a same-name var would alias host↔container
+      # across two scopes. Unset ⇒ the viewer reads {available:false} (inert, never a crash) — see service/backups.py.
+      KONTROLL_CAPTURES_DIR: /backups
+      SOPS_AGE_KEY_FILE: /home/semaphore/.config/sops/age/keys.txt
+      ANSIBLE_ROLES_PATH: ${KONTROLL_CODE_ROOT:-/repo}/ansible/roles   # baked (immutable roles) or the legacy clone
+      ANSIBLE_COLLECTIONS_PATH: /usr/share/ansible/collections
+      ANSIBLE_HOST_KEY_CHECKING: "False"
+    ports:
+      - "${KONTROLL_MGMT_IP:?set in .env}:8443:8443"   # mgmt interface only, HTTPS — never 0.0.0.0 (:? fails closed)
+    volumes:
+      # The content clone == the C10 propose tree. The HOST dir stays …/onboard-gui/repo (deploy-stack clones it
+      # unchanged); the CONTAINER mount target is the write-root — /repo (legacy) or /propose (baked,
+      # KONTROLL_WRITE_ROOT). When baked, code is read from /opt/kontroll and ONLY the instance-overlay propose
+      # writes land here.
+      - ${KONTROLL_STORAGE_ROOT:-/var/lib/kontroll}/onboard-gui/repo:${KONTROLL_WRITE_ROOT:-/repo}
+      # Persistent audit log (M11) — uid-1001/0755, OFF the code/propose tree so it survives the clone reset + a
+      # read-only baked code root. Vector tails it RO (mirrors api's KONTROLL_API_AUDIT_DIR:/audit bind).
+      - ${KONTROLL_GUI_AUDIT_DIR:-/var/lib/kontroll/onboard-gui/audit}:/audit
+      # The canonical, so the clone's `local` remote (file:///srv/kontroll.git) resolves INSIDE the container —
+      # the C10 staging push (proposed/<run_id>) writes it. Mode is GATED: :ro by default, :rw only when armed
+      # (deploy-stack renders KONTROLL_CANONICAL_MODE=rw under api_privileged) — so the read-only deploy mounts it
+      # :ro and even a container RCE cannot update-ref the canonical directly. Mirrors api.yaml + semaphore.yaml.
+      # (SECURITY.md C10 / docs/privileged-mutation-enablement.md.)
+      - ${KONTROLL_CANONICAL_GIT:-/srv/kontroll.git}:/srv/kontroll.git:${KONTROLL_CANONICAL_MODE:-ro}
+      - ${KONTROLL_STORAGE_ROOT:-/var/lib/kontroll}/onboard-gui/age.key:/home/semaphore/.config/sops/age/keys.txt:ro
+      - ${KONTROLL_STORAGE_ROOT:-/var/lib/kontroll}/onboard-gui/tls:/tls:ro   # gui.crt + gui.key (host-provisioned)
+      # C14: the secret-bearing config-capture store (the SAME ${KONTROLL_BACKUPS_DIR} host path the Semaphore
+      # writer mounts — no second source of truth), bound READ-ONLY so the backup viewer can read history but a GUI
+      # RCE can never rewrite/`git rm` it (`:ro` is NON-NEGOTIABLE; pinned by test_backups.py's :ro-suffix assertion
+      # — a bare source:target defaults to :rw, a silent fail-OPEN). onboard-gui ONLY (the API container never mounts
+      # it — one surface, one C8/C14 justification). SECURITY.md C14.
+      - ${KONTROLL_BACKUPS_DIR:-/var/lib/kontroll/backups}:/backups:ro
+    networks:
+      - kontroll
+
+networks:
+  kontroll:
+    external: true
+    name: kontroll

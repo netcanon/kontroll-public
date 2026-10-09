@@ -1,0 +1,48 @@
+# docker-socket-proxy — the FILTERED, read-only Docker API that Vector's docker_logs source talks to, so the
+# raw root-equivalent /var/run/docker.sock is NEVER mounted into Vector (the C12 promotion-blocker fix). Only THIS
+# proxy holds the socket; it exposes a GET/HEAD-only HAProxy filter (POST=0 ⇒ the whole API is read-only, cannot
+# create/exec/kill a container) on the internal kontroll network. Brought up as a dependency of Vector (vector.yaml
+# depends_on), only when 'vector' is deployed — provision-only-what's-declared.
+#
+# Access chain used:   holds /var/run/docker.sock (:ro) and exposes a GET/HEAD-only Docker API (CONTAINERS reads
+#                      only) on the kontroll net; Vector targets http://docker-socket-proxy:2375, never the raw socket.
+# May break:           nothing — a read-only API filter; if the proxy is down, docker_logs blanks (others fine).
+# Fallback required:   no.
+# Blast radius:        control node only — NO host port (kontroll-net only, C3); POST=0 ⇒ cannot create containers.
+services:
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0   # pinned tag (consistent with the rest of the stack; the one
+                                                 # load-bearing assertion — POST=0 + no ports — is test-pinned)
+    container_name: docker-socket-proxy
+    restart: unless-stopped
+    environment:
+      CONTAINERS: "1"          # list/inspect/logs — the ONLY grant docker_logs needs
+      EVENTS: "1"              # the container lifecycle stream docker_logs watches (Tecnativa default 1; explicit)
+      PING: "1"               # health (default 1; explicit)
+      VERSION: "1"            # docker_logs negotiates the API version (default 1; explicit)
+      POST: "0"                # GET/HEAD only ⇒ the entire API is read-only (cannot create/exec/kill) — the block
+      EXEC: "0"
+      IMAGES: "0"
+      NETWORKS: "0"
+      VOLUMES: "0"
+      INFO: "0"
+      SERVICES: "0"
+      TASKS: "0"
+      SECRETS: "0"
+      CONFIGS: "0"
+      ALLOW_RESTARTS: "0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro   # ONLY the proxy touches the raw socket
+    read_only: true            # the proxy needs no writable root fs
+    tmpfs:
+      - /run                   # HAProxy's runtime socket/pid
+    security_opt:
+      - no-new-privileges:true
+    # NO `ports:` — reachable only on the kontroll network (C3). Vector reaches it by service name.
+    networks:
+      - kontroll
+
+networks:
+  kontroll:
+    external: true
+    name: kontroll

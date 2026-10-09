@@ -1,0 +1,14 @@
+---
+# Debian/Ubuntu path: apt + systemd. (Proxmox / OpenMediaVault hosts.)
+- name: Install node_exporter (apt)
+  ansible.builtin.apt:
+    name: "{{ node_exporter_package }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Ensure node_exporter is enabled + running (systemd)
+  ansible.builtin.systemd:
+    name: "{{ node_exporter_service_systemd }}"
+    enabled: true
+    state: started

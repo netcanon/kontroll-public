@@ -1,0 +1,7 @@
+---
+# Liveness check for the OPNsense class — STUB (staged module; implement when the
+# opnsense module is enabled at cutover).
+- name: Liveness check (stub)
+  ansible.builtin.debug:
+    msg: "TODO: implement OPNsense liveness for {{ inventory_hostname }}"
+  when: not (molecule_test | default(false) | bool)

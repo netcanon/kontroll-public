@@ -1,0 +1,10 @@
+---
+# Whether a config backup is meaningful for this device class. Read by the
+# backup contract (tasks/backup.yml) and surfaced in the backup-configs.yml
+# summary. Override per-host/group via Ansible var precedence if one device
+# differs from its class default.
+# `backup_capable` is a uniform cross-role CONTRACT var — the same name is read
+# by every role's tasks/backup.yml and by backup-configs.yml — so it deliberately
+# carries no role-name prefix; noqa that one rule (var-naming assumes independent,
+# reusable roles, but our roles share one dispatch contract).
+backup_capable: true  # noqa: var-naming[no-role-prefix]

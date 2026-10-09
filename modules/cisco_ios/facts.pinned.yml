@@ -1,0 +1,11 @@
+# PINNED offline probe facts cisco_ios was classified + capability-derived from (F2). Re-deriving the metrics:/logs:
+# floor from these (scripts/gen-class-capabilities.py --check) is hermetic — no re-probe (which needs the collection
+# installed + is non-deterministic). The signal surface only: the connection plugins + module names the classifier
+# and the methods' applies_when read. A vendor/method churn shows as a diff HERE + in module.yml (a reviewable diff,
+# never silent rot). `probed_at` is provenance, NOT used by the derivation (determinism).
+collection: cisco.ios
+version: ">=8.0.0"
+plugins: {cliconf: [ios]}
+modules: [ios_command, ios_config, ios_facts]
+module_options: {}
+probed_at: "2026-06-30"

@@ -1,0 +1,394 @@
+"""onboard domain — the operator's one-shot: collection + host -> a managed device.
+
+Split into the API-ready shape the workstream calls for:
+  * build_onboard_plan — PURE (reads only: deep_probe + loaders). Computes the whole
+    plan (module + drop-in host blocks, rendered YAML, rel paths, creds-to-set) and
+    returns it; no writes, no prints. An error code ("not_installed"/"no_backend") if a
+    precondition fails (CLI owns the message).
+  * apply_onboard_plan — performs the repo mutations for a plan (idempotent no-clobber
+    writes + fleet-enable + SOPS encrypt), prints progress (the exemplar's pattern), and
+    returns {"changed","paths"}.
+Onboarding a device whose CLASS already exists REUSES the curated module (adds only the host
++ fleet-enable) rather than regenerating a minimal one that would strip its metrics:/backup:/
+logs: blocks (#124); the inventory drop-in MERGES so a 2nd device of a class never drops the
+1st. A genuinely DIFFERENT class colliding on a key still hard-stops (WriteConflict) unless the
+operator deliberately Overwrites.
+The commit/push-canonical GATE stays in the CLI wrapper (galaxy.py cmd_onboard), exactly
+as the capture-exception exemplar keeps it. enable_in_fleet/_existing_groups live here as
+onboard-domain helpers. Credential VALUES flow through creds_to_set in memory only — the
+plan display shows var NAMES, never values, and they are never logged.
+"""
+import logging
+import os
+
+import yaml
+
+from kontroll import authspec, catalog, gitio, paths, predicate, probe
+from kontroll.service.classify import derive_class_capabilities, suggest_telemetry
+
+log = logging.getLogger("kontroll.service.onboard")
+
+# Drop-in banners — also the OWNERSHIP markers gitio.write_inventory_host keys its merge-vs-conflict decision on
+# (a file that opens with our inventory banner is one we wrote, so a 2nd host MERGES; a foreign file hard-stops).
+_MODULE_BANNER = "# Onboarded by scripts/galaxy.py. Verify (live-smoke) before status: active.\n"
+_INV_BANNER = "# Drop-in host, onboarded by scripts/galaxy.py onboard. Additive — safe to delete to remove the host.\n"
+
+
+def _existing_module(key):
+    """Parse modules/<key>/module.yml via the modules overlay (paths.module_file — the write_root clone shadows the
+    baked ROOT, Phase-B Fork B) if it exists, else None. This is the SHIPPED/already-onboarded device-class we must
+    REUSE rather than clobber when onboarding another device of the same class (#124): regenerating a minimal module
+    here would strip the curated metrics:/backup:/logs: blocks. Resolved so a baked deploy sees an operator class in
+    the propose clone AND a pristine shipped class in the image; a malformed file degrades to None (treated as absent
+    → the normal generate path, which then no-clobbers)."""
+    mp = paths.module_file(key)
+    if not os.path.exists(mp):
+        return None
+    try:
+        with open(mp, encoding="utf-8") as fh:
+            return yaml.safe_load(fh) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+
+
+def _module_collections(mod):
+    """The collection NAMES a module declares (modules/<key>/module.yml collections[].name), as a set."""
+    return {c.get("name") for c in (mod.get("collections") or []) if isinstance(c, dict)}
+
+
+def build_onboard_plan(collection, key, group, host, host_name=None, secrets="network",
+                       backend=None, username=None, password=None, api_token=None,
+                       ssh_private_key=None, backends=None, vectors=None, creds=None, deep=False):
+    """Compute the onboard PLAN for `collection` as device-class `key` on `host`. Returns
+    {"error": "not_installed"|"no_backend"|None, ...}; on success a plan with backend/role/
+    host_name, the module + drop-in host blocks (dict + rendered YAML text), the repo-rel
+    paths, creds_to_set (cred-var -> SECRET value, never printed), and a read-only `telemetry`
+    suggestion (the capability vector's hint — writes nothing; the observe path is what actuates it).
+
+    Credentials: pass `creds` (a {field: value} map for the DERIVED per-backend fields — F1) OR the legacy scalar
+    kwargs (`username`/`password`/`api_token`/`ssh_private_key`, folded into `creds` when `creds` is None). The plan
+    returns `cred_fields` (the derived CredField DESCRIPTORS — names/kinds only, never values) so the dry-run/GUI can
+    show exactly which fields a device needs; `cred_source` is "shallow" (the backend's auth: block), "fallback"
+    (the generic union — a backend that declares no shape), or "deep" (F1 TIER-B — the EXACT fields from the
+    connecting module's argument_spec, when `deep` and the collection is installed). Values flow through
+    creds_to_set in memory only."""
+    backends = backends if backends is not None else catalog.load_backends()
+    vectors = vectors if vectors is not None else catalog.load_vectors()
+    f = probe.deep_probe(collection)
+    if not f["modules"] and not f["plugins"]:
+        return {"error": "not_installed"}
+
+    # REUSE an existing device-class instead of regenerating a minimal module that would clobber it (#124). The
+    # same class — one whose modules/<key>/module.yml already declares THIS collection — is reused as-is: we add
+    # only the inventory host + fleet-enable, so its curated metrics:/backup:/logs: blocks survive (the live defect
+    # was an Overwrite stripping cisco_ios's blocks). A DIFFERENT collection colliding on the key is NOT reuse — it
+    # stays a WriteConflict at apply, so the operator picks a fresh key or consciously Overwrites.
+    existing = _existing_module(key)
+    module_reuse = existing is not None and collection in _module_collections(existing)
+    if module_reuse:
+        # Adopt the curated class's identity so the host attaches FAITHFULLY (its declared role/backend/domain/
+        # group), not a freshly re-classified one that could drift from the shipped module.
+        backend = backend or existing.get("backend")
+        secrets = existing.get("secrets_domain") or secrets
+        group = existing.get("inventory_group") or group
+
+    backend = backend or (predicate.classify(f, backends)[:1] or [None])[0]
+    if not backend:
+        return {"error": "no_backend"}
+    bdef = next((b for b in backends if b["name"] == backend), {})
+    role = (existing.get("role") if module_reuse else None) or bdef.get("role", "backend_%s" % backend)
+    version = catalog.local_installed().get(collection) or f["version"] or "0.0.0"
+    params = {}
+    if "network_os" in (bdef.get("requires") or []):
+        params["network_os"] = "%s.%s" % (collection, collection.split(".")[-1])
+    host_name = host_name or (key.replace("_", "-") + "-1")
+
+    capability_gap = []   # the honest residual surfaced for a blind onboard (non-gating); a reused class shows none
+    if module_reuse:
+        # The plan SHOWS the curated module (so the operator sees what they're attaching to) but apply WON'T
+        # rewrite it — module_text is the file verbatim, display-only.
+        module = existing
+        with open(paths.module_file(key), encoding="utf-8") as fh:
+            module_text = fh.read()
+    else:
+        module = {"key": key,
+                  "description": "%s via %s backend (onboarded - VERIFY before active)" % (collection, backend),
+                  "status": "staged",
+                  "collections": [{"name": collection, "version": ">=%s" % version}],
+                  "role": role, "backend": backend}
+        if params:
+            module["backend_params"] = params
+        module["inventory_group"] = group
+        module["secrets_domain"] = secrets
+        # F2 (de-bespoke): AUTO-DERIVE the universal capability floor (agent-less metrics + logs) from the
+        # conferred + universal methods, so a blind-onboarded class is monitored + log-shippable on day one with
+        # ZERO curation — closing the empty-Grafana / empty-Loki defect. Best-effort + NON-GATING (INVARIANT D*):
+        # a derivation bug degrades to no floor + a logged warning, never a failed onboard (the SAME try/except
+        # posture as the telemetry nudge below). The blocks are marked `derived: true` (class + per-entry) so
+        # gen-class-capabilities can keep them honest (--check); `capability_gap` names the curated richness this
+        # class can't derive (e.g. a vendor exporter), surfaced like provisioning (advisory, names only).
+        try:
+            derived = derive_class_capabilities(f, backend, backends=backends)
+        except Exception as e:                       # noqa: BLE001 — a derivation bug must never break the plan
+            log.warning("capability derivation failed (%s); onboarding proceeds with no derived floor "
+                        "(INVARIANT D*)", e)
+            derived = {"metrics": [], "logs": [], "dashboards": [], "gap": []}
+        if derived["metrics"]:
+            module["metrics"] = [dict(m, derived=True) for m in derived["metrics"]]
+        if derived["logs"]:
+            module["logs"] = [dict(m, derived=True) for m in derived["logs"]]
+        if derived["metrics"] or derived["logs"]:
+            module["derived"] = True                 # class-level: gen-class-capabilities owns this class's floor
+        # INVARIANT-D (Rung 4a): onboard writes the offline creds-free floor (metrics/logs) ONLY — NOT a `dashboards:`
+        # block. A derived board rides the dashboards/derived locks, which are resolved OUT-OF-BAND (a network
+        # gen-dashboard-floor.py --resolve, never the onboard path), so onboard must not bake in whatever lock-state
+        # happens to exist. A blind-onboarded class therefore has no board until the operator re-derives its floor
+        # (gen-class-capabilities recomputes the `dashboards:` block from the locks); the honest gap names it.
+        capability_gap = derived.get("gap") or []
+        module_text = yaml.safe_dump(module, sort_keys=False, allow_unicode=True, width=4096)
+
+    hostvars = {"device_role": role}
+    for k, v in (bdef.get("connection") or {}).items():
+        if isinstance(v, str) and v.strip().startswith("{{"):
+            v = params.get(v.strip().strip("{} "), v)
+        hostvars[k] = v
+    # Self-contained creds: the host carries its OWN inline SOPS lookups (no shared group_vars needed), keyed per
+    # host so onboarded hosts never collide. Values are encrypted into the domain at apply time.
+    #
+    # F1 (self-describing auth): the CREDENTIAL FIELDS are DERIVED from the classified backend's `auth:` block
+    # (authspec.derive_auth — a network_cli switch wants SSH login; a REST device wants a token), replacing the
+    # former static four-branch if-ladder with one data-driven loop. `creds` (a {field: value} map) supplies the
+    # values; the legacy scalar kwargs fold into it for back-compat. Each field maps to its hostvar exactly as the
+    # if-ladder did, so a password/key/token onboard is byte-identical — only the SET OF OFFERED fields is now
+    # per-backend instead of a one-size-fits-all union.
+    if creds is None:
+        creds = {fld: val for fld, val in (("username", username), ("password", password),
+                                           ("api_token", api_token), ("ssh_private_key", ssh_private_key))
+                 if val is not None}
+    # F1 seam S1: on the REUSE path a curated class's OWN `auth:` block wins over the backend's generic shape — so a
+    # proxmox reuse derives its coherent api-token auth_set (field names lined up with the pve-exporter's
+    # secret_env_map), not the generic single api_token box. A freshly-classified (non-reuse) class has no module
+    # auth block yet → the backend shape, exactly as Rung 0a.
+    # F1 TIER-B (Rung 3): when `deep`, SHARPEN the coarse per-backend shape to the EXACT credential fields read from
+    # the connecting module's argument_spec (proxmox's coherent api_user+api_token_id+api_token_secret set, not a
+    # generic single api_token box). Install-confined (MF-S1 — never introspects an un-installed collection) +
+    # mask-ambiguous (MF-S6), and on any miss the TIER-A shape stands, so onboarding is never blocked (INVARIANT D*).
+    auth = authspec.derive_auth(bdef, secrets, module=existing if module_reuse else None,
+                                deep=deep, coll=collection, modules=authspec.auth_candidate_modules(f))
+    # Back-compat safety net: a legacy field the caller passed that this backend's `auth:` block does NOT declare is
+    # appended from the generic union, so an existing caller's field is mapped EXACTLY as before, never silently
+    # dropped by the new per-backend derivation.
+    declared = {cf["field"] for cf in auth["fields"]}
+    for fld in creds:
+        if fld not in declared:
+            extra = authspec.union_field(fld)
+            if extra is not None:
+                extra["domain"] = secrets
+                auth["fields"].append(extra)
+
+    # MF-S2 domain confinement (the one NEW security guard) — a PRE-PASS before any creds_to_set write: every SECRET
+    # field that has a value must target the onboard's own SOPS domain. Refuse (loud, catchable) BEFORE the mapping
+    # loop, so a malformed/adversarial descriptor can't smuggle a secret into a domain the operator didn't choose and
+    # no half-built creds dict can persist. Today's hardcoded if-ladder couldn't cross domains; a data-driven loop
+    # could, so this guard makes the no-leak constraint enforceable in code, not by convention.
+    for cf in auth["fields"]:
+        if cf.get("secret") and creds.get(cf["field"]) is not None and cf.get("domain", secrets) != secrets:
+            raise ValueError("cred field %s derived for domain %s but onboard targets %s — refusing to cross domains"
+                             % (cf["field"], cf.get("domain"), secrets))
+
+    # auth_set COHERENCE (F1 seam S1): a multi-field credential is ALL-or-NONE — you can't half-authenticate (a
+    # proxmox API token needs user@realm + token_id + token_secret TOGETHER, else the exporter has a broken cred and
+    # Grafana silently stays empty). Refuse a PARTIALLY-filled required set (loud + catchable, like the domain guard
+    # — the operator completes it), but an entirely-empty set is fine: a values-free dry-run plan, or an optional
+    # set, never gates (INVARIANT D*). Keyed on the REQUIRED members so an optional extra doesn't force the set.
+    sets = {}
+    for cf in auth["fields"]:
+        if cf.get("auth_set") and cf.get("required"):
+            sets.setdefault(cf["auth_set"], []).append(cf["field"])
+    for set_name, members in sets.items():
+        filled = [m for m in members if creds.get(m) not in (None, "")]
+        if filled and len(filled) != len(members):
+            missing = [m for m in members if creds.get(m) in (None, "")]
+            raise ValueError("incomplete credential set %r — provide all of %s together (missing %s)"
+                             % (set_name, members, missing))
+
+    cred_key = host_name.replace("-", "_")
+    _sops = "lookup('community.sops.sops', inventory_dir ~ '/../secrets/%s.sops.yml') | from_yaml" % secrets
+    creds_to_set = {}
+    for cf in auth["fields"]:
+        val = creds.get(cf["field"])
+        if val is None:
+            continue
+        # A `shared` cred is a DOMAIN-level secret (one per SOPS domain, e.g. the read-only proxmox token the
+        # pve-exporter uses for every node) → stored FLAT under its sops_stem so its consumer reads the exact name
+        # (telemetry/pve.yml's secret_env_map {proxmox_api_user}…). A normal cred stays HOST-keyed so two onboarded
+        # hosts never collide. Re-onboarding another node of the same domain re-sets the same shared key (idempotent).
+        sops_key = cf["sops_stem"] if cf.get("shared") else "%s_%s" % (cred_key, cf["sops_stem"])
+        if cf["kind"] == "ssh_key":
+            # SSH KEY AUTH — the unified root seam. The PEM is SOPS-encrypted per host; the hostvar points at a 0600
+            # file `_render-ssh-keys.yml` materializes from SOPS into the run-keyed kontroll_device_key_dir.
+            # kontroll_ssh_key_domain (NON-secret) tells that render play which domain to decrypt — emitted ONLY on
+            # key hosts, so password/token drop-ins stay byte-identical. `\r\n`->`\n` so a Windows paste round-trips
+            # to paramiko (MF-7); ensure a trailing newline (a paste may strip it -> OpenSSH rejects a short key).
+            val = val.replace("\r\n", "\n")
+            if not val.endswith("\n"):
+                val += "\n"
+            creds_to_set[sops_key] = val
+            # A backend/curated ssh_key field maps to a connection hostvar (ansible_ssh_private_key_file); a
+            # TIER-B-DERIVED ssh_key param (e.g. a module's `client_key`) has NO maps_to → SOPS-store it, but skip
+            # the hostvar wiring (a None-keyed hostvar would be bogus — review-30 F-3). Its consumer reads the SOPS
+            # value by name; only a maps_to field materializes the 0600 key file + declares the decrypt domain.
+            if cf.get("maps_to"):
+                hostvars[cf["maps_to"]] = "{{ kontroll_device_key_dir }}/%s.key" % cred_key
+                hostvars["kontroll_ssh_key_domain"] = secrets
+        elif cf["field"] == "api_token":
+            # The token's hostvar is the recipe's token_var (per-API), defaulting to <host>_api_token.
+            tok_var = (params.get("token_var") or "%s_api_token" % cred_key)
+            hostvars[tok_var] = "{{ (%s).%s }}" % (_sops, sops_key)
+            creds_to_set[sops_key] = val
+        elif cf.get("inline"):
+            hostvars[cf["maps_to"]] = val            # a non-secret literal hostvar (host/port/bool) — not SOPS
+        else:
+            # SOPS-store the value, and wire a hostvar inline-lookup ONLY if the field maps to one. A shared
+            # domain cred (proxmox exporter token) has NO maps_to — it is read from the SOPS domain by its consumer
+            # (deploy-stack renders it into the exporter .env via the class's secret_env_map), not via a hostvar.
+            creds_to_set[sops_key] = val
+            if cf.get("maps_to"):
+                hostvars[cf["maps_to"]] = "{{ (%s).%s }}" % (_sops, sops_key)
+    host_block = {group: {"hosts": {host_name: {"ansible_host": host, **hostvars}}}}
+    host_text = yaml.safe_dump(host_block, sort_keys=False, allow_unicode=True, width=4096)
+
+    # The telemetry suggestion is a NON-binding nudge — and INVARIANT D* requires that no secondary
+    # capability (its suggester included) can gate onboarding. So it is BEST-EFFORT: a suggester bug
+    # degrades to "no hint", never a failed onboard. The plan above is already complete without it.
+    try:
+        telemetry = suggest_telemetry(f, vectors)
+    except Exception as e:                                # noqa: BLE001 — a hint must never break the plan
+        log.warning("telemetry suggestion failed (%s); onboarding proceeds without the hint (INVARIANT D*)", e)
+        telemetry = None
+
+    # The provisioning SURFACE — the credential prerequisites THIS device class declares as shipped data (e.g.
+    # "the API token must carry the PVEAuditor role"). The blind-joe constraint: any manual step beyond IP+creds
+    # is surfaced AT onboarding, never buried in a doc. Like the telemetry nudge it is BEST-EFFORT + NON-GATING
+    # (INVARIANT D*): a reader bug degrades to [] (the plan is already complete), and the block is NEVER written
+    # into the onboarded module (it's not in module{} above → the _ONBOARD_KEYS pin stays green). Public role
+    # NAMES only — no credential. Resolved by COLLECTION (the form key is a slug; module_provisioning scans).
+    try:
+        provisioning = catalog.module_provisioning(collection)
+    except Exception as e:                                # noqa: BLE001 — surfacing must never break the plan
+        log.warning("provisioning surface read failed (%s); onboarding proceeds without it (INVARIANT D*)", e)
+        provisioning = []
+
+    return {"error": None, "collection": collection, "key": key, "group": group,
+            "secrets": secrets, "backend": backend, "role": role, "host_name": host_name,
+            "module_reuse": module_reuse,   # True => apply reuses the curated module (#124): add only the host
+            "module": module, "module_text": module_text,
+            "host_block": host_block, "host_text": host_text, "creds_to_set": creds_to_set,
+            # F1: the DERIVED credential-field descriptors (names/kinds/labels only — NEVER values), so the
+            # dry-run/GUI can show exactly which fields THIS device needs; cred_source = shallow (backend auth:
+            # block) | fallback (generic union). Pure schema, like secret-forms — no value-bearing field added.
+            "cred_fields": auth["fields"], "cred_source": auth["source"],
+            "mod_path": os.path.join("modules", key, "module.yml"),
+            # New drop-in host file: overlay_target so it lands in the ACTIVE instance/ inventory (the dir
+            # Semaphore reads) and the same string is what gets git-added — write target == staged path.
+            "inv_path": paths.overlay_target("ansible/inventory/onboarded-%s.yml" % key),
+            "telemetry": telemetry,   # read-only suggestion (or None on failure); the GUI/operator decides
+            # F2: the HONEST capability gap — curated rungs (a vendor exporter, a credentialed log pull) this blind
+            # class could NOT auto-derive but a peer has; surfaced advisory + NON-GATING (INVARIANT D*), names only.
+            # Empty for a full-parity class (cisco_ios) and for a reused curated class.
+            "capability_gap": capability_gap,
+            "provisioning": provisioning}   # advisory credential-prerequisite surface (or []); names only, non-gating
+
+
+def apply_onboard_plan(plan, overwrite=False):
+    """Perform the onboard repo mutations for a computed plan: write the device-class module (UNLESS the class
+    already exists for this collection — then REUSE it, adding only the host, so its curated metrics:/backup:/
+    logs: blocks survive, #124), MERGE the drop-in inventory host alongside any siblings (a 2nd device of a class
+    never drops the 1st), enable the class in instance/fleet.yml, and encrypt any creds into the SOPS domain.
+    Prints progress and returns {"changed": bool, "paths": [repo-rel paths to git-add]}. A divergent existing
+    module / a foreign inventory file raises gitio.WriteConflict unless `overwrite=True` (the GUI 'Overwrite'
+    button / API `overwrite` flag — the deliberate, loudly-warned escape hatch)."""
+    if plan.get("module_reuse"):
+        print("  = reusing existing device-class %s (curated module kept; adding host only)" % plan["mod_path"])
+        changed = False
+    else:
+        changed = gitio._write_new(plan["mod_path"], plan["module_text"], _MODULE_BANNER, overwrite=overwrite)
+    group, gbody = next(iter(plan["host_block"].items()))
+    changed |= gitio.write_inventory_host(plan["inv_path"], group, gbody.get("hosts") or {},
+                                          _INV_BANNER, overwrite=overwrite)
+    changed |= enable_in_fleet(plan["key"])
+    paths_changed = [plan["mod_path"], plan["inv_path"], paths.overlay_rel("config/fleet.yml")]
+    creds_to_set = plan["creds_to_set"]
+    if creds_to_set:
+        # Whole-domain decrypt -> merge -> stdin re-encrypt (gitio.sops_write_domain). The plaintext (incl. a
+        # multi-line SSH PRIVATE key) transits sops' STDIN only, NEVER argv — `sops --set` would put it on a
+        # ps-/proc-visible command line (MF-3). Merge {existing, new} so a second host's onboard never drops the
+        # first host's fields (sops_write_domain re-encrypts the WHOLE domain).
+        print("--- encrypting credentials into the %s SOPS domain (stdin; never argv) ---" % plan["secrets"])
+        existing = gitio.sops_decrypt_domain(plan["secrets"])      # {} for a new domain; None on a decrypt failure
+        if existing is None:
+            raise RuntimeError("cannot decrypt the '%s' SOPS domain to merge creds (no/invalid age key here)"
+                               % plan["secrets"])
+        if gitio.sops_write_domain(plan["secrets"], {**existing, **creds_to_set}):
+            changed = True
+        paths_changed.append(paths.overlay_rel("ansible/secrets/%s.sops.yml" % plan["secrets"]))
+    return {"changed": changed, "paths": paths_changed}
+
+
+def enable_in_fleet(key):
+    """Insert `  - <key>` into instance/fleet.yml's enabled_modules, preserving the
+    file's comments. Idempotent: a no-op if the key is already active."""
+    path = paths.resolve("config/fleet.yml", write=True)   # a WRITER: never the shipped instance.example/ stub
+    lines = open(path, encoding="utf-8").read().splitlines()
+    start = next((i for i, ln in enumerate(lines) if ln.strip() == "enabled_modules:"), None)
+    if start is None:
+        # RAISE (a catchable ValueError), never sys.exit — a SystemExit (BaseException) is NOT caught by
+        # Flask/Werkzeug, so it would kill the in-process GUI/API request worker mid-request (the
+        # service-degrades principle; see gitio.WriteConflict). The route's try/except returns a clean 5xx; the
+        # CLI surfaces it as an error trace. (S-3/G9 fix, Phase 5.)
+        raise ValueError("instance/fleet.yml: no enabled_modules: key")
+    last_active = None
+    for i in range(start + 1, len(lines)):
+        ln = lines[i]
+        if ln.strip() and not ln.startswith((" ", "\t")):  # dedented -> block ended
+            break
+        item = ln.strip()
+        if item.startswith("- ") and item[2:].split("#")[0].strip() == key:
+            print("  = %s already enabled in instance/fleet.yml" % key)
+            return False
+        if item.startswith("- "):                          # active (non-comment) entry
+            last_active = i
+    insert_at = (last_active + 1) if last_active is not None else (start + 1)
+    lines.insert(insert_at, "  - %-13s # onboarded via scripts/galaxy.py" % key)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+    print("  + enabled %s in instance/fleet.yml" % key)
+    return True
+
+
+def _existing_groups():
+    """Group names already declared in the inventory (hub + any drop-ins)."""
+    inv_dir = paths.resolve("ansible/inventory")
+    groups = set()
+
+    def _walk(node):
+        if not isinstance(node, dict):
+            return
+        for g, body in node.items():
+            groups.add(g)
+            if isinstance(body, dict) and isinstance(body.get("children"), dict):
+                _walk(body["children"])
+
+    for fn in os.listdir(inv_dir):
+        if fn.endswith((".yml", ".yaml")):
+            try:
+                doc = yaml.safe_load(open(os.path.join(inv_dir, fn), encoding="utf-8")) or {}
+            except yaml.YAMLError:
+                continue
+            if "all" in doc and isinstance(doc["all"], dict):
+                _walk(doc["all"].get("children") or {})
+            else:
+                _walk(doc)
+    groups.discard("hosts")
+    groups.discard("vars")
+    return groups

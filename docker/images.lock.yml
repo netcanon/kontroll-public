@@ -1,0 +1,20 @@
+---
+# GENERATED/maintained by scripts/gen-image-digests.py — DO NOT hand-edit the digests.
+# The image-world pin floor (report 22 §4.2): every kontroll-owned image pinned by sha256 digest (the
+# tag is the human comment; the digest is authoritative, Docker-verified on pull). Recorded by
+# `gen-image-digests.py --refresh` after a tagged CI publish; `digest: null` ⇒ the deploy falls back to
+# the local image build (use_published_images stays off until a digest is recorded).
+schema: 1
+images:
+  kontroll-control:
+    ref: ghcr.io/netcanon-dev/kontroll-control
+    tag: "v0.1.1"
+    digest: "sha256:fb6e21079208801e2d1f0a47f1044c852d410681625b7f9485925c08da67a287"
+  kontroll-installer:
+    ref: ghcr.io/netcanon-dev/kontroll-installer
+    tag: "v0.1.1"
+    digest: "sha256:784d43c5f353afeae43be4b3fdf92ae971b61508b0965c8b86a29d5ae00d0faf"
+  kontroll-vector:
+    ref: ghcr.io/netcanon-dev/kontroll-vector
+    tag: "v0.1.1"
+    digest: "sha256:59516ae7d71c2963f0dbca82072decd9f5479528a625ca95ec424615a54c2cb0"

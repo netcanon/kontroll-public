@@ -1,0 +1,54 @@
+---
+# Generic liveness check for REST/API devices — driven by a per-API recipe
+# (ansible/backends/api/recipes/<name>.yml). Plain `uri` GET against the recipe's
+# `check.path`, delegated to localhost; no vendor module, no httpapi plugin.
+# A device class points here via `role: backend_api` + `backend_api_recipe: <name>`.
+#
+# Access chain used:   control node (localhost) -> device REST API (HTTPS)
+# May break:           none (read-only GET)
+# Blast radius:        none — pure read
+# no_log:              the request carries the API token
+
+- name: Load the API recipe
+  ansible.builtin.set_fact:
+    _api_recipe: >-
+      {{ lookup('file', role_path | dirname | dirname
+         ~ '/backends/api/recipes/' ~ backend_api_recipe ~ '.yml') | from_yaml }}
+  when: backend_api_recipe is defined
+
+- name: Liveness via the recipe's check endpoint
+  when:
+    - backend_api_recipe is defined
+    - _api_recipe.check is defined
+    - not (molecule_test | default(false) | bool)
+  block:
+    - name: Resolve auth token
+      ansible.builtin.set_fact:
+        _api_token: "{{ lookup('vars', _api_recipe.auth.token_var) if _api_recipe.auth.token_var is defined else '' }}"
+      no_log: true
+
+    - name: Build request headers (bearer / apikey_header)
+      ansible.builtin.set_fact:
+        _api_headers: "{{ {(_api_recipe.auth.header_name | default('Authorization')):
+          (('Bearer ' ~ _api_token) if _api_recipe.auth.type == 'bearer' else _api_token)} }}"
+      when: _api_recipe.auth.type in ['bearer', 'apikey_header']
+      no_log: true
+
+    - name: GET the check endpoint
+      ansible.builtin.uri:
+        url: "https://{{ ansible_host }}:{{ _api_recipe.port | default(443) }}{{ _api_recipe.check.path }}"
+        method: "{{ _api_recipe.check.method | default('GET') }}"
+        headers: "{{ _api_headers | default({}) }}"
+        url_username: >-
+          {{ lookup('vars', _api_recipe.auth.username_var)
+             if _api_recipe.auth.username_var is defined else omit }}
+        url_password: >-
+          {{ lookup('vars', _api_recipe.auth.password_var)
+             if _api_recipe.auth.password_var is defined else omit }}
+        force_basic_auth: "{{ _api_recipe.auth.type == 'basic' }}"
+        validate_certs: "{{ _api_recipe.validate_certs | default(false) }}"
+      delegate_to: localhost
+      register: _api_check
+      changed_when: false
+      failed_when: false
+      no_log: true                 # request carries the live API token

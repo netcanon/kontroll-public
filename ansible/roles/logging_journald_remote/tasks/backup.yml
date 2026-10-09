@@ -1,0 +1,27 @@
+---
+# Backup entrypoint — capture the host's current journald.conf as the rollback reference BEFORE the
+# persistence/upload change. Read-only on the host (slurp); the capture is written control-side.
+#
+# Access chain used:   control VM (mgmt VLAN) -> target host (SSH) — read-only slurp of journald.conf
+# May break:           none (read-only)
+# Fallback required:   no
+# Blast radius:        none — pure read
+# Idempotence:         capture overwritten each run; no host state change
+- name: Read the current journald.conf (rollback reference)
+  ansible.builtin.slurp:
+    src: /etc/systemd/journald.conf
+  register: _journald_conf
+
+- name: Ensure the control-side capture dir exists
+  ansible.builtin.file:
+    path: "{{ config_backup_dir }}"
+    state: directory
+    mode: "0750"
+  delegate_to: localhost
+
+- name: Write the journald.conf capture
+  ansible.builtin.copy:
+    content: "{{ _journald_conf.content | b64decode }}"
+    dest: "{{ config_backup_dir }}/journald_{{ inventory_hostname | replace('.', '-') }}.conf"
+    mode: "0640"
+  delegate_to: localhost
