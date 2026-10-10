@@ -145,6 +145,7 @@ def test_the_gate_passes_only_the_whitelisted_environment_and_the_trusted_script
     _fake_proposal(repo, conflict=False, canary=canary)
     monkeypatch.setenv("SOPS_AGE_KEY", "key-material-that-must-not-reach-the-child")
     monkeypatch.setenv("KONTROLL_WRITE_ROOT", str(tmp_path / "elsewhere"))
+    monkeypatch.setenv("PYTHONPATH", os.environ.get("PYTHONPATH", ""))      # Python's own path config must pass
     seen = {}
     real_run = promote.subprocess.run
 
@@ -163,3 +164,6 @@ def test_the_gate_passes_only_the_whitelisted_environment_and_the_trusted_script
     assert "SOPS_AGE_KEY" not in seen["env"] and "KONTROLL_WRITE_ROOT" not in seen["env"], \
         "the child inherits only the whitelisted environment"
     assert set(seen["env"]) <= set(promote._GATE_ENV) | {"PYTHONIOENCODING"}
+    assert "PYTHONPATH" in seen["env"], \
+        "Python's own path configuration must pass through — a runner that locates its packages via PYTHONPATH " \
+        "otherwise cannot import yaml in the child (the first private sync found exactly that)"
