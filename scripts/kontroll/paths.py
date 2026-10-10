@@ -172,6 +172,16 @@ _LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
 _HOSTNAME_RE = re.compile(r"^%s(?:\.%s)*\.?$" % (_LABEL, _LABEL))
 
 
+class RequestBoundaryError(ValueError):
+    """A request field failed its closed-charset check. A ValueError (every existing handler maps it to 422/400
+    before any write) that also names the FIELD, so an audit line can say which field was refused without quoting
+    the value — a refused `key` of `../../etc` must not be copied into the audit log either."""
+
+    def __init__(self, field, message):
+        super().__init__(message)
+        self.field = field
+
+
 def _short(value):
     r = repr(value)
     return r if len(r) <= 40 else r[:37] + "..."
@@ -181,8 +191,8 @@ def component(value, what="name"):
     """ONE path component from a request field — a device-class key, a unit key, a secret domain, an inventory
     group: lowercase letters, digits, `_` and `-`; 1–64 chars; starting with a letter or digit. Returns the value."""
     if not isinstance(value, str) or not _COMPONENT_RE.match(value):
-        raise ValueError("%s %s is not a valid name: 1-64 chars of [a-z0-9_-], starting with a letter or digit"
-                         % (what, _short(value)))
+        raise RequestBoundaryError(what, "%s %s is not a valid name: 1-64 chars of [a-z0-9_-], starting with a "
+                                   "letter or digit" % (what, _short(value)))
     return value
 
 
@@ -190,7 +200,8 @@ def collection_fqcn(value, what="collection"):
     """An Ansible collection name, exactly `namespace.name` in Galaxy's charset (lowercase, digits, `_`) — the form
     every `ansible_collections/<ns>/<name>` join and every `ansible-doc` / `ansible-galaxy` argv word expects."""
     if not isinstance(value, str) or not _FQCN_RE.match(value):
-        raise ValueError("%s %s is not a collection name (expected namespace.name, lowercase)" % (what, _short(value)))
+        raise RequestBoundaryError(what, "%s %s is not a collection name (expected namespace.name, lowercase)"
+                                   % (what, _short(value)))
     return value
 
 
@@ -206,7 +217,7 @@ def hostname(value, what="host"):
             pass
         if len(value) <= 253 and _HOSTNAME_RE.match(value):
             return value
-    raise ValueError("%s %s is not an address or RFC-1123 hostname" % (what, _short(value)))
+    raise RequestBoundaryError(what, "%s %s is not an address or RFC-1123 hostname" % (what, _short(value)))
 
 
 def confined(rel_path):
@@ -214,11 +225,11 @@ def confined(rel_path):
     absolute path, a `..` that climbs out, a NUL, or a symlink that points out. The last check before every drop-in
     write (gitio._write_new / write_inventory_host, the actuation descriptor + values writers)."""
     if not isinstance(rel_path, str) or not rel_path or os.path.isabs(rel_path) or "\x00" in rel_path:
-        raise ValueError("refusing to write outside the repository: %s" % _short(rel_path))
+        raise RequestBoundaryError("path", "refusing to write outside the repository: %s" % _short(rel_path))
     root = os.path.realpath(write_root())
     full = os.path.realpath(os.path.join(root, rel_path))
     if full != root and not full.startswith(root + os.sep):
-        raise ValueError("refusing to write outside the repository: %s" % _short(rel_path))
+        raise RequestBoundaryError("path", "refusing to write outside the repository: %s" % _short(rel_path))
     return full
 
 

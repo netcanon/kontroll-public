@@ -82,10 +82,14 @@ def onboard(body: OnboardIn, request: Request,
                                   host_name=body.host_name, secrets=body.secrets, backend=body.backend,
                                   creds=creds, backends=cat.backends, deep=body.deep)
     except ValueError as e:
-        # A catchable planner guard fired BEFORE any write: MF-S2 domain-confinement, or a partially-filled required
-        # auth_set (both operator-input errors — the latter more reachable via F1 TIER-B's derived multi-field
-        # auth_sets, e.g. proxmox api_user+token_id+token_secret). A clean 422, never a 500 (mirrors WriteConflict
-        # → 409); no creds were written (the guards run pre-`creds_to_set`).
+        # A catchable planner guard fired BEFORE any write: the request boundary (C22 — a field that is not a closed
+        # charset), MF-S2 domain-confinement, or a partially-filled required auth_set (both operator-input errors —
+        # the latter more reachable via F1 TIER-B's derived multi-field auth_sets, e.g. proxmox
+        # api_user+token_id+token_secret). A clean 422, never a 500 (mirrors WriteConflict → 409); no creds were
+        # written (the guards run pre-`creds_to_set`). AUDITED by field NAME, never value: a refused `key` of
+        # `../../etc` must not be copied into the audit log, and a refusal that leaves no trace is a blind spot.
+        audit_action(request, principal, "onboard-refuse",
+                     "reason=request-boundary field=%s" % getattr(e, "field", "input"))
         raise HTTPException(status_code=422, detail=str(e))
     if plan["error"] == "not_installed":
         raise HTTPException(status_code=404, detail="install the collection first: %s" % body.collection)

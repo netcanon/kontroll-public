@@ -11,6 +11,16 @@ NetConfig project.
 
 ## [Unreleased]
 
+### fix(api,gui): a request the boundary refuses leaves an audit line, by field name (2026-10-10)
+
+#24's closed-charset validators refused before any write but through the generic `ValueError` path, which neither
+the API route nor the GUI audited — a refused onboard left no trace, the blind spot the tine's own refusal test
+caught at the catch-up merge. The validators now raise `paths.RequestBoundaryError` (still a ValueError, so the
+422/400 mapping is unchanged) carrying the FIELD, and both routes write `onboard-refuse reason=request-boundary
+field=<name>` — the name, never the value: a refused `key` of `../../etc` must not be copied into the audit log
+either. Pinned on the API (the audit line exists and does not contain the value) and in
+`tests/unit/test_request_boundary.py`.
+
 ### fix(promote): the gate's whitelisted environment lets Python's own path configuration through (2026-10-10)
 
 #23 ran the FIX-M9 generator under a whitelisted environment; it dropped `PYTHONPATH`/`PYTHONUSERBASE`/`VIRTUAL_ENV`
