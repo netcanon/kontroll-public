@@ -11,6 +11,14 @@ NetConfig project.
 
 ## [Unreleased]
 
+### fix(gui): a boundary refusal answers with a per-field `code` the browser can act on (2026-10-10)
+
+The GUI relay's 422 for a request the C22 boundary refuses carried only the message; the browser renders
+next-steps copy per refusal `code` (the permissive edition keys its install-offer copy on `invalid_collection`),
+so a malformed collection name lost its guidance after #24. The code is now derived from the refused FIELD —
+`collection` → `invalid_collection`, the device-class key → `invalid_device_class_key` — never from the value.
+Pinned in `tests/integration/test_gui_api.py`.
+
 ### fix(api,gui): a request the boundary refuses leaves an audit line, by field name (2026-10-10)
 
 #24's closed-charset validators refused before any write but through the generic `ValueError` path, which neither
