@@ -27,8 +27,14 @@ from kontroll import gitio
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # The ONLY environment the gate's generator subprocess inherits. A promote runs as root on the `sudo` CLI and with
-# SOPS_AGE_KEY in scope on the Semaphore path; the generator needs neither, so it gets neither (finding 3).
-_GATE_ENV = ("PATH", "SYSTEMROOT", "TEMP", "TMP", "HOME", "LANG", "LC_ALL", "PYTHONUTF8", "PYTHONIOENCODING")
+# SOPS_AGE_KEY in scope on the Semaphore path; the generator needs neither, so it gets neither (finding 3). Python's
+# OWN path configuration passes through: a runner (or a venv-less box) may locate the interpreter's packages via
+# PYTHONPATH / PYTHONUSERBASE / VIRTUAL_ENV, and a relocated interpreter via LD_LIBRARY_PATH (actions/setup-python on
+# a self-hosted runner); without them the child cannot even `import yaml` — the first private sync found exactly
+# that. Paths, not secrets; the whitelist stays closed to everything else.
+_GATE_ENV = ("PATH", "SYSTEMROOT", "TEMP", "TMP", "HOME", "LANG", "LC_ALL", "PYTHONUTF8", "PYTHONIOENCODING",
+             "PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "VIRTUAL_ENV", "PYTHONNOUSERSITE",
+             "LD_LIBRARY_PATH", "pythonLocation")
 
 
 def _would_brick_generate(run_id, repo):

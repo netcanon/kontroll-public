@@ -11,6 +11,14 @@ NetConfig project.
 
 ## [Unreleased]
 
+### fix(promote): the gate's whitelisted environment lets Python's own path configuration through (2026-10-10)
+
+#23 ran the FIX-M9 generator under a whitelisted environment; it dropped `PYTHONPATH`/`PYTHONUSERBASE`/`VIRTUAL_ENV`
+too, so on a runner (or a venv-less box) that locates the interpreter's packages that way the child could not
+`import yaml` and the gate reported every proposal as a conflict. The self-hosted CI found it on the first private
+sync. The five Python path variables now pass through — paths, not secrets; `SOPS_AGE_KEY` and `KONTROLL_*` are
+still withheld, and the test asserts both halves.
+
 ### chore(docker): `images.lock.yml` pinned to the v0.1.2 images (2026-10-10)
 
 `v0.1.2` is the public line's first release tag: the un-stranded fixes (#14–#17), the Phase 2 safety set
