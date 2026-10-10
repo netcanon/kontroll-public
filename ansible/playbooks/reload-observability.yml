@@ -18,11 +18,16 @@
   connection: local
   gather_facts: false
   vars:
-    prometheus_url: "{{ prometheus_url | default('http://prometheus:9090') }}"
+    # NOT `prometheus_url: "{{ prometheus_url | default(...) }}"`: a play var whose value names itself is a
+    # recursive template. ansible-core < 2.19 happened to resolve it (the extra-var or the undefined won the lookup);
+    # 2.19's templating engine detects the loop and the only human reload verb fails before its first task
+    # (2026-10-08 review, finding 11). The operator override stays `-e prometheus_url=…`; the play reads it through
+    # its own private name. tests/unit/test_playbook_vars_hygiene.py sweeps every playbook for the shape.
+    _reload_prometheus_url: "{{ prometheus_url | default('http://prometheus:9090') }}"
   tasks:
     - name: POST the Prometheus lifecycle reload endpoint
       ansible.builtin.uri:
-        url: "{{ prometheus_url }}/-/reload"
+        url: "{{ _reload_prometheus_url }}/-/reload"
         method: POST
         status_code: [200]
       register: _reload
@@ -30,4 +35,4 @@
 
     - name: Reload result
       ansible.builtin.debug:
-        msg: "Prometheus config reloaded ({{ prometheus_url }}/-/reload -> {{ _reload.status }})."
+        msg: "Prometheus config reloaded ({{ _reload_prometheus_url }}/-/reload -> {{ _reload.status }})."
