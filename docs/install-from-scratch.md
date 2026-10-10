@@ -18,6 +18,10 @@
 > scripts/kontroll-installer.sh fresh-init --mgmt-ip <ip> --domain <domain> --trust-mode separated   # scaffold instance/ + mint control key (§1–§2)
 > $EDITOR instance/fleet.yml instance/inventory/hosts.yml instance/instance.yml
 > scripts/kontroll-installer.sh check          # deploy-stack --check --diff (the mandated dry-run)
+> #   On a node where nothing has ever been applied this is a PARTIAL preview and says so: --check does not
+> #   create the canonical or the TLS certs, so the steps that clone from them or take ownership of them are
+> #   skipped. Everything else is previewed, and it still fails on REAL preconditions you have not met yet
+> #   (e.g. the onboard-gui age key) — which is the point of running it before the apply.
 > scripts/kontroll-installer.sh                # bootstrap → deploy-stack: local canonical + the stack (§3–§5)
 > scripts/kontroll-installer.sh configure-semaphore                      # wire Semaphore (§6)
 > # then the guided GUI Keys/Secrets onboarding (§2 [B], §8) at https://<ip>:8443

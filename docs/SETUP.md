@@ -169,11 +169,22 @@ The stack binds every privileged port to your `mgmt_ip` only (never 0.0.0.0). On
 | API | `https://${KONTROLL_MGMT_IP}:8444` (read-only until armed — see privileged-mutation-enablement.md) |
 
 > **onboard-gui prerequisite:** deploy-stack provisions the GUI's repo clone and TLS
-> *directory* but does NOT mint its TLS cert or scoped age key (security boundary). Before
-> `onboard-gui` will start, host-provision a self-signed cert at
-> `${KONTROLL_STORAGE_ROOT}/onboard-gui/tls/{gui.crt,gui.key}` and the scoped age key at
-> `${KONTROLL_STORAGE_ROOT}/onboard-gui/age.key` (see docs/frontend-exposure.md). deploy-stack now **fails
-> closed** if that age key is absent rather than letting `up` auto-create a `root:root` directory in its place.
+> *directory* but does NOT mint its TLS cert or scoped age key (security boundary — a service that can create its
+> own decryption key is not a trust boundary). Before `onboard-gui` will start, host-provision a self-signed cert
+> at `${KONTROLL_STORAGE_ROOT}/onboard-gui/tls/{gui.crt,gui.key}` and the scoped age key at
+> `${KONTROLL_STORAGE_ROOT}/onboard-gui/age.key` (see docs/frontend-exposure.md). deploy-stack **fails
+> closed** if that age key is absent rather than letting `up` auto-create a `root:root` directory in its place —
+> and equally if it is present but the runtime uid cannot read it, which otherwise surfaces one deploy later as an
+> opaque SOPS decrypt error. The simplest correct answer is a copy of the control key:
+>
+> ```bash
+> sudo install -m 0600 -o 1001 -g 1001 ~/.config/sops/age/keys.txt /var/lib/kontroll/onboard-gui/age.key
+> ```
+>
+> That is the accepted C10 residual — the GUI then decrypts the same domains the control node does. To give it a
+> narrower identity instead, `age-keygen` a fresh key, add its **public** half to `instance/.sops.yaml`, re-wrap
+> with `sops --config instance/.sops.yaml updatekeys instance/secrets/*.sops.yml`, and install the private half at
+> the path above. The refusal prints this command, so you do not need to come back here for it.
 >
 > **Backup viewer (C14):** onboard-gui also bind-mounts the config-capture store (`${KONTROLL_BACKUPS_DIR}`)
 > **read-only** at `/backups` so the GUI's **Backups** panel can index/view/diff captured device configs. This is

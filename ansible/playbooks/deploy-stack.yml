@@ -273,6 +273,43 @@
         quiet: true
       when: ('api' in stack_services) or ('onboard-gui' in stack_services)
 
+    - name: Detect a BRAND-NEW node being previewed (--check before anything has ever been applied)
+      # HEAD, not the directory: `/srv/kontroll.git` may exist as an empty dir (a bind mount creates it) while
+      # being no repository at all. HEAD is present in every bare repo local-canonical produces.
+      ansible.builtin.stat:
+        path: /srv/kontroll.git/HEAD
+      register: _canonical_head
+      check_mode: false            # a read, and it must answer truthfully IN check mode — that is the point
+
+    - name: Decide whether this dry-run can see past the artifacts it would create
+      # THE FRESH-NODE DRY-RUN PROBLEM. `--check` skips the tasks that CREATE things, then the tasks that clone
+      # from or chown those things fail "does not appear to be a git repository" / "is absent, cannot continue".
+      # On a brand-new node that made the mandated dry-run impossible to pass — and `install-prereqs` prints
+      # `check` as step 3, before the first apply. Live-caught 2026-07-28 standing a floating-prod box up.
+      #
+      # That matters more than the inconvenience: CLAUDE.md mandates --check --diff before any state-changing
+      # apply, and an operator who learns the dry-run always fails the first time is an operator who will skip it
+      # when it counts. A safety step that cries wolf on day one does not get run on day one hundred.
+      #
+      # The flag is deliberately NARROW — check mode AND no canonical yet. On an already-provisioned box it is
+      # false, so the dry-run keeps FULL fidelity exactly where fidelity is worth something: previewing a change
+      # to a system that already holds state. The only thing given up is previewing artifact-dependent steps on
+      # a node where those artifacts provably do not exist, which no dry-run could have shown anyway.
+      ansible.builtin.set_fact:
+        _fresh_preview: "{{ ansible_check_mode and not _canonical_head.stat.exists }}"
+
+    - name: Say plainly that this is a partial preview (never let it look like a full one)
+      # Without this the operator sees a pile of green "skipping" lines and reasonably concludes the deploy was
+      # fully previewed. A dry-run that silently covers less than it appears to is worse than one that fails.
+      ansible.builtin.debug:
+        msg: >-
+          PARTIAL PREVIEW — this node has no canonical at /srv/kontroll.git yet, so nothing has ever been applied
+          here. Steps that clone from the canonical or take ownership of a TLS cert are SKIPPED below: --check
+          does not create the canonical or the certs, so those steps have nothing to act on and cannot be
+          previewed. Everything else IS previewed. Run the apply (`kontroll-installer.sh init`) to create them;
+          from then on `check` previews the whole play.
+      when: _fresh_preview | bool
+
     - name: Derive the per-store dirs from the validated root (today-exact defaults — behaviour-preserving)
       # The HIGH-growth / audit stores carry their own operator override (a separate data disk); api/onboard-gui/
       # caddy are LOW-growth config and derive <root>/<cat> with no operator knob (they follow the root). Each
@@ -507,6 +544,33 @@
         logging_collector_host: "{{ _mgmt_ip }}"   # noqa: var-naming[no-role-prefix]  bind :19532 to mgmt IP only (C3)
       when: "'vector' in stack_services and (_journald_remote_decls.matched | default(0)) > 0"
 
+    - name: Decide whether SNMP credentials exist at all (drives BOTH the render and the up-list)
+      # snmp_exporter 0.30.1 REFUSES to start on a config with no `auths:` — "Configuration is missing Auths."
+      # (live-caught 2026-07-28: it crash-looped on a fresh box). So a credential-less snmp-exporter cannot be
+      # made to run, only rendered; the deploy has to decide whether to bring it up at all. One fact, so the
+      # render and the up-list can never disagree again — them disagreeing is precisely the bug that put a
+      # root-owned DIRECTORY where the file-bind source belonged.
+      vars:
+        _snmp_probe: >-
+          {{ (lookup('community.sops.sops', _secrets_dir ~ '/snmp_observability.sops.yml', errors='ignore')
+          | from_yaml) or {} }}
+      ansible.builtin.set_fact:
+        _has_snmp_creds: "{{ (_snmp_probe | length) > 0 }}"
+      no_log: true
+
+    - name: Say so when snmp-exporter is requested but has no credentials yet (never a silent drop)
+      # Requested-but-undeployable is an operator-visible decision, not a detail to swallow: the fleet has no
+      # SNMP targets until a device is onboarded anyway, so this is the expected fresh-node state rather than an
+      # error — but leaving the operator to notice a missing container on their own is how "why is there no SNMP
+      # data" becomes a debugging session weeks later.
+      ansible.builtin.debug:
+        msg: >-
+          snmp-exporter is in stack_services but instance/secrets/snmp_observability.sops.yml has no credentials,
+          and snmp_exporter refuses to start without an auths: block — so it is NOT being brought up. Add the
+          SNMPv3 credentials (the GUI "Secrets" dialog, domain snmp_observability) and re-run this deploy. Its
+          config file is still rendered, so nothing else changes when you do.
+      when: "'snmp-exporter' in stack_services and not (_has_snmp_creds | bool)"
+
     - name: Render the snmp_exporter config from the template + the SNMPv3 creds (no_log; gitignored, 0600)
       # prometheus/exporters/snmp/snmp.yml — the snmp_exporter v3 USM creds + module defs, rendered from
       # snmp.yml.j2 + the snmp_observability SOPS domain. The rendered file holds the creds, so it is 0600 +
@@ -526,9 +590,16 @@
         mode: "0600"
       become: false
       no_log: true
-      # _snmp ABSENT on a fresh node until the operator onboards SNMP -> skip the render (the template dereferences
-      # the creds; the snmp_exporter has nothing to scrape anyway). It renders once the domain exists.
-      when: "'prometheus' in stack_services and (_snmp | length > 0)"
+      # ALWAYS rendered when the exporter is deployed — the template omits the auths: block when _snmp is absent.
+      # This used to be gated `and (_snmp | length > 0)`, which skipped the render on a fresh node (correct
+      # reasoning — nothing to scrape yet) but left snmp-exporter in the up-list binding a file that did not
+      # exist. `compose up` then auto-created the bind source as a root:root DIRECTORY and the container died
+      # with "not a directory: Are you trying to mount a directory onto a file" (live-caught 2026-07-28, a fresh
+      # box). The G9 rule is that a file-bind source must EXIST before `up`, whether or not it has content —
+      # exactly as the empty device-CA bundle and the empty file_tail_ssh known_hosts already do below.
+      # Gated on the exporter OR prometheus: the exporter is the one that binds the file, but the two have always
+      # been deployed together and the old prometheus-only condition would still miss an exporter-only stack.
+      when: "'snmp-exporter' in stack_services or 'prometheus' in stack_services"
 
     - name: Ensure the Vector host dir exists (holds the file_tail_ssh key + the device CA bundle; Vector-uid owned)
       # Vector runs NON-ROOT (uid 10002, C12), and SSH refuses a private key not owned by the running uid — so the
@@ -809,6 +880,9 @@
         - name: Clone/update the local canonical into the API's content tree
           # Root-owned + world-readable by default ⇒ uid-1001 reads but cannot write (the read-only lock). The
           # gated privileged block below chowns it to uid-1001 + adds a `local` remote so the API can PROPOSE.
+          # Skipped on a fresh-node preview: the `git` module reaches the remote even in check mode, so with no
+          # canonical yet it fails outright rather than reporting what it would do (see _fresh_preview).
+          when: not (_fresh_preview | bool)
           ansible.builtin.git:
             repo: file:///srv/kontroll.git
             dest: "{{ kontroll_api_dir }}/repo"
@@ -816,7 +890,7 @@
             update: true
 
         - name: Make the API content clone WRITABLE by uid-1001 + give it a 'local' remote (C10 — privileged)
-          when: api_privileged | bool
+          when: api_privileged | bool and not (_fresh_preview | bool)
           block:
             - name: Own the API content clone as the runtime uid so the container can commit (C10)
               # In read-only mode this is SKIPPED, so the clone stays root-owned and uid-1001 cannot write it —
@@ -851,7 +925,9 @@
             creates: "{{ kontroll_api_dir }}/tls/api.crt"
 
         - name: Own the TLS material as the runtime uid (self_signed mode; the container reads the key)
-          when: _needs_cert.stdout == "yes"
+          # `openssl req` above is check-skipped, so on a fresh-node preview the cert does not exist and `file:`
+          # fails "is absent, cannot continue" — nothing to own, nothing to preview (see _fresh_preview).
+          when: _needs_cert.stdout == "yes" and not (_fresh_preview | bool)
           ansible.builtin.file:
             path: "{{ item.path }}"
             owner: "1001"
@@ -880,7 +956,7 @@
             - {path: "{{ kontroll_gui_dir }}", mode: "0755"}
             - {path: "{{ kontroll_gui_dir }}/tls", mode: "0750"}
 
-        - name: Fail closed if the onboard-gui age key is absent (host/GUI-provisioned; never auto-create — G9)
+        - name: Stat the onboard-gui age key (host/GUI-provisioned; deploy NEVER mints it — G9)
           # The age PRIVATE KEY stays host/GUI-provisioned (deploy-stack NEVER mints it — security boundary). But
           # if the key file is missing at `up`, `docker compose` would auto-create the :ro file-bind source as a
           # root:root 0755 DIRECTORY (breaks the mount + the SOPS load). Refuse to proceed instead — the
@@ -889,7 +965,34 @@
           ansible.builtin.stat:
             path: "{{ kontroll_gui_dir }}/age.key"
           register: _gui_age_key
-          failed_when: not _gui_age_key.stat.exists
+          when: "'onboard-gui' in stack_services"
+
+        - name: Refuse with the actual remedy if it is missing or the runtime uid cannot read it (G9)
+          # Refusing to MINT the key is the boundary and stays. Refusing to SAY WHAT TO DO is just friction — and
+          # friction in the spin-up path is what stops an instance being rebuilt. On a fresh box (live-caught
+          # 2026-07-28) this fired as a bare `failed_when` with a stat dict and no message, leaving the operator to
+          # work out both what was missing and what belonged there.
+          #
+          # The readability leg exists because "present" was never the real precondition: the GUI runs as uid 1001
+          # and mounts this :ro, so a root-owned 0600 key passes an exists-check and then fails at RUNTIME as an
+          # opaque SOPS decrypt error. Accepts other-read too, so a box already working that way is not newly
+          # broken by this check.
+          ansible.builtin.assert:
+            that:
+              - _gui_age_key.stat.exists
+              - _gui_age_key.stat.uid | int == 1001 or _gui_age_key.stat.roth
+            fail_msg: >-
+              onboard-gui's age key at {{ kontroll_gui_dir }}/age.key is
+              {{ 'MISSING' if not _gui_age_key.stat.exists else 'not readable by the runtime uid 1001' }}.
+              deploy-stack never creates it: a service that can mint its own decryption key is not a trust
+              boundary. Provision it on the HOST, then re-run this deploy —
+              `sudo install -m 0600 -o 1001 -g 1001 ~/.config/sops/age/keys.txt {{ kontroll_gui_dir }}/age.key`
+              installs a copy of the CONTROL key, which is the accepted C10 residual (the GUI then decrypts the
+              same domains the control node does). To give the GUI a narrower identity instead, `age-keygen` a
+              fresh key, add its PUBLIC half to instance/.sops.yaml, re-wrap with
+              `sops --config instance/.sops.yaml updatekeys instance/secrets/*.sops.yml`, and install the private
+              half at the path above. See docs/SETUP.md "6. Deploy the stack and open the GUI".
+            quiet: true
           when: "'onboard-gui' in stack_services"
 
         - name: Generate a self-signed TLS cert for onboard-gui (self_signed mode only; if absent)
@@ -906,7 +1009,8 @@
             creates: "{{ kontroll_gui_dir }}/tls/gui.crt"
 
         - name: Own the onboard-gui TLS material as the runtime uid (self_signed mode; the container reads the key)
-          when: _needs_cert.stdout == "yes"
+          # Same as the API's: the cert generator is check-skipped, so a fresh-node preview has nothing to own.
+          when: _needs_cert.stdout == "yes" and not (_fresh_preview | bool)
           ansible.builtin.file:
             path: "{{ item.path }}"
             owner: "1001"
@@ -928,6 +1032,8 @@
         - name: Clone/update the local canonical into the onboard-gui content tree
           # Root-owned + world-readable by default ⇒ uid-1001 reads but cannot write (the read-only lock). The
           # gated privileged block below chowns it to uid-1001 + adds a `local` remote so the GUI can PROPOSE.
+          # Fresh-node preview: skipped for the same reason as the API's clone (see _fresh_preview).
+          when: not (_fresh_preview | bool)
           ansible.builtin.git:
             repo: file:///srv/kontroll.git
             dest: "{{ kontroll_gui_dir }}/repo"
@@ -935,7 +1041,7 @@
             update: true
 
         - name: Make the onboard-gui content clone WRITABLE by uid-1001 + give it a 'local' remote (C10 — privileged)
-          when: api_privileged | bool
+          when: api_privileged | bool and not (_fresh_preview | bool)
           block:
             - name: Own the onboard-gui content clone as the runtime uid so the container can commit (C10)
               # In read-only mode this is SKIPPED, so the clone stays root-owned and uid-1001 cannot write it —
@@ -987,8 +1093,23 @@
             content: "{{ _caddyfile.stdout }}\n"
 
     - name: Compute the services to bring up (acme mode appends the caddy ingress)
+      # snmp-exporter is dropped when it has no credentials — it cannot start without an auths: block, so bringing
+      # it up would only crash-loop. This is a task VAR, not a second set_fact key: sibling set_fact keys are all
+      # templated against the PRE-task context, so `_up_services` referencing another key in the same set_fact
+      # fails with "'_requested_services' is undefined" (live-caught 2026-07-28 — it passed --syntax-check and
+      # ansible-lint, both of which parse rather than evaluate). Task vars ARE in scope for module args.
+      #
+      # Kept as its own name rather than inlined because the grouping is load-bearing: written
+      # `(A if cond else B) + caddy`, the `+` binds to the ELSE branch alone and a creds-less box silently loses caddy.
+      vars:
+        _requested_services: >-
+          {{ (stack_services | reject('equalto', 'snmp-exporter') | list)
+             if not (_has_snmp_creds | default(false) | bool) else stack_services }}
       ansible.builtin.set_fact:
-        _up_services: "{{ (stack_services + ['caddy']) | unique if _runs_caddy.stdout == 'yes' else stack_services }}"
+        _up_services: >-
+          {{ (_requested_services
+              + (['caddy'] if _runs_caddy.stdout == 'yes' else []))
+             | unique | list }}
 
     # docker compose CLI directly, NOT community.docker.docker_compose_v2: that module's post-up
     # `docker compose images --format json` state query returns empty on this host's docker compose

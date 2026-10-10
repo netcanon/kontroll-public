@@ -55,16 +55,19 @@ def test_guard_flags_an_unprovisioned_synthetic_store(tmp_path):
 
 
 def test_removing_the_age_key_failclosed_guard_reflags_it(tmp_path):
-    """M-1 LOCK: the age.key bind is covered ONLY by its own fail-closed `stat`/`failed_when` task (the file is
+    """M-1 LOCK: the age.key bind is covered ONLY by its own fail-closed absence guard (the file is
     host-provisioned, never minted). Removing that guard must re-flag the age.key bind — proving the guard does
-    an EXACT own-path match, not a permissive grandparent walk (a chowned parent dir would wrongly pass it)."""
+    an EXACT own-path match, not a permissive grandparent walk (a chowned parent dir would wrongly pass it).
+
+    Since 2026-07-28 the guard is a `stat` + a separate `assert` (a `failed_when` cannot carry a message, and the
+    refusal now prints the exact command to run). So neutralising it means dropping the existence CONDITION, not
+    a `failed_when` key — the stat itself survives, which is also the sharper test: a stat that merely looks at
+    the path, with nothing fail-closed reading the result, must NOT count as a provisioner."""
     g = _guard()
     with open(_DEPLOY, encoding="utf-8") as fh:
         deploy_text = fh.read()
     assert g.offending() == []                                  # green with the guard present
-    # neutralise the fail-closed guard (drop the failed_when key, keeping valid YAML) — the age.key bind then has
-    # no provisioner and must be re-flagged.
-    stripped = deploy_text.replace("failed_when: not _gui_age_key.stat.exists", "changed_when: false")
+    stripped = deploy_text.replace("              - _gui_age_key.stat.exists\n", "              - true\n")
     assert stripped != deploy_text                              # the guard line existed (it is really there)
     bad = g.offending(deploy_text=stripped)
     assert any(np.endswith("/onboard-gui/age.key") for _rel, _n, np, _raw in bad), \

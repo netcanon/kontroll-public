@@ -13,9 +13,16 @@ provisioners, parsed from deploy-stack.yml via a yaml.safe_load task-graph walk:
   * a file/copy/template task that sets owner+group  -> the dir/file it creates (loop items expanded);
   * a git task                                       -> its cloned repo tree (its CONTENTS are app-managed, so a
                                                         bind at-or-under the repo, e.g. repo/local, is covered);
-  * a stat task with failed_when                     -> a fail-closed file-absence guard (the age.key case — the
-                                                        file is host-provisioned, never minted; this refuses to
-                                                        `up` without it rather than let Docker auto-create it).
+  * a fail-closed file-absence guard                 -> the age.key case: the file is host-provisioned, never
+                                                        minted, so the deploy refuses to `up` without it rather
+                                                        than let Docker auto-create it. EITHER shape counts — a
+                                                        stat task carrying its own `failed_when`, or a stat that
+                                                        `register`s and a later `assert` requiring
+                                                        `<register>.stat.exists`. The split shape exists because
+                                                        `failed_when` cannot carry a message, and a refusal that
+                                                        does not say what to provision is pure spin-up friction
+                                                        (2026-07-28); recognising both keeps the choice between
+                                                        them a readability decision, not a CI-passing one.
 Excluded: relative repo-tree binds (../), host-OS absolutes (/var/run,/var/log,/run/,/etc/), the canonical git
 (/srv/kontroll.git — provisioned by local-canonical.yml), the operator run-logs (${KONTROLL_OPERATOR_HOME}), named
 volumes (Docker-managed; no '/' in the source), and the compose-native installer's bare storage-ROOT bind (it is
@@ -139,6 +146,7 @@ def deploy_provisioners(deploy_text):
                     if key in play:
                         _walk_tasks(play[key], tasks)
     exact_owned, git_dests, stat_guarded = set(), set(), set()
+    _stat_registers = {}
     for t in tasks:
         if not isinstance(t, dict):
             continue
@@ -158,8 +166,30 @@ def deploy_provisioners(deploy_text):
         if isinstance(git, dict) and git.get("dest"):
             git_dests.add(_norm(_resolve_facts(str(git["dest"]))))
         stat = t.get("ansible.builtin.stat") or t.get("stat")
-        if isinstance(stat, dict) and stat.get("path") and t.get("failed_when"):
-            stat_guarded.add(_norm(_resolve_facts(str(stat["path"]))))
+        if isinstance(stat, dict) and stat.get("path"):
+            resolved = _norm(_resolve_facts(str(stat["path"])))
+            if t.get("failed_when"):
+                stat_guarded.add(resolved)               # self-contained guard
+            elif t.get("register"):
+                _stat_registers[str(t["register"])] = resolved   # …or half of a stat+assert pair
+
+    # Second pass: a stat that only REGISTERS is fail-closed iff some assert requires its `.stat.exists`. Two
+    # passes because the assert follows the stat (and nothing guarantees it must).
+    for t in tasks:
+        if not isinstance(t, dict):
+            continue
+        block = t.get("ansible.builtin.assert") or t.get("assert")
+        if not isinstance(block, dict):
+            continue
+        that = block.get("that")
+        conds = [that] if isinstance(that, str) else [str(c) for c in (that or [])]
+        for register, resolved in _stat_registers.items():
+            # Directional on purpose: `not X.stat.exists` asserts the file is ABSENT — a refuse-if-present check,
+            # the opposite of a provisioner. Counting it would mark the bind covered by a guard that requires the
+            # source not to exist.
+            needle = re.compile(r"(?<!not )\b%s\.stat\.exists\b" % re.escape(register))
+            if any(needle.search(c) for c in conds):
+                stat_guarded.add(resolved)
     return exact_owned, git_dests, stat_guarded
 
 
