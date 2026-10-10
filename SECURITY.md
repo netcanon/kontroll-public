@@ -562,7 +562,10 @@ its own adversary pass); until then `solo` behaves like `separated`.
   proposal is independent off `main` — a rejected proposal can't ride along in a later one (F1, dogfood
   2026-06-20; `tests/unit/test_staging_isolation.py`). **The promote now also runs a pin-conflict gate (FIX-M9):**
   before the fast-forward, `kontroll-promote.py` extracts the prospective post-merge tree (`proposed/<run_id>`) and
-  runs its OWN `gen-requirements.py --conflict-check` — if two app-store units would pin one collection to
+  runs the TRUSTED tree's `gen-requirements.py --conflict-check --root <extract>` over that tree's DATA — never the
+  proposal's own copy of the script, which until 2026-10-09 executed unreviewed code as root on the `sudo` CLI or
+  with `SOPS_AGE_KEY` in scope on the Semaphore path (2026-10-08 review, finding 3); the subprocess inherits a
+  whitelisted minimal environment (`tests/unit/test_kontroll_promote.py`). If two app-store units would pin one collection to
   conflicting `==` versions (which would make the NEXT deploy's `gen-requirements` fail closed, halting the image
   build far from the cause), it **refuses the promote** (exit 2; `--skip-conflict-check` is the documented override).
   Read-only (extracts to a temp dir, never touches `main`); fails **open** on its own read error (the generate-time

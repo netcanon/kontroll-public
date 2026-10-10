@@ -11,6 +11,16 @@ NetConfig project.
 
 ## [Unreleased]
 
+### fix(promote): the pin-conflict gate runs trusted code over the proposal's data, never the proposal's code (2026-10-09)
+
+FIX-M9 extracted `proposed/<run_id>` and executed ITS `scripts/gen-requirements.py` — unreviewed code from the very
+ref being judged, as root on the `sudo` CLI and with `SOPS_AGE_KEY` in scope on the Semaphore path, with the
+caller's whole environment minus one variable (the 2026-10-08 review, finding 3). The gate now runs THIS tree's
+generator with a new `--root <extract>` data-root option (modules/, fleet and actuation read from the extract; the
+code stays the caller's) from the trusted root, under a whitelisted minimal environment. The test plants a
+proposal whose own generator is a canary that reports "no conflict" while its data conflicts: the gate refuses
+and the canary never runs (`tests/unit/test_kontroll_promote.py`).
+
 ### fix(ansible): the canonical's hooks are root-owned and outside the gid-1001 write-grant (2026-10-09)
 
 `local-canonical.yml` installed the C10 update hook and then `chown -R <operator>:1001` + `chmod -R g+w` the whole
@@ -64,6 +74,7 @@ a promote lost silently while both reported success. The promote now reads `main
 fast-forward against it and passes it to `update-ref` as the old value, so git refuses the loser ("is at X but
 expected Y") and says so. `tests/unit/test_promote_cas.py` races two real proposals in a real bare repository and
 proves the loser is refused and the winner kept.
+
 
 ### fix(deploy): the mandated dry-run works on a brand-new node, and a credential-less SNMP exporter no longer kills the stack (2026-10-09)
 
