@@ -22,6 +22,13 @@ role: backend_api
 # Onboarded api hosts are reached by localhost-delegated `uri`, not SSH/httpapi —
 # so the host connection is local. The recipe (backend_api_recipe) + its token var
 # carry everything else.
+#
+# TOKEN VAR — how it ACTUALLY resolves (this comment used to claim the planner did it; it never did).
+# service/onboard.py builds `backend_params` with `network_os` only, so its `params.get("token_var")` is
+# always None and an onboarded api host gets the per-host convention `<host with - as _>_api_token`.
+# roles/backend_api therefore accepts EITHER name: the recipe's declared `token_var` first, then that
+# convention, refusing loudly and naming both if neither is in scope. Fixed 2026-07-28 after the mismatch
+# had silently reported a healthy FortiGate as UNREACHABLE for the whole life of the class.
 connection:
   ansible_connection: local
 # Self-describing credential SHAPE (F1 TIER-A): a REST/httpapi device authenticates with an API TOKEN (or basic

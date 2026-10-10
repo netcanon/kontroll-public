@@ -27,6 +27,20 @@
   hosts: localhost
   gather_facts: false
   tasks:
+    # config_backup_dir is referenced fifteen times below and defined in instance/inventory/group_vars/all.yml.
+    # instance.example/ shipped NO group_vars until 2026-07-28, so every box built by `kontroll-init --fresh`
+    # had it UNDEFINED and this play died on an undefined-variable error that named a template, not a remedy.
+    # New boxes now scaffold the default; boxes built BEFORE that fix still need this message. Cheap, and it
+    # fails at the first task instead of part-way through a fleet capture.
+    - name: Refuse without a capture directory, naming the remedy
+      ansible.builtin.assert:
+        that: config_backup_dir is defined and (config_backup_dir | string | length > 0)
+        fail_msg: >-
+          config_backup_dir is not defined, so there is nowhere to write captures. Add it to
+          instance/inventory/group_vars/all.yml (a box scaffolded before 2026-07-28 has no such file — copy
+          instance.example/inventory/group_vars/all.yml), or pass -e config_backup_dir=/path for a one-off.
+        success_msg: "captures -> {{ config_backup_dir }}"
+
     - name: Ensure backup directory exists
       ansible.builtin.file:
         path: "{{ config_backup_dir }}"

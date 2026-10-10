@@ -41,10 +41,28 @@
     - _api_recipe.backup is defined
     - not (molecule_test | default(false) | bool)
   block:
-    - name: Resolve auth token
+    - name: Resolve the auth token — the recipe's token_var, else the onboarded per-host convention
+      # Same two-name resolution and the same `default=''` reason as tasks/check.yml — see the long comment
+      # there. Without the default, a missing var raises under `no_log` and the nightly backup schedule fails
+      # with a censored message at 02:30 with nobody watching.
       ansible.builtin.set_fact:
-        _api_token: "{{ lookup('vars', _api_recipe.auth.token_var) if _api_recipe.auth.token_var is defined else '' }}"
+        _api_token: >-
+          {{ lookup('vars', _api_recipe.auth.token_var, default='')
+             | default(lookup('vars', inventory_hostname | replace('-', '_') ~ '_api_token', default=''), true) }}
+      when: _api_recipe.auth.token_var is defined
       no_log: true
+
+    - name: Refuse an unresolvable API credential (var NAMES only — never the value)
+      # A capture that silently authenticates as nobody would write an error page into the config store and
+      # commit it as this device's backup. Fail before the request instead.
+      ansible.builtin.assert:
+        that: _api_token | default('') | length > 0
+        fail_msg: >-
+          {{ inventory_hostname }}: no API token is in scope, so this capture cannot authenticate.
+          The {{ backend_api_recipe }} recipe reads `{{ _api_recipe.auth.token_var }}`; the onboard writes
+          `{{ inventory_hostname | replace('-', '_') }}_api_token`. Neither is defined, or both are empty.
+        success_msg: "{{ inventory_hostname }}: API token resolved"
+      when: _api_recipe.auth.token_var is defined
 
     - name: Build request headers (bearer / apikey_header)
       ansible.builtin.set_fact:
