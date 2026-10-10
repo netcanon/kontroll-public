@@ -11,6 +11,20 @@ NetConfig project.
 
 ## [Unreleased]
 
+### fix(gui): the GUI renders foreign bytes as text, never markup (C19) (2026-10-09)
+
+Ported from the private instance's tine, where it has been live since July (2026-10-08 review, finding 8). The
+search panel painted a collection's Galaxy `description`, name, version and origin through `innerHTML`, so a
+published collection whose description is `<img src=x onerror=…>` ran script in the operator's authenticated
+session on search alone, with no click and no onboard. Every value kontroll did not author now reaches the DOM as
+`textContent` (the card's meta suffix is a child element, because the interpolation was the sink), and the same
+gate closed eleven more sinks of the class: the backup-viewer error and unavailable paths, the settings error
+line, the services description, the secret-domain and keygen-role pickers. A CSP (`object-src`, `base-uri`,
+`frame-ancestors`, `nosniff`) ships as the second layer; `script-src` is deliberately absent while `index.html`
+carries its one inline script. Proofs: `tests/unit/test_card_paint_gate.py` scans every `E()` call site for a
+foreign field and fails on planted sinks; the e2e serves a record whose description IS the payload and asserts
+zero elements are created. SECURITY.md C19.
+
 ### fix(docker,install): a fresh install comes up, and hands its files to the operator (2026-10-09)
 
 Three defects that were fixed on the private instance's permissive tine in July and never reached `main`
@@ -28,6 +42,7 @@ Three defects that were fixed on the private instance's permissive tine in July 
   advanced the canonical past the worktree, which is normal under propose-then-promote and unreadable on a
   control plane. It now fetches, checks ancestry and refuses with the exact `merge --ff-only` to run; never
   `--force`, because the canonical is where promotes land (`test_local_canonical.py`).
+
 
 ### chore(ci,tests): the permissive tine is gated on push, and Windows runs the one gate (2026-10-09)
 

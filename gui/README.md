@@ -276,6 +276,17 @@ Ansible against the lab. Treat it like the Semaphore runner. **Implemented:**
 - **Audit log** (`GUI_AUDIT_LOG`): every onboard action + auth-denial — timestamp, client
   IP, what (collection/key/host/flags) — **never** credentials.
 - Actuation is explicit: the UI dry-runs unless **apply** is ticked.
+- **Foreign bytes render as TEXT, never markup** (SECURITY.md C19). The page has two DOM helpers: `E()` assigns
+  `innerHTML` and is for kontroll's own literal markup; `ET()` assigns `textContent` and is for **every** value we
+  did not author — device bytes (captures, lease rows), Galaxy-published bytes (a collection's description, name
+  and version), and API error strings. This is not advisory: `tests/unit/test_card_paint_gate.py` scans every
+  `E()` call site and fails the build if one carries a foreign value. It exists because until 2026-07-27 the
+  search card painted a collection's Galaxy description through `innerHTML` — a published
+  `<img src=x onerror=…>` ran in the operator's session on **search alone**. Add a new externally-sourced field to
+  the page ⇒ add it to that gate's `FORBIDDEN` list in the same commit.
+- **CSP**: `object-src`/`base-uri`/`frame-ancestors` are set on every response, plus `nosniff`. `script-src` is
+  *not* set — the page carries a large inline `<script>`; moving it out is a prerequisite, and CSP is the second
+  layer regardless. The paint rule above is the actual control.
 - **Still: bind to the mgmt network only; never expose it publicly.**
 
 **Pre-beta remaining:** a real CA-signed cert (vs self-signed) and SSO (Authelia) if it's

@@ -50,6 +50,20 @@ from kontroll.service.search import service_search  # noqa: E402
 
 app = Flask(__name__)
 
+
+@app.after_request
+def _security_headers(resp):
+    """Defence-in-depth headers on every response. The REAL fix for third-party bytes on the page is painting them
+    with ET()/textContent (see index.html's card()) — this is the second layer, not the first. `script-src` is
+    deliberately ABSENT: index.html carries one large inline <script>, so a `script-src 'self'` would break the page,
+    and relocating that script is a separate change. Shipping the directives that DO hold rather than none of them."""
+    resp.headers.setdefault("Content-Security-Policy",
+                            "object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("Referrer-Policy", "same-origin")
+    return resp
+
+
 # The drop-in catalog (vectors/overrides/backends), loaded once + cached; the per-request I/O
 # (deep_probe / local_installed / galaxy_search) stays in the service layer.
 _CATALOG = None
