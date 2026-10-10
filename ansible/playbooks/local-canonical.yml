@@ -127,37 +127,64 @@
     # The top-dir grant (above) + setgid cover a FRESH canonical (objects inherit gid 1001); an EXISTING
     # canonical created before the grant has objects still on the operator's primary group / not group-writable /
     # owned by a different actor (e.g. uid-1001 staged a proposal), so the operator's push can't write near them.
-    # Recursively fix the existing objects — the one-time manual `chown -R <operator>:1001 + chmod -R g+w +
-    # find -type d setgid` step (F-CANON, #119), now an idempotent task. owner=<operator> is the F-CANON half:
+    # Fix the existing objects — the one-time manual `chown -R <operator>:1001 + chmod -R g+w + find -type d
+    # setgid` step (F-CANON, #119), now idempotent detect-then-fix tasks. owner=<operator> is the F-CANON half:
     # operator-owned objects let the operator's Mirror push succeed via OWNER perms even before the group
     # membership added above takes effect (next login). SECURITY.md C10 / docs/install-from-scratch.md §3.
-    - name: Recursively own (operator) + group (gid 1001) the existing canonical objects (C10 write-grant; F-CANON)
+    #
+    # hooks/ is PRUNED from every grant below and re-owned by root at the end. The canonical is mounted :rw into
+    # the uid-1001 service when api_privileged (and, on the permissive edition, into the auto-promoter); with a
+    # group-writable hooks/ that writer could plant a `reference-transaction` or `update` hook, and the next
+    # `sudo kontroll-promote` would run it as ROOT (2026-10-08 review, finding 2). Every git actor only needs to
+    # READ hooks (receive-pack as uid 1001 executes hooks/update), so root:root 0755 is the whole grant.
+    - name: Detect canonical objects (outside hooks/) not owned operator:1001  # noqa: command-instead-of-module
       become: true
-      ansible.builtin.file:
-        path: "{{ bare }}"
-        state: directory
-        owner: "{{ operator_uid }}"       # numeric — MF-1 (works in-container where the operator name is absent)
-        group: "1001"
-        recurse: true
-
-    - name: Detect canonical objects missing group-write or dir-setgid  # noqa: command-instead-of-module
-      become: true
-      # find's own ( ) ! operators (no shell) — `command` passes them as argv, so there's no pipe to SIGPIPE
-      # (a `| head` under pipefail would fail the task). -print -quit stops at the FIRST offender (fast);
-      # non-empty stdout ⇒ at least one object still needs the grant. The find module can't express this perm
-      # predicate, hence raw find.
+      # find's own ( ) ! operators (no shell) — `command` passes them as argv. -print -quit stops at the FIRST
+      # offender; non-empty stdout ⇒ at least one object still needs the chown. -user/-group take the numeric ids.
       ansible.builtin.command:
-        cmd: "find {{ bare }} ( ! -perm -020 -o -type d ! -perm -2000 ) -print -quit"
+        cmd: >-
+          find {{ bare }} -path {{ bare }}/hooks -prune -o
+          ( ! -user {{ operator_uid }} -o ! -group 1001 ) -print -quit
+      register: _own_needed
+      changed_when: false
+
+    - name: Chown existing canonical objects operator:1001, hooks/ pruned (F-CANON)  # noqa: command-instead-of-module
+      become: true
+      ansible.builtin.command:
+        cmd: "find {{ bare }} -path {{ bare }}/hooks -prune -o -exec chown -h {{ operator_uid }}:1001 {} +"
+      when: _own_needed.stdout | length > 0
+      changed_when: true
+
+    - name: Detect canonical objects outside hooks/ missing group-write or setgid  # noqa: command-instead-of-module
+      become: true
+      # Same shape: a `| head` under pipefail would SIGPIPE the task, so find's own -print -quit does the capping.
+      # The find module can't express this perm predicate, hence raw find.
+      ansible.builtin.command:
+        cmd: >-
+          find {{ bare }} -path {{ bare }}/hooks -prune -o
+          ( ! -perm -020 -o -type d ! -perm -2000 ) -print -quit
       register: _grant_needed
       changed_when: false
 
-    - name: Grant group-write (all) + setgid (dirs) on existing canonical objects  # noqa: command-instead-of-module
+    - name: Grant group-write + setgid on existing canonical objects, hooks/ pruned  # noqa: command-instead-of-module
       become: true
-      ansible.builtin.shell: "chmod -R g+w {{ bare }} && find {{ bare }} -type d -exec chmod g+s {} +"
+      ansible.builtin.shell: >-
+        find {{ bare }} -path {{ bare }}/hooks -prune -o -exec chmod g+w {} +
+        && find {{ bare }} -path {{ bare }}/hooks -prune -o -type d -exec chmod g+s {} +
       args:
         executable: /bin/bash
       when: _grant_needed.stdout | length > 0
       changed_when: true
+
+    - name: Keep hooks/ root-owned and read-only to everyone else — a gid-1001 writer must never plant a hook (C10)
+      become: true
+      ansible.builtin.file:
+        path: "{{ bare }}/hooks"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+        recurse: true
 
     - name: Ensure the working tree has a 'local' remote  # noqa: command-instead-of-module
       ansible.builtin.command:

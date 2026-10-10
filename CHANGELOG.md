@@ -11,6 +11,18 @@ NetConfig project.
 
 ## [Unreleased]
 
+### fix(ansible): the canonical's hooks are root-owned and outside the gid-1001 write-grant (2026-10-09)
+
+`local-canonical.yml` installed the C10 update hook and then `chown -R <operator>:1001` + `chmod -R g+w` the whole
+bare repository on every deploy (its `find ! -perm -020` detector always matched the fresh hook), leaving `hooks/`
+group-writable by the uid-1001 service that holds the canonical `:rw` under `api_privileged`. A dropped
+`reference-transaction` or `update` hook would have run as root on the next `sudo kontroll-promote` (the
+2026-10-08 review, finding 2). The grants are now detect-then-fix `find` commands that prune `hooks/`, and a
+final task keeps `hooks/` root:root 0755 — every git actor needs only to read and execute hooks. A second run
+reports 0 changed. `tests/unit/test_local_canonical.py` pins the prune on every grant, the root re-own, and its
+order after the grants; docs/install-from-scratch.md, docs/privileged-mutation-enablement.md and SECURITY.md C10
+say so.
+
 ### fix(docker): the socket proxy moves to its own internal network; Vector is its only peer (2026-10-09)
 
 `docker-socket-proxy` is GET/HEAD-only, but `GET /containers/<id>/json` returns a container's `Config.Env` — every

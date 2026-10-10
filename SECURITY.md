@@ -552,6 +552,11 @@ its own adversary pass); until then `solo` behaves like `separated`.
   fast-forward check ran as `update-ref`'s old-value operand, so a promote that loses a race to another promote is
   refused by git itself instead of overwriting the winner with a ref that no longer fast-forwards what it replaced
   (`tests/unit/test_promote_cas.py`, real git). Design-of-record: [docs/reviews/2026-07-05-c10-origin-push-breach/](../docs/reviews/2026-07-05-c10-origin-push-breach/).
+  **`hooks/` is root:root `0755` and pruned from the gid-1001 write-grant** (`local-canonical.yml`): the uid-1001
+  writer holds the canonical `:rw` under `api_privileged`, and a group-writable `hooks/` would let it plant a
+  `reference-transaction`/`update` hook that the next `sudo kontroll-promote` runs as root — the grant used to
+  `chmod -R g+w` the whole canonical, hooks included, on every deploy (2026-10-08 review, finding 2;
+  `tests/unit/test_local_canonical.py`).
   **After each staged push the service resets its content clone to the
   canonical `main`** (`_reset_content_clone_to_canonical`) so the read-back reflects the source of truth and each
   proposal is independent off `main` — a rejected proposal can't ride along in a later one (F1, dogfood
