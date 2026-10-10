@@ -11,6 +11,17 @@ NetConfig project.
 
 ## [Unreleased]
 
+### fix(ansible): the reload play no longer defines a variable in terms of itself (2026-10-09)
+
+`reload-observability.yml` declared the play var `prometheus_url: "{{ prometheus_url | default(…) }}"`, a
+recursive template that ansible-core 2.19's engine refuses ("recursive loop detected"), so the only human reload
+verb would have failed before its first task on a current control node (the 2026-10-08 review, finding 11). The
+play now reads the operator override through a private name; `-e prometheus_url=…` works as before.
+`tests/unit/test_playbook_vars_hygiene.py` sweeps every playbook's play-level and task-level `vars:` for a key
+whose value names itself, with a planted-shape proof that the detector fires, so the next one fails in CI rather
+than on a box. (`set_fact` self-defaults are deliberately out of scope: they template against the pre-task
+context, which is what makes them work.)
+
 ### fix(gitio): the promote is a compare-and-swap, never a check-then-set (2026-10-09)
 
 `promote_ref` ran `merge-base --is-ancestor` and then `update-ref refs/heads/main <proposal>` with no old-value
