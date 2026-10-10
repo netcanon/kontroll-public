@@ -33,7 +33,12 @@ services:
       ALLOW_RESTARTS: "0"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro   # ONLY the proxy touches the raw socket
-    read_only: true            # the proxy needs no writable root fs
+    # MUST be false for tecnativa/docker-socket-proxy:0.3.0: its entrypoint `sed`s the SHIPPED
+    # /usr/local/etc/haproxy/haproxy.cfg.template into haproxy.cfg IN THAT SAME DIR at startup —
+    # read_only:true blocks the write (crash loop), and a tmpfs overlay on the dir HIDES the shipped
+    # template (a different crash). So RO-root cannot work here; no-new-privileges + the GET/HEAD-only
+    # socket filter + the portless kontroll-network-only reach remain the real controls (see header).
+    read_only: false
     tmpfs:
       - /run                   # HAProxy's runtime socket/pid
     security_opt:

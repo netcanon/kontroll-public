@@ -198,3 +198,19 @@ def test_entrypoint_dispatches_the_documented_verbs():
         assert verb in ep, f"entrypoint must dispatch the {verb[:-1]} verb"
     assert "--check --diff" in ep, "the `check` verb must run deploy-stack with --check --diff (the mandated dry-run)"
     assert re.search(r"exec\s+ansible-playbook\s+\"\$verb\"", ep), "entrypoint must passthrough to ansible-playbook"
+
+
+def test_fresh_init_hands_the_scaffolded_instance_to_the_operator():
+    """`fresh-init` runs as root inside the installer container and writes `instance/` through a host bind, so its
+    output landed on the host owned by root — the very files the next step tells the operator to edit. On a fresh
+    VM `$EDITOR instance/fleet.yml` failed with permission denied until they worked out it needed sudo
+    (live-caught 2026-07-28). MF-1 already injects the operator identity for exactly this class of problem; it
+    just never covered these artifacts. Guards the chown, and that the verb is NOT `exec`'d away (exec replaces
+    the shell, so nothing could run after it) while the scaffold's own exit code survives."""
+    block = _read(ENTRYPOINT).split("  fresh-init)", 1)[1].split("  configure-semaphore)", 1)[0]
+    assert 'exec python3 "$REPO/scripts/kontroll-init.py"' not in block, \
+        "exec replaces the shell — nothing can chown afterwards"
+    assert "KONTROLL_OPERATOR_UID" in block, "the operator identity must be honoured"
+    assert 'chown -R "$KONTROLL_OPERATOR_UID' in block and "$REPO/instance" in block
+    assert "SOPS_AGE_KEY_FILE" in block, "the minted age key is root-owned too"
+    assert "exit $rc" in block, "the scaffold's own exit code must survive the chown"

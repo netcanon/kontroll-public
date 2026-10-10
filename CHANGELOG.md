@@ -11,6 +11,24 @@ NetConfig project.
 
 ## [Unreleased]
 
+### fix(docker,install): a fresh install comes up, and hands its files to the operator (2026-10-09)
+
+Three defects that were fixed on the private instance's permissive tine in July and never reached `main`
+(the 2026-10-08 review, finding 8), ported by defect locus:
+- `docker-socket-proxy` ran with `read_only: true`, but the pinned `tecnativa/docker-socket-proxy:0.3.0` renders
+  its shipped `haproxy.cfg.template` into its own root fs at start, so every fresh deploy crash-looped the proxy
+  (and with it Vector's `docker_logs`). Now `read_only: false`; the real controls (`POST=0` GET/HEAD-only filter,
+  `no-new-privileges`, portless, socket `:ro`) are unchanged (SECURITY.md C12).
+  `tests/unit/test_service_writable_root.py` pins the image-to-writable-root requirement as a fail-closed deny table.
+- `fresh-init` ran as root in the installer container and handed back a root-owned `instance/` and age key, the
+  very files the next step tells the operator to edit. The verb is no longer `exec`'d: it chowns the scaffold,
+  the key and its 0700 directory to the invoking operator (`KONTROLL_OPERATOR_UID`, MF-1) and keeps the
+  scaffold's own exit code (`test_installer_phase1.py`).
+- `local-canonical.yml`'s mirror push was rejected with git's generic "fetch first" hint whenever a promote had
+  advanced the canonical past the worktree, which is normal under propose-then-promote and unreadable on a
+  control plane. It now fetches, checks ancestry and refuses with the exact `merge --ff-only` to run; never
+  `--force`, because the canonical is where promotes land (`test_local_canonical.py`).
+
 ### chore(ci,tests): the permissive tine is gated on push, and Windows runs the one gate (2026-10-09)
 
 Two drifts the 2026-10-08 full review found (its finding 18 and ruling N18). The `homelab*` branches now trigger
@@ -22,6 +40,7 @@ repository, which has no such branch, and `publish-images.yml` still runs on `v*
 drifted to 12 of the gate's 30+ steps (no `gen-*.py --check` staleness gate, no identifier-leak gate), so a
 contributor could pass locally and fail CI. Measured on a Windows workstation the shim runs 29 steps and SKIPs 7
 for Linux-only tools; `--strict` keeps its CI meaning. Both pinned in `tests/unit/test_ci_workflows.py`.
+
 
 ### chore(docker): `images.lock.yml` re-pinned to the public owner's packages (follow-up F10) (2026-10-09)
 

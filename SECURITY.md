@@ -848,7 +848,13 @@ gate (`vector validate` over the config.d tree where the CLI is present).
 **Hardened (the promotion blocker):** Vector runs **NON-ROOT** (`user: "10002:10002"`, a uid distinct from Loki's
 10001 — `test_vector_uid_distinct_from_loki`) and holds **NO raw Docker socket** — its `docker_logs` source talks to
 a `docker-socket-proxy` (GET/HEAD-only, `POST=0`) that alone mounts `/var/run/docker.sock`, so a Vector RCE cannot
-`POST /containers/create` = host root. Host journald is read via `group_add: ${KONTROLL_JOURNAL_GID}` (the host
+`POST /containers/create` = host root. The proxy's container root fs is intentionally **`read_only:false`** — the
+pinned `tecnativa/docker-socket-proxy:0.3.0` renders its shipped `haproxy.cfg.template` into `haproxy.cfg` in its
+own root fs at start, so `read_only:true` crash-loops it on every deploy (a committed-config bug an uncommitted
+workaround masked until the VM-148 clean-redeploy detonated it); the real controls — the `POST=0` GET/HEAD filter,
+`no-new-privileges`, portless kontroll-net-only reach, and the socket `:ro` mount — are unchanged, so the writable
+container-private root adds no reachability. Pinned by `test_service_writable_root.py`. Host journald is read via
+`group_add: ${KONTROLL_JOURNAL_GID}` (the host
 `systemd-journal` GID, discovered by deploy-stack); the audit/run-log dirs via their `o+r` world-read — **NOT** via
 `group_add: 1001`, which would over-grant read of the `0640 1001:1001` API/GUI TLS private keys (the MF-1 catch).
 The file_tail_ssh key + its dir are rendered owned by the Vector uid (SSH demands it). Pinned by
