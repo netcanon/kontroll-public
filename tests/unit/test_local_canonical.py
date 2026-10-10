@@ -9,7 +9,8 @@ not operator-owned, that push dies with "Permission denied: unable to write obje
 The #119 box needed a manual `groupadd -g 1001 kontroll; usermod -aG 1001 admin; chown -R admin:1001 <canonical>`.
 
 The fix lands those three as idempotent tasks: (1) ensure the gid-1001 group, (2) add the operator to it, and
-(3) the recursive grant now sets owner=operator too (not just group). The owner half is load-bearing: a freshly
+(3) the grant on existing objects sets owner=operator too (not just group) — as detect-then-fix `find` commands that
+PRUNE `hooks/`, which stays root:root 0755 so the uid-1001 writer can never plant a hook (finding 2). The owner half is load-bearing: a freshly
 added supplementary group is NOT effective in the operator's current login session, so on the very first run the
 push can't rely on membership yet — operator OWNERSHIP makes it succeed via OWNER perms regardless. This test
 pins all three, plus the ordering (group/membership before the operator's push), so a refactor that drops any
@@ -66,17 +67,58 @@ def test_operator_is_added_to_gid_1001_group():
     assert hits[0].get("become") is True, "modifying a user's groups needs become"
 
 
-def test_recursive_grant_sets_operator_owner_not_just_group():
-    """The recursive write-grant (`file` with recurse:true on the bare repo, become) must set BOTH owner=operator
-    AND group=1001 — the owner half is what lets the operator's first-run push succeed before the just-added
-    group membership becomes effective (next login). Guards a regression to group-only, which re-breaks F-CANON."""
-    grants = [t for t in _tasks()
-              if (m := _mod(t, "ansible.builtin.file", "file")) and m.get("recurse") and str(m.get("group")) == "1001"]
-    assert grants, "no recursive gid-1001 grant task found in local-canonical.yml"
-    m = _mod(grants[0], "ansible.builtin.file", "file")
-    assert "operator" in str(m.get("owner", "")), \
-        "the recursive grant must set owner to the operator var (F-CANON owner half), not group alone"
-    assert grants[0].get("become") is True, "the recursive grant chowns/chgrps — needs become"
+def _cmd(task):
+    """The command/shell text of a task, whichever spelling and shape (dict with cmd, or a bare string)."""
+    for k in ("ansible.builtin.command", "command", "ansible.builtin.shell", "shell"):
+        v = task.get(k)
+        if isinstance(v, dict):
+            return str(v.get("cmd", v.get("_raw_params", "")))
+        if isinstance(v, str):
+            return v
+    return ""
+
+
+def test_the_ownership_grant_sets_operator_owner_and_prunes_hooks():
+    """The write-grant on EXISTING objects (become) must set BOTH owner=operator AND group=1001 — the owner half is
+    what lets the operator's first-run push succeed before the just-added group membership becomes effective (next
+    login) — and it must PRUNE hooks/ so the hook files never become operator- or group-owned. It is a detect-then-fix
+    pair of `find` commands now (the `file` module cannot exclude a subtree), so a second run reports 0 changed.
+    Guards a regression to group-only (re-breaks F-CANON) or to a blanket recurse that re-grants hooks/."""
+    chowns = [t for t in _tasks() if "chown" in _cmd(t)]
+    assert len(chowns) == 1, "exactly one chown grant task: %r" % [t.get("name") for t in chowns]
+    cmd = _cmd(chowns[0])
+    assert "{{ operator_uid }}:1001" in cmd, "owner=operator AND group=1001 (the F-CANON owner half)"
+    assert "-path {{ bare }}/hooks -prune" in cmd, "hooks/ must be pruned from the ownership grant"
+    assert chowns[0].get("become") is True and chowns[0].get("when"), "become, and gated on the detector"
+    blanket = [t for t in _tasks() if (m := _mod(t, "ansible.builtin.file", "file")) and m.get("recurse")
+               and str(m.get("path")) == "{{ bare }}"]
+    assert blanket == [], "no blanket recurse over the whole canonical — it would re-grant hooks/ every run"
+
+
+def test_hooks_stay_root_owned_and_outside_every_grant():
+    """hooks/ is root:root 0755 (recurse) and PRUNED from every chmod/chown grant, and the re-own task runs AFTER the
+    grants. The canonical is mounted :rw into the uid-1001 service (api_privileged); with a group-writable hooks/
+    that writer could plant a `reference-transaction` or `update` hook that the next `sudo kontroll-promote` runs as
+    ROOT (2026-10-08 review, finding 2). Every git actor only needs to READ hooks. Guards the grant growing back over
+    hooks/, the re-own going missing, or it running before a grant that would undo it."""
+    tasks = _tasks()
+    grants = [i for i, t in enumerate(tasks)
+              if ("chmod" in _cmd(t) or "chown" in _cmd(t)) and "{{ bare }}" in _cmd(t)]
+    assert grants, "the grant tasks must exist"
+    for i in grants:
+        assert "-path {{ bare }}/hooks -prune" in _cmd(tasks[i]), "a grant reaches into hooks/: %s" % tasks[i].get("name")
+    hooks = [i for i, t in enumerate(tasks)
+             if (m := _mod(t, "ansible.builtin.file", "file")) and str(m.get("path")) == "{{ bare }}/hooks"]
+    assert len(hooks) == 1, "exactly one task owns hooks/"
+    m = _mod(tasks[hooks[0]], "ansible.builtin.file", "file")
+    assert m.get("owner") == "root" and m.get("group") == "root", "hooks/ is root:root"
+    assert str(m.get("mode")) == "0755" and m.get("recurse") is True, "0755 recursively — readable+executable, never writable"
+    assert tasks[hooks[0]].get("become") is True
+    assert hooks[0] > max(grants), "the hooks re-own must be the last word, after every grant"
+    install = [t for t in tasks if (m := _mod(t, "ansible.builtin.copy", "copy"))
+               and str(m.get("dest", "")).endswith("/hooks/update")]
+    assert install and str(_mod(install[0], "ansible.builtin.copy", "copy").get("mode")) == "0755", \
+        "the update hook is installed 0755 (readable + executable by every git actor, writable by none but root)"
 
 
 def test_group_and_membership_precede_the_operator_push():

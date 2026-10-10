@@ -129,8 +129,9 @@ capability-promote path is live too, not just the API. The from-scratch recipe (
 1. **Token:** on the VM, `sops instance/secrets/dashboards.sops.yml` → add
    `kontroll_api_token: "$(openssl rand -hex 32)"` (a secret — born + encrypted on the VM, never committed/transcripted).
 2. **Canonical hardening + write grant** (`local-canonical.yml` does the top dir + deny-non-FF; existing objects
-   need the one-time recursive grant): `sudo chgrp -R 1001 /srv/kontroll.git && sudo chmod -R g+w /srv/kontroll.git
-   && sudo find /srv/kontroll.git -type d -exec chmod g+s {} \;`.
+   need the one-time recursive grant): re-run `local-canonical.yml` — its detect-then-fix tasks chown
+   `<operator>:1001` and grant `g+w` + dir-setgid **outside `hooks/`**, which stays root-owned `0755` (a gid-1001
+   writer must never be able to plant a hook; SECURITY.md C10). Never a blanket `chmod -R g+w` of the canonical.
 3. **Gated deploy:** `ansible-playbook playbooks/deploy-stack.yml -e '{"stack_services":["api"],"api_privileged":true}'`.
    It renders the token + `KONTROLL_STAGE_PUSHES=1`, clones + chowns the API tree to uid-1001, adds its `local`
    remote, and rebuilds the runner image (the baked git identity). **Live lessons now baked into the artifacts:**

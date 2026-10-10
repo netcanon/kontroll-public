@@ -137,7 +137,8 @@ Bare repo + HEAD→main + the working tree's `local` remote + the mirror push. N
 > grant) is now an **idempotent `local-canonical.yml` task** — it recursively **chowns to `<operator>:1001`** and
 > grants group-write + dir-setgid, but only runs the perm fix when something actually lacks it (a second run
 > reports `0 changed`). On a *fresh* canonical the setgid handles it; on an existing one the task does. No manual
-> `chown -R / chmod -R` step.
+> `chown -R / chmod -R` step. `hooks/` is pruned from both grants and kept **root:root 0755**: the uid-1001 writer
+> that holds the canonical `:rw` must never be able to plant a hook that the next promote runs as root (SECURITY.md C10).
 >
 > **[Resolved — F-CANON, #119]:** the gap that bit the prod cutover is also closed in the same playbook: on a
 > fresh node there was **no named group at gid 1001 and the operator was not a member**, so the operator's Mirror
