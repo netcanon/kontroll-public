@@ -8,6 +8,18 @@
 # no secret). To change the scraped OIDs, edit generator.yml and regenerate (CI/VM, CGO); do NOT hand-edit the
 # modules. SNMPv3 authPriv (SHA-1 / AES-128; `SHA` = SHA-1 in snmp_exporter). The `network` job's per-target
 # __param_module + __param_auth labels select the module + auth.
+{#- The auths: block is EMITTED ONLY when the snmp_observability domain exists. On a fresh node it does not
+    (creds arrive later via the GUI Secrets dialog), and this file is a FILE-bind into snmp-exporter — so it
+    must still be rendered, or `compose up` auto-creates the bind source as a root:root DIRECTORY and the
+    container dies with "not a directory" (the G9 hole; live-caught 2026-07-28 on a fresh box). Same shape as
+    deploy-stack's empty device-CA bundle and empty file_tail_ssh known_hosts.
+
+    A modules-only render is a VALID FILE but NOT a startable config: snmp_exporter 0.30.1 exits with
+    "Configuration is missing Auths." (also live-caught, the same day — rendering it was not enough). So
+    deploy-stack drops snmp-exporter from the up-list until credentials exist, and says so. This render still
+    happens in that state, deliberately: the bind source must exist for the day someone brings the container up
+    by hand, and a missing file fails far more confusingly than an inert one. #}
+{% if _snmp %}
 auths:
   v3_kontroll:
     version: 3
@@ -17,4 +29,5 @@ auths:
     auth_protocol: SHA
     priv_protocol: AES
     priv_password: {{ _snmp.snmp_v3_priv_password }}
+{% endif %}
 {% include 'modules.generated.yml' %}

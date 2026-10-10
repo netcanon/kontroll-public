@@ -11,6 +11,29 @@ NetConfig project.
 
 ## [Unreleased]
 
+### fix(deploy): the mandated dry-run works on a brand-new node, and a credential-less SNMP exporter no longer kills the stack (2026-10-09)
+
+Ported from the private instance's tine, where a from-scratch rebuild found them on 2026-07-28 (the 2026-10-08
+review, finding 8):
+- `--check` skips the tasks that CREATE things, so on a node where nothing had ever been applied the tasks that
+  clone from the canonical or take ownership of a TLS cert failed outright, and the mandated `--check --diff` could
+  not pass on day one. One narrow fact, `_fresh_preview` (check mode AND no canonical yet), gates the sites that
+  provably cannot be previewed, and a PARTIAL PREVIEW banner says what was skipped. A provisioned box keeps full
+  fidelity, and the G9 age-key refusal is deliberately NOT gated: a fresh node is exactly where that precondition
+  has never been met (`tests/unit/test_fresh_node_preview.py`).
+- That G9 refusal now says what to do: it fails when the onboard-gui age key is missing OR unreadable by the
+  runtime uid, and prints the exact `install` command (docs/SETUP.md carries the same);
+  `tests/check-storage-chown.py` recognises the stat-then-assert shape as a fail-closed guard
+  (`tests/unit/test_g9_age_key_refusal.py`).
+- `snmp.yml` is a FILE bind into snmp-exporter but was rendered only when SNMPv3 credentials existed, so on a
+  fresh node Docker auto-created the bind source as a root-owned DIRECTORY and `compose up` died. It is now always
+  rendered (the template omits `auths:` without a domain; 0600 + gitignored unchanged) and snmp-exporter is
+  dropped from the up-list until credentials exist, with a message naming the GUI dialog that adds them — one
+  fact for both decisions. The up-list's intermediate is a task `vars:` entry, not a sibling `set_fact` key (those
+  template against the pre-task context and die undefined at render, past `--syntax-check` and ansible-lint);
+  `tests/unit/test_playbook_setfact_hygiene.py` sweeps every playbook for that shape and
+  `tests/unit/test_snmp_config_render.py` evaluates the real Jinja.
+
 ### fix(fleet): the edge check has teeth, a fresh box can back up, and two SECURITY.md claims are true again (2026-10-09)
 
 Ported from the private instance's tine (fixed there 2026-07-29; main never got it — the 2026-10-08 review,
