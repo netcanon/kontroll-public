@@ -11,6 +11,15 @@ NetConfig project.
 
 ## [Unreleased]
 
+### fix(validate-live): the TLS floor is stated, not assumed (2026-10-10)
+
+`gen-validate-live.py` built its TLS contexts with `ssl.create_default_context()` and relied on the interpreter's
+default protocol floor (CodeQL `py/insecure-protocol`; the 2026-10-08 review's one-liner). One constructor,
+`LiveFetchers._tls_context`, now builds every outbound context — verifying or, for the self-signed classes,
+unverified — with `minimum_version = TLSv1_2` set explicitly, so an interpreter build or an `OPENSSL_CONF` cannot
+lower it and nobody has to know the default to know the floor. Two tests: the floor on both shapes, and a source
+pin that no other line in the script builds a context.
+
 ### fix(install): the mirror check reads with `ls-remote` and prescribes a rebase (2026-10-10)
 
 The canonical mirror refusal (public #14) was ported from the tine's first cut, which a live run had already
@@ -22,6 +31,7 @@ lag). Now the canonical's `main` sha is READ with `git ls-remote` (writes nothin
 on that sha and refuses on ANY non-zero (rc 128, objects never fetched, is as unproven as rc 1), and the remedy is
 `git rebase local/main` — a plain fast-forward when there is nothing to replay. `tests/unit/test_local_canonical.py`
 pins the read, the remedy, the fail-closed condition and that no task fetches into the worktree.
+
 
 ### fix(service): every request field that becomes a path or an inventory key is a closed charset, and repository writes are confined (2026-10-09)
 
