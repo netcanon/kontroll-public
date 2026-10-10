@@ -545,7 +545,10 @@ its own adversary pass); until then `solo` behaves like `separated`.
   `local-canonical.yml`) that refuses a receive-pack update of `refs/heads/main` from the **network-service uid
   (1001)** — the legit mirror push (uid **0** in the installer container, or the operator uid on a host-direct run,
   **never 1001**) and `promote_ref`'s `update-ref` (not receive-pack, so the hook never fires — a human promote is
-  untouched) keep working. Design-of-record: [docs/reviews/2026-07-05-c10-origin-push-breach/](../docs/reviews/2026-07-05-c10-origin-push-breach/).
+  untouched) keep working. **`promote_ref` is a compare-and-swap:** it passes the object id `main` had when its
+  fast-forward check ran as `update-ref`'s old-value operand, so a promote that loses a race to another promote is
+  refused by git itself instead of overwriting the winner with a ref that no longer fast-forwards what it replaced
+  (`tests/unit/test_promote_cas.py`, real git). Design-of-record: [docs/reviews/2026-07-05-c10-origin-push-breach/](../docs/reviews/2026-07-05-c10-origin-push-breach/).
   **After each staged push the service resets its content clone to the
   canonical `main`** (`_reset_content_clone_to_canonical`) so the read-back reflects the source of truth and each
   proposal is independent off `main` — a rejected proposal can't ride along in a later one (F1, dogfood

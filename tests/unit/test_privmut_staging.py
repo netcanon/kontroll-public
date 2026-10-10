@@ -61,10 +61,12 @@ def test_promote_fast_forwards_only(monkeypatch):
     ancestor check passes, then it update-refs main + deletes the proposal. Guards the trusted PROMOTE half."""
     calls = []
     monkeypatch.setattr(gitio, "_run", lambda cmd, cwd=None, quiet_args=0: calls.append(list(cmd)) or 0)
+    monkeypatch.setattr(gitio, "_out", lambda cmd, cwd=None: (0, "a" * 40))     # main's object id before the check
     assert gitio.promote_ref("run-7") is True
     joined = [" ".join(c) for c in calls]
     assert any("merge-base --is-ancestor refs/heads/main refs/heads/proposed/run-7" in j for j in joined)
-    assert any("update-ref refs/heads/main refs/heads/proposed/run-7" in j for j in joined)
+    assert any("update-ref refs/heads/main refs/heads/proposed/run-7 " + "a" * 40 in j for j in joined), \
+        "the update-ref must carry main's old object id (compare-and-swap, finding 9)"
     assert any("update-ref -d refs/heads/proposed/run-7" in j for j in joined)
 
 
@@ -80,6 +82,7 @@ def test_promote_refuses_a_non_fast_forward(monkeypatch):
             updated.append(cmd)
         return 0
     monkeypatch.setattr(gitio, "_run", fake)
+    monkeypatch.setattr(gitio, "_out", lambda cmd, cwd=None: (0, "a" * 40))
     assert gitio.promote_ref("run-9") is False
     assert not updated                            # main was never advanced
 
@@ -92,6 +95,7 @@ def test_promote_reports_success_even_if_proposal_cleanup_fails(monkeypatch, cap
     def fake(cmd, cwd=None, quiet_args=0):
         return 1 if cmd[:2] == ["git", "update-ref"] and cmd[2] == "-d" else 0
     monkeypatch.setattr(gitio, "_run", fake)
+    monkeypatch.setattr(gitio, "_out", lambda cmd, cwd=None: (0, "a" * 40))
     assert gitio.promote_ref("run-5") is True
     assert "could not delete proposed/run-5" in capsys.readouterr().out
 

@@ -11,6 +11,16 @@ NetConfig project.
 
 ## [Unreleased]
 
+### fix(gitio): the promote is a compare-and-swap, never a check-then-set (2026-10-09)
+
+`promote_ref` ran `merge-base --is-ancestor` and then `update-ref refs/heads/main <proposal>` with no old-value
+operand (the 2026-10-08 review, finding 9). Two promotes racing — the Semaphore task and a CLI run, or two CLI
+runs — let the second overwrite the first with a ref that is no longer a fast-forward of the `main` it replaced:
+a promote lost silently while both reported success. The promote now reads `main`'s object id, checks the
+fast-forward against it and passes it to `update-ref` as the old value, so git refuses the loser ("is at X but
+expected Y") and says so. `tests/unit/test_promote_cas.py` races two real proposals in a real bare repository and
+proves the loser is refused and the winner kept.
+
 ### fix(deploy): the mandated dry-run works on a brand-new node, and a credential-less SNMP exporter no longer kills the stack (2026-10-09)
 
 Ported from the private instance's tine, where a from-scratch rebuild found them on 2026-07-28 (the 2026-10-08
@@ -34,6 +44,7 @@ review, finding 8):
   `tests/unit/test_playbook_setfact_hygiene.py` sweeps every playbook for that shape and
   `tests/unit/test_snmp_config_render.py` evaluates the real Jinja.
 
+
 ### fix(fleet): the edge check has teeth, a fresh box can back up, and two SECURITY.md claims are true again (2026-10-09)
 
 Ported from the private instance's tine (fixed there 2026-07-29; main never got it — the 2026-10-08 review,
@@ -56,6 +67,7 @@ finding 8):
   `group_vars` file (the scaffold's or an instance's committed overlay) that sets `ansible_network_os` or a vendor
   connection plugin — such a group is a second, invisible dispatch seam competing with `device_role`. The scaffold
   gains an `inventory/README.md` that teaches the rule where the old private README taught the violation.
+
 
 ### fix(gui): the GUI renders foreign bytes as text, never markup (C19) (2026-10-09)
 
