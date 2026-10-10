@@ -11,6 +11,18 @@ NetConfig project.
 
 ## [Unreleased]
 
+### fix(install): the mirror check reads with `ls-remote` and prescribes a rebase (2026-10-10)
+
+The canonical mirror refusal (public #14) was ported from the tine's first cut, which a live run had already
+corrected on 2026-07-28: its `git fetch local` ran as root inside the installer container and left a root-owned
+`.git/FETCH_HEAD` in the operator's worktree, so the operator's own `git fetch` — the first half of the remedy the
+message prints — died with "Permission denied"; and the remedy said `merge --ff-only local/main`, which cannot
+work because this play commits an instance-state commit of its own every run (the histories diverge rather than
+lag). Now the canonical's `main` sha is READ with `git ls-remote` (writes nothing anywhere), the ancestry check runs
+on that sha and refuses on ANY non-zero (rc 128, objects never fetched, is as unproven as rc 1), and the remedy is
+`git rebase local/main` — a plain fast-forward when there is nothing to replay. `tests/unit/test_local_canonical.py`
+pins the read, the remedy, the fail-closed condition and that no task fetches into the worktree.
+
 ### fix(service): every request field that becomes a path or an inventory key is a closed charset, and repository writes are confined (2026-10-09)
 
 The onboard planner validated only the collection's installed-ness; `key`, `group`, `host`, `host_name` and
@@ -24,6 +36,7 @@ the drop-in inventory path, the secret-domain path, the actuation unit path, the
 API answers **422**, the GUI **400**, without echoing the value. The Fleet index paints host names and
 addresses as text. New SECURITY.md **C22**; `tests/unit/test_request_boundary.py` plus a parametrised API pin
 that git is never touched on a refused request.
+
 
 ### fix(promote): the pin-conflict gate runs trusted code over the proposal's data, never the proposal's code (2026-10-09)
 
@@ -46,6 +59,7 @@ final task keeps `hooks/` root:root 0755 — every git actor needs only to read 
 reports 0 changed. `tests/unit/test_local_canonical.py` pins the prune on every grant, the root re-own, and its
 order after the grants; docs/install-from-scratch.md, docs/privileged-mutation-enablement.md and SECURITY.md C10
 say so.
+
 
 ### fix(docker): the socket proxy moves to its own internal network; Vector is its only peer (2026-10-09)
 

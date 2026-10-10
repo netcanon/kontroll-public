@@ -137,6 +137,16 @@ def test_group_and_membership_precede_the_operator_push():
     assert grp < push and usr < push, "the gid-1001 group + operator membership must be provisioned before the push"
 
 
+def _cmd_text(task):
+    for k in ("ansible.builtin.command", "command", "ansible.builtin.shell", "shell"):
+        v = task.get(k)
+        if isinstance(v, dict):
+            return str(v.get("cmd", v.get("_raw_params", "")))
+        if isinstance(v, str):
+            return v
+    return ""
+
+
 def test_the_canonical_mirror_refuses_to_discard_promoted_work():
     """The mirror is a fast-forward-only push, and worktree/canonical diverge the moment propose-then-promote is
     used — a promote advances canonical `main` with a commit the worktree never had. The push then fails with
@@ -145,12 +155,26 @@ def test_the_canonical_mirror_refuses_to_discard_promoted_work():
     died here right after a hand-promote, with no indication why).
 
     Pins the actionable refusal AND, more importantly, that the remedy is never `--force`: force-pushing here
-    would silently delete every promoted proposal the canonical holds."""
+    would silently delete every promoted proposal the canonical holds.
+
+    The check's own two faults, found by running it (the tine's 2026-07-28 follow-up, ported): it must READ the
+    canonical with `ls-remote` — a `git fetch` as root inside the installer container leaves a root-owned
+    `.git/FETCH_HEAD` in the operator's worktree, breaking the very `git fetch` the remedy prescribes — and the
+    remedy must be `rebase local/main`, because this play commits an instance-state commit of its own on every run,
+    so the two histories genuinely diverge and `merge --ff-only` cannot work. An ancestry check that cannot PROVE
+    the ancestor (rc 128: objects never fetched) refuses like a real divergence (rc 1) — fail closed, both ways."""
     with open(PLAYBOOK, encoding="utf-8") as fh:
         src = fh.read()
-    assert "merge-base --is-ancestor FETCH_HEAD HEAD" in src, "the divergence check must exist"
+    assert "git ls-remote local refs/heads/main" in src, "the canonical is READ with ls-remote (writes nothing)"
+    assert all("FETCH_HEAD" not in _cmd_text(t) for t in _tasks()), \
+        "no command may use FETCH_HEAD — a root fetch leaves it root-owned in the operator's worktree"
+    assert "merge-base --is-ancestor {{ canonical_main }} HEAD" in src, "the divergence check runs on the read sha"
     assert "REFUSING to mirror" in src and "would discard them" in src
-    assert "--ff-only" in src, "the remedy must be a fast-forward merge, spelled out for the operator"
+    assert "rebase local/main" in src and "merge --ff-only local/main" not in src, \
+        "the remedy is a rebase — the histories diverge (instance-state commits), a fast-forward cannot work"
+    assert "(_canon_behind.rc | default(0)) != 0" in src, "any non-zero ancestry rc refuses (rc 128 = unproven)"
+    fetches = [t for t in _tasks() if "git fetch" in _cmd_text(t)]
+    assert fetches == [], "no task may `git fetch` into the operator's worktree: %r" % [t.get("name") for t in fetches]
     pushes = [str(_mod(t, "ansible.builtin.command", "command").get("cmd", "")) for t in _tasks()
               if _mod(t, "ansible.builtin.command", "command") and "git push" in
               str(_mod(t, "ansible.builtin.command", "command").get("cmd", ""))]
