@@ -26,31 +26,43 @@ from kontroll import gitio
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# The ONLY environment the gate's generator subprocess inherits. A promote runs as root on the `sudo` CLI and with
+# SOPS_AGE_KEY in scope on the Semaphore path; the generator needs neither, so it gets neither (finding 3).
+_GATE_ENV = ("PATH", "SYSTEMROOT", "TEMP", "TMP", "HOME", "LANG", "LC_ALL", "PYTHONUTF8", "PYTHONIOENCODING")
+
 
 def _would_brick_generate(run_id, repo):
     """FIX-M9 — the promote-time pin-conflict gate. Extract the PROSPECTIVE post-merge tree (`proposed/<run_id>`,
-    which a fast-forward makes `main`) and run ITS OWN `gen-requirements.py --conflict-check`: resolve the unioned
-    lockfile pins and report if generation would FAIL CLOSED (two conflicting `==` pins for one collection — or a
-    bad `signature_policy`). Returns the message to refuse on, or None to proceed.
+    which a fast-forward makes `main`) and run THIS tree's `gen-requirements.py --conflict-check --root <extract>`
+    over it: resolve the unioned lockfile pins and report if generation would FAIL CLOSED (two conflicting `==` pins
+    for one collection — or a bad `signature_policy`). Returns the message to refuse on, or None to proceed.
 
     Why at promote: two units each fine against today's `main` can conflict with EACH OTHER once both are active;
     only the FF moment (against the live `main`) is authoritative, so checking here means two conflicting `==` units
     can NEVER both become active and brick a LATER deploy's generate (which halts pre-image-build, far from the
-    cause). Read-only: extracts to a temp dir and runs the proposal's OWN generator there (cwd==ROOT==the extract, so
-    no path surgery) — it never touches the canonical or `main`. Fails OPEN on our own read error (git/tar missing,
-    an unreadable/old ref): the generate-time fail-closed remains the backstop, and the gate must never itself block
-    a clean promote."""
+    cause). Read-only: extracts to a temp dir and never touches the canonical or `main`.
+
+    TRUSTED CODE, PROPOSAL DATA. The gate used to run the proposal's OWN copy of gen-requirements.py — i.e. execute
+    unreviewed code from the very ref it was judging, as root on the `sudo` CLI or with SOPS_AGE_KEY in scope on the
+    Semaphore path (2026-10-08 review, finding 3). Now the generator is the one THIS checkout ships (ROOT — canonical
+    `main`, or the baked image), the extract is handed to it as a DATA root (`--root`), and the subprocess sees only
+    the whitelisted environment above. Fails OPEN on our own read error (git/tar missing, an unreadable ref, a tree
+    with no modules/): the generate-time fail-closed remains the backstop, and the gate must never itself block a
+    clean promote."""
     ref = "proposed/%s" % run_id
+    gen = os.path.join(ROOT, "scripts", "gen-requirements.py")    # THIS tree's generator — never the proposal's copy
     try:
         arc = subprocess.run(["git", "archive", "--format=tar", ref], cwd=repo or ROOT, capture_output=True)
         if arc.returncode != 0:
             return None                                  # can't read the ref here — promote_ref fails loudly if it's truly absent
         with tempfile.TemporaryDirectory(prefix="kontroll-promote-") as tmp:
             untar = subprocess.run(["tar", "-x", "-C", tmp], input=arc.stdout)
-            gen = os.path.join(tmp, "scripts", "gen-requirements.py")
-            if untar.returncode != 0 or not os.path.exists(gen):
-                return None                              # extraction failed / an old proposal w/o the generator — nothing to check
-            p = subprocess.run([sys.executable, gen, "--conflict-check"], cwd=tmp, capture_output=True, text=True)
+            if untar.returncode != 0 or not os.path.isdir(os.path.join(tmp, "modules")):
+                return None                              # extraction failed / no modules registry in the tree — nothing to check
+            env = {k: os.environ[k] for k in _GATE_ENV if k in os.environ}
+            env.setdefault("PYTHONIOENCODING", "utf-8")
+            p = subprocess.run([sys.executable, gen, "--conflict-check", "--root", tmp], cwd=ROOT, env=env,
+                               capture_output=True, text=True)
             return None if p.returncode == 0 else (p.stderr.strip() or "generation would fail closed")
     except OSError:
         return None                                      # git/tar unavailable → fail open (backstop at generate)

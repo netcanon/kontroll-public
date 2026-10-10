@@ -6,9 +6,11 @@ WHY (the failures these guard):
     one seam removed from the cause. The promote gate must REFUSE such a promote (and NEVER advance `main`), so two
     conflicting `==` units can never co-exist. A clean proposal must still promote, and the gate must fail OPEN on
     its own read error (it hardens; it must never itself block a clean promote).
-  * The detector is the proposal's OWN `gen-requirements.py --conflict-check` run over the extracted prospective
-    tree — so the wiring (archive → extract → run → refuse on non-zero) is exercised end-to-end against real git +
-    subprocess, not only a mock (the L2b lesson: a mock hides the plumbing bug).
+  * The detector is THIS tree's `gen-requirements.py --conflict-check --root <extract>` run over the extracted
+    prospective tree as DATA — never the proposal's own copy of the script (2026-10-08 review, finding 3: that
+    executed unreviewed code as root / with SOPS_AGE_KEY in scope). The wiring (archive → extract → trusted run →
+    refuse on non-zero) is exercised end-to-end against real git + subprocess, not only a mock (the L2b lesson: a
+    mock hides the plumbing bug), and the trust property is falsified with a proposal whose generator is a canary.
 """
 import importlib.util
 import os
@@ -75,7 +77,7 @@ def _unit(repo, key, ver):
 def test_would_brick_generate_detects_a_real_conflict(tmp_path):
     """End-to-end (real git + subprocess): a `proposed/<id>` ref whose tree has two `==`-conflicting active units
     makes `_would_brick_generate` return a conflict message naming the collection; a single-unit tree returns None.
-    Proves the archive → extract → proposal's-own `gen-requirements --conflict-check` plumbing actually detects (a
+    Proves the archive → extract → trusted `gen-requirements --conflict-check --root` plumbing actually detects (a
     mock would hide a cwd/path/extract bug — the L2b lesson)."""
     repo = tmp_path / "repo"
     shutil.copytree(os.path.join(ROOT, "scripts"), repo / "scripts")
@@ -96,3 +98,68 @@ def test_would_brick_generate_detects_a_real_conflict(tmp_path):
         sp.run(cmd, cwd=repo, env=env, check=True)
     msg = promote._would_brick_generate("conflict", str(repo))
     assert msg and "community.docker" in msg and "conflict" in msg.lower()  # the gate would REFUSE this promote
+
+
+def _fake_proposal(repo, conflict, canary):
+    """A minimal tree the generator can judge — modules/_core.yml, a fleet enabling two classes, two module.yml files
+    pinning the same collection (`==1.0.0` vs `==2.0.0` when `conflict`) — plus a MALICIOUS scripts/gen-requirements.py
+    that writes `canary` and exits 0 ("no conflict"). Committed and exposed as proposed/<id> by the caller."""
+    (repo / "modules").mkdir(parents=True)
+    (repo / "modules" / "_core.yml").write_text("collections: []\n", encoding="utf-8")
+    (repo / "config").mkdir()
+    (repo / "config" / "fleet.yml").write_text("enabled_modules: [alpha, beta]\n", encoding="utf-8")
+    for key, ver in (("alpha", "==1.0.0"), ("beta", "==2.0.0" if conflict else "==1.0.0")):
+        (repo / "modules" / key).mkdir()
+        (repo / "modules" / key / "module.yml").write_text(
+            "key: %s\ncollections:\n  - name: acme.appliance\n    version: '%s'\n" % (key, ver), encoding="utf-8")
+    (repo / "scripts").mkdir()
+    (repo / "scripts" / "gen-requirements.py").write_text(
+        "import pathlib, sys\npathlib.Path(%r).write_text('the proposal ran its own code')\nsys.exit(0)\n"
+        % str(canary), encoding="utf-8")
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    for cmd in (["git", "init", "-q"], ["git", "add", "-A"], ["git", "commit", "-qm", "proposal"],
+                ["git", "branch", "proposed/p1"]):
+        sp.run(cmd, cwd=repo, env=env, check=True)
+
+
+def test_the_gate_runs_the_trusted_generator_never_the_proposals_own(tmp_path):
+    """THE TRUST PROPERTY (finding 3). A proposal whose own scripts/gen-requirements.py is a canary that exits 0 —
+    "no conflict" — while its DATA carries a real `==` conflict. The old gate executed that script (as root on the
+    sudo CLI) and would have promoted the conflict; the gate must refuse on the conflict the TRUSTED generator sees,
+    and the canary file must never appear."""
+    canary = tmp_path / "canary.txt"
+    repo = tmp_path / "repo"
+    _fake_proposal(repo, conflict=True, canary=canary)
+    msg = promote._would_brick_generate("p1", str(repo))
+    assert msg and "acme.appliance" in msg and "conflict" in msg.lower(), "the trusted generator must see the data conflict"
+    assert not canary.exists(), "the proposal's own gen-requirements.py must NEVER execute"
+
+
+def test_the_gate_passes_only_the_whitelisted_environment_and_the_trusted_script(tmp_path, monkeypatch):
+    """The generator subprocess is THIS tree's script (under promote.ROOT), run from ROOT with `--root <extract>`
+    and `--conflict-check`, and sees none of the caller's secrets: a SOPS_AGE_KEY in the promote's environment (the
+    Semaphore path) must not reach it, nor a caller's KONTROLL_WRITE_ROOT. A clean proposal still passes (None)."""
+    canary = tmp_path / "canary.txt"
+    repo = tmp_path / "repo"
+    _fake_proposal(repo, conflict=False, canary=canary)
+    monkeypatch.setenv("SOPS_AGE_KEY", "key-material-that-must-not-reach-the-child")
+    monkeypatch.setenv("KONTROLL_WRITE_ROOT", str(tmp_path / "elsewhere"))
+    seen = {}
+    real_run = promote.subprocess.run
+
+    def spy(cmd, *a, **kw):
+        if any(os.path.basename(str(c)) == "gen-requirements.py" for c in cmd):   # equality, not a substring
+            seen["cmd"], seen["env"], seen["cwd"] = list(cmd), dict(kw.get("env") or {}), kw.get("cwd")
+        return real_run(cmd, *a, **kw)
+
+    monkeypatch.setattr(promote.subprocess, "run", spy)
+    assert promote._would_brick_generate("p1", str(repo)) is None
+    assert not canary.exists()
+    assert seen["cmd"][1] == os.path.join(promote.ROOT, "scripts", "gen-requirements.py"), \
+        "the trusted checkout's generator, never the extract's"
+    assert "--conflict-check" in seen["cmd"] and "--root" in seen["cmd"], seen["cmd"]
+    assert seen["cwd"] == promote.ROOT, "run from the trusted root, not inside the extract"
+    assert "SOPS_AGE_KEY" not in seen["env"] and "KONTROLL_WRITE_ROOT" not in seen["env"], \
+        "the child inherits only the whitelisted environment"
+    assert set(seen["env"]) <= set(promote._GATE_ENV) | {"PYTHONIOENCODING"}

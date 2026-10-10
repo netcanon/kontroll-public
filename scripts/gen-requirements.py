@@ -8,6 +8,7 @@ against the SAME source of truth (modules/); it is never a hand-maintained list 
 rule — see CLAUDE.md). Output path defaults to the generated lockfile bootstrap also uses.
 
 Usage:  python3 scripts/gen-requirements.py [<out-path>]
+        python3 scripts/gen-requirements.py --conflict-check --root <tree>   # FIX-M9: judge ANOTHER tree's data
 """
 import os
 import sys
@@ -174,9 +175,20 @@ def all_module_keys():
 
 
 def main():
-    check = "--check" in sys.argv[1:]
-    conflict_check = "--conflict-check" in sys.argv[1:]        # FIX-M9: resolve-only (the promote-time pin-conflict gate)
-    all_modules = "--all-modules" in sys.argv[1:]             # the PUBLISHED-runner SUPERSET (report 22 §2.3)
+    global ROOT
+    args = sys.argv[1:]
+    if "--root" in args:
+        # FIX-M9's promote gate runs THIS (trusted) generator over ANOTHER tree's DATA — the extracted
+        # proposed/<run_id> — instead of executing the proposal's own copy of this script, which would run
+        # unreviewed code as root on the `sudo` CLI or with SOPS_AGE_KEY in scope on the Semaphore path
+        # (2026-10-08 review, finding 3). ROOT becomes the data root for modules/, and KONTROLL_WRITE_ROOT points
+        # paths.resolve() (fleet, actuation) at the same tree. The CODE — this file and kontroll.paths — stays the
+        # caller's. Meant for --conflict-check: a generate with --root would write into that tree.
+        ROOT = os.path.abspath(args[args.index("--root") + 1])
+        os.environ["KONTROLL_WRITE_ROOT"] = ROOT
+    check = "--check" in args
+    conflict_check = "--conflict-check" in args                # FIX-M9: resolve-only (the promote-time pin-conflict gate)
+    all_modules = "--all-modules" in args                     # the PUBLISHED-runner SUPERSET (report 22 §2.3)
     if all_modules:
         # The published kontroll-control (runner) image bakes the union of EVERY module's collections — CI has no
         # instance/fleet.yml, and a prebuilt image can't know a node's fleet. Derived from the PUBLIC modules/
