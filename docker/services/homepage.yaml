@@ -1,8 +1,9 @@
 # Homepage — the service portal / single pane of glass.
 # Config is provisioned from ../instance/dashboards/homepage — the per-instance overlay
 # (your portal tiles; config-as-code, one file per concern). The tool ships a generic stub
-# at instance.example/dashboards/homepage. API keys for widgets are injected via env from a
-# SOPS-decrypted .env at deploy time — never hard-coded here.
+# at instance.example/dashboards/homepage. API keys for widgets are injected via env from
+# Homepage's OWN deploy-rendered env file (docker/.env.homepage) — never hard-coded here,
+# never the stack-wide .env.
 
 services:
   homepage:
@@ -17,10 +18,13 @@ services:
       # free of runtime log churn (see .gitignore in the config dir).
       LOG_TARGETS: stdout
     env_file:
-      # widget tokens (decrypted from SOPS into ../.env at deploy). Optional so
-      # a fresh checkout / `compose config` validation doesn't require the file;
-      # Homepage simply renders without live widgets until .env exists.
-      - path: ../.env
+      # Homepage's OWN env — the `homepage_var_*` keys of the `dashboards` SOPS domain, rendered upper-cased
+      # (HOMEPAGE_VAR_*) by deploy-stack into docker/.env.homepage. NEVER the stack-wide ../.env: that file carries the
+      # Semaphore DB password + access-key encryption secret, the Grafana admin password, the GUI password, the API
+      # token and every exporter credential, none of which an UNAUTHENTICATED portal needs (2026-10-08 review,
+      # finding 5; tests/unit/test_homepage_env_isolation.py). Optional so a fresh checkout / `compose config`
+      # validation doesn't require the file; Homepage simply renders without live widgets until it exists.
+      - path: ../.env.homepage
         required: false
     volumes:
       # Read-WRITE: current Homepage (Next 16) force-copies skeleton files into

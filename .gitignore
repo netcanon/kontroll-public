@@ -19,6 +19,7 @@ age/keys.txt
 
 # Runtime env files for the docker stack (use *.env.example as the committed template)
 docker/.env
+docker/.env.homepage
 docker/**/.env
 *.env
 !*.env.example

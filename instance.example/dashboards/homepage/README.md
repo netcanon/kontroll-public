@@ -13,7 +13,9 @@ fills the `services.yaml` sentinels with your mgmt IP + domain.
 - **No actuation** — every tile is an `href:` link or a GET-only widget. Homepage cannot change a device or
   the stack. Nothing here is a control surface (that is the onboard-GUI on `:8443`, which *is* authenticated).
 - **No secret in the served config** — tiles are `href:` + `description:` only; live-widget API keys (if you add
-  them) are `{{HOMEPAGE_VAR_*}}` placeholders injected from SOPS at deploy, never written into this YAML.
+  them) are `{{HOMEPAGE_VAR_*}}` placeholders injected from SOPS at deploy, never written into this YAML —
+  each is a `homepage_var_<name>` key of the `dashboards` domain, rendered into Homepage's own
+  `docker/.env.homepage` (the portal never receives the stack `.env`).
 - **mgmt-bound, never WAN** — the `:3000` container binds all interfaces (the documented **SECURITY.md C3**
   NPM-fronted exception); the mgmt boundary is enforced at the NPM / firewall layer, at `control.<domain>` on the
   mgmt VLAN. **Keep `:3000` on the mgmt VLAN.** If you have not put NPM in front yet, front it with your reverse
