@@ -11,6 +11,15 @@ NetConfig project.
 
 ## [Unreleased]
 
+### chore(docker): `images.lock.yml` pinned to the v0.1.2 images (2026-10-10)
+
+`v0.1.2` is the public line's first release tag: the un-stranded fixes (#14–#17), the Phase 2 safety set
+(#18–#26) and the gate PR (#13). `publish-images.yml` built the three images from the tag and the lock now names
+`ghcr.io/netcanon/kontroll-{control,vector,installer}:v0.1.2` by digest (`gen-image-digests.py --refresh v0.1.2
+--owner netcanon`). Each image's `org.opencontainers.image.revision` label names the tagged commit. The packages
+stay private until the owner makes them public by hand; a `use_published_images=true` deploy needs a
+`read:packages` login until then (SECURITY.md R-IMG-1).
+
 ### fix(validate-live): the TLS floor is stated, not assumed (2026-10-10)
 
 `gen-validate-live.py` built its TLS contexts with `ssl.create_default_context()` and relied on the interpreter's
