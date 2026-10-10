@@ -22,10 +22,43 @@
     - _api_recipe.check is defined
     - not (molecule_test | default(false) | bool)
   block:
-    - name: Resolve auth token
+    - name: Resolve the auth token — the recipe's token_var, else the onboarded per-host convention
+      # TWO names are tried because the repo has always had two, and they never met.
+      #
+      # The recipe declares the var it READS (`token_var`, e.g. `fortios_api_token`), and
+      # backends/api/backend.yml says "the token's hostvar is the recipe's token_var (resolved by the
+      # planner)". Nothing ever resolved it: service/onboard.py builds `backend_params` with only
+      # `network_os`, so `params.get("token_var")` was always None and every onboarded api host got
+      # `<host>_api_token` instead — a name this role never looked up. paths.py:35 defines RECIPES_DIR and
+      # no Python reads it. So the documented design was never implemented, and the edge-firewall check has
+      # been unable to authenticate for as long as the class has existed.
+      #
+      # `default=''` is load-bearing. ansible/plugins/lookup/vars.py raises AnsibleUndefinedVariable for a
+      # missing name, and this task carries `no_log: true`, so that fatal arrived CENSORED — ping.yml's
+      # block/rescue then reported a perfectly healthy device as a bare `UNREACHABLE` with nothing to go on.
+      # Live-caught 2026-07-28.
       ansible.builtin.set_fact:
-        _api_token: "{{ lookup('vars', _api_recipe.auth.token_var) if _api_recipe.auth.token_var is defined else '' }}"
+        _api_token: >-
+          {{ lookup('vars', _api_recipe.auth.token_var, default='')
+             | default(lookup('vars', inventory_hostname | replace('-', '_') ~ '_api_token', default=''), true) }}
+      when: _api_recipe.auth.token_var is defined
       no_log: true
+
+    - name: Refuse an unresolvable API credential (var NAMES only — never the value)
+      # Deliberately NOT no_log: the whole failure of the old code was being silent. `assert` reports the
+      # `that` expression, not the evaluated token, and the message names variables rather than secrets.
+      # Also catches the empty-string case peer review flagged: kontroll_sops_domain returns {} for an
+      # absent or undecryptable domain, so a lookup can succeed and still yield nothing — which would
+      # otherwise authenticate as anonymous and be indistinguishable from a credential failure.
+      ansible.builtin.assert:
+        that: _api_token | default('') | length > 0
+        fail_msg: >-
+          {{ inventory_hostname }}: no API token is in scope, so this check cannot authenticate.
+          The {{ backend_api_recipe }} recipe reads `{{ _api_recipe.auth.token_var }}`; the onboard writes
+          `{{ inventory_hostname | replace('-', '_') }}_api_token`. Neither is defined, or both are empty.
+          Define one in the host's inventory drop-in as an inline community.sops lookup into its SOPS domain.
+        success_msg: "{{ inventory_hostname }}: API token resolved"
+      when: _api_recipe.auth.token_var is defined
 
     - name: Build request headers (bearer / apikey_header)
       ansible.builtin.set_fact:
@@ -50,5 +83,26 @@
       delegate_to: localhost
       register: _api_check
       changed_when: false
-      failed_when: false
+      failed_when: false           # branch on status below — a censored `uri` fatal tells the operator nothing
       no_log: true                 # request carries the live API token
+
+    - name: Refuse unless the API actually answered successfully
+      # THE LIVENESS CHECK'S ONLY TEETH. Before this task, `_api_check` was registered with
+      # `failed_when: false` and then never read again — the file ended one line below. A 200, a 401, a 403
+      # and a refused connection were indistinguishable, so the edge-firewall check COULD NOT FAIL. It
+      # reported success against a device it had never authenticated to. That is worse than no check: a
+      # green result was actively misleading, and this is the highest-blast-radius device in the fleet.
+      #
+      # ping.yml wraps the class check in block/rescue, so failing here is how a device is correctly
+      # recorded UNREACHABLE. Only `status` and the recipe's path are surfaced — the response BODY can be
+      # device configuration and the request carried the token, so neither is safe to print. That is
+      # precisely why this is a separate task rather than dropping `no_log` on the GET.
+      ansible.builtin.fail:
+        msg: >-
+          {{ inventory_hostname }}: {{ backend_api_recipe }} liveness check FAILED —
+          HTTP {{ _api_check.status | default('no response') }} from {{ _api_recipe.check.path }}.
+          {{ 'The API rejected the credential: check that ' ~ _api_recipe.auth.token_var ~
+             ' holds a current token with read permission.'
+             if (_api_check.status | default(0)) in [401, 403]
+             else 'The device did not answer the API port — wrong address, port, or the service is down.' }}
+      when: (_api_check.status | default(0)) not in [200, 201, 204]

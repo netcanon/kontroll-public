@@ -11,6 +11,29 @@ NetConfig project.
 
 ## [Unreleased]
 
+### fix(fleet): the edge check has teeth, a fresh box can back up, and two SECURITY.md claims are true again (2026-10-09)
+
+Ported from the private instance's tine (fixed there 2026-07-29; main never got it — the 2026-10-08 review,
+finding 8):
+- `roles/backend_api/tasks/check.yml` registered its `uri` result with `failed_when: false` and never read it, so
+  a 200, a 401, a 403 and a refused connection were indistinguishable: a green check against a device it had never
+  authenticated to. It now branches on the status, separates "credential rejected" from "device never answered",
+  resolves the token under BOTH names the repo ever used (the recipe's `token_var` and the onboarded
+  `<host>_api_token`) and refuses an unresolvable or empty token by NAME, never value
+  (`tests/unit/test_backend_api_check_teeth.py`).
+- `backup-configs.yml` referenced `config_backup_dir` fifteen times but the scaffold shipped no `group_vars`, so no
+  instance created by `kontroll-init --fresh` could run it. `instance.example/inventory/group_vars/all.yml` now
+  ships the default (`tests/unit/test_capture_dir_scaffolded.py`).
+- SECURITY.md C1 claimed every secret is encrypted to two age recipients and that key loss is recoverable. Every
+  `key_groups` in the shipped `.sops.yaml` names ONE recipient and `--fresh` mints the same shape: break-glass is
+  NOT IMPLEMENTED and losing the control key is catastrophic. Recorded as **R-KEY-1**; the covering test is
+  bidirectional (`tests/unit/test_break_glass_claim_is_honest.py` reads the template's recipient count and requires
+  the doc to match either way).
+- A functional group must not pin a vendor: `tests/unit/test_group_vars_are_vendor_neutral.py` fails any
+  `group_vars` file (the scaffold's or an instance's committed overlay) that sets `ansible_network_os` or a vendor
+  connection plugin — such a group is a second, invisible dispatch seam competing with `device_role`. The scaffold
+  gains an `inventory/README.md` that teaches the rule where the old private README taught the violation.
+
 ### fix(gui): the GUI renders foreign bytes as text, never markup (C19) (2026-10-09)
 
 Ported from the private instance's tine, where it has been live since July (2026-10-08 review, finding 8). The

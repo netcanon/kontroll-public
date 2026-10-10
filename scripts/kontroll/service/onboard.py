@@ -242,7 +242,12 @@ def build_onboard_plan(collection, key, group, host, host_name=None, secrets="ne
                 hostvars[cf["maps_to"]] = "{{ kontroll_device_key_dir }}/%s.key" % cred_key
                 hostvars["kontroll_ssh_key_domain"] = secrets
         elif cf["field"] == "api_token":
-            # The token's hostvar is the recipe's token_var (per-API), defaulting to <host>_api_token.
+            # The token's hostvar. `params` only ever carries `network_os` (see the params block above), so
+            # `token_var` is NOT populated here and this resolves to the per-host convention in practice —
+            # roles/backend_api accepts that name as well as the recipe's declared `token_var`, and refuses
+            # naming both if neither is in scope. The `params` branch is kept for a backend that does declare
+            # one. Do NOT restore the old claim that the planner resolves it from the recipe: nothing reads
+            # paths.RECIPES_DIR, and believing otherwise cost a silently-broken edge-firewall check.
             tok_var = (params.get("token_var") or "%s_api_token" % cred_key)
             hostvars[tok_var] = "{{ (%s).%s }}" % (_sops, sops_key)
             creds_to_set[sops_key] = val

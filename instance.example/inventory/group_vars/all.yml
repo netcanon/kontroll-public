@@ -1,0 +1,18 @@
+# Fleet-wide defaults, scaffolded to instance/inventory/group_vars/all.yml by `kontroll-init --fresh`.
+# Keep this LEAN — anything class-specific belongs in a per-group file (edge_firewall.yml, hypervisors.yml,
+# …). One file per group; never let this become a catch-all.
+#
+# WHY THIS FILE EXISTS AT ALL: `config_backup_dir` was defined only in the repo's own tracked
+# instance/inventory/group_vars/all.yml, and instance.example/ shipped no group_vars — so every box built
+# with `kontroll-init --fresh` had it UNDEFINED, and backup-configs.yml (which references it fifteen times,
+# starting with the directory it writes captures into) could never run there. The defect was invisible
+# because the workstation checkout has the file and a scaffolded box does not. Live-caught 2026-07-28.
+#
+# Deliberately NOT moved into ansible/playbooks/group_vars/all.yml: playbook-adjacent group_vars OUTRANK
+# inventory group_vars for `all`, so putting it there would silently override any value an instance set —
+# the opposite of what an instance-configurable default should do.
+
+# Where backup-configs.yml writes pulled device configs, and the local git store it commits them into.
+# Override per instance. On a baked-code box (paths.write_root) point this somewhere writable — the
+# playbook's own tree is read-only there.
+config_backup_dir: "{{ playbook_dir }}/../backups"

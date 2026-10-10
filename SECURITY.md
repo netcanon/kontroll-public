@@ -49,10 +49,24 @@ key on the control VM, and the live secret files `instance/secrets/network.sops.
 + `proxmox.sops.yml` (SOPS/age-encrypted, committed).
 **Proves:** `tests/validate` refuses to pass if a file under `instance/secrets/`
 is not SOPS-encrypted; `.gitignore` blocks the age key.
-**Break-glass:** every secret is encrypted to **two** age recipients — the
-control-VM operational key and an **offline break-glass recovery key** (private
-half stored off-machine, never on the VM or in the repo). Either decrypts; losing
-the VM key is recoverable, not catastrophic (SETUP.md §5).
+**Break-glass — NOT IMPLEMENTED (this row previously claimed otherwise).** The
+*intended* design is two age recipients per domain: the control-VM operational
+key plus an **offline break-glass recovery key** whose private half never touches
+the VM or the repo (SETUP.md §5). **As built, every `key_groups` in the shipped
+`instance.example/.sops.yaml` names exactly ONE recipient, and `kontroll-init --fresh`
+writes an instance `.sops.yaml` naming only the newly minted control key** — correct
+in itself (an instance never inherits another's recipients), but it means no instance
+created from the template has a break-glass key unless its operator added one by hand,
+a documented manual step. Until a second recipient is added and the domains re-wrapped
+(`sops updatekeys`), **losing the control key IS catastrophic**: every device
+credential, API token and service password in that instance becomes permanently
+unreadable. This row asserted the opposite for months, which is worse than
+documenting no control at all — it invited exactly the "key loss is recoverable"
+reasoning a reclaim decision would rest on.
+An off-box *copy of the private key* is a backup, **not a break-glass recipient**: it
+shares the single point of failure rather than removing it. Tracked as **R-KEY-1** under
+[Accepted risks](#accepted-risks--known-limitations).
+
 **Pending:** the `compute` (docker SSH), `dashboards`, and `semaphore` secret files.
 
 Device passwords, API tokens, and service secrets are **never written to the
@@ -1262,7 +1276,7 @@ a tree whose `.gitignore` excludes the overlay). Design-of-record and the full s
 | Item | Risk | Accepted? | Rationale |
 |---|---|---|---|
 | Single operator, no RBAC beyond Semaphore | Anyone with control-VM access controls the fleet | Yes | Single-user homelab; Semaphore adds per-user RBAC for the UI layer in Phase 3 |
-| age key loss | Encrypted secrets become unrecoverable | Yes | Mitigated: every secret is encrypted to an offline **break-glass** second recipient, so loss of the VM key is recoverable; secrets are also low-volume and re-enterable |
+| **R-KEY-1** — age key loss | Encrypted secrets become **permanently** unrecoverable | Yes (**uncompensated**) | **Corrected 2026-07-28 — this row previously claimed the mitigation existed.** It does not: every `key_groups` in the shipped `.sops.yaml` names exactly **ONE** recipient, and `kontroll-init --fresh` mints the same shape. There is **no break-glass second recipient**, so losing the control key destroys every device credential, API token and service password in that instance. An off-box **copy of the private key** is the only fallback — a backup that shares the single point of failure rather than removing it. Secrets are low-volume and re-enterable *in principle*, but re-entering them means recovering each one from its device, and for a token-only credential (an API token) the plaintext exists nowhere else and must be reissued on the device. **Fix:** add a second offline recipient to every domain and `sops updatekeys`; until then treat the control key as irreplaceable. See [C1](#c1--secrets-encrypted-at-rest-sops--age). |
 | API rate-limit counters in-process | Counters reset on restart + are per-process (wrong if the API is ever run multi-worker / multi-replica) | Yes | One uvicorn container today (mgmt-only, single-operator); the store is a swappable seam → move to a shared backend (Redis) the moment the API scales horizontally |
 | API rate-limit `X-Forwarded-For` trust | A spoofed XFF could shift an inquiry IP bucket | Yes | mgmt-VLAN-only; any fronting proxy is operator-controlled. When SSO/proxy lands (cluster 2c), trust XFF only from the known proxy hop |
 | Private git remote holds encrypted secrets | Push exposes ciphertext | Yes | SOPS ciphertext is safe to host; the age key is never pushed |

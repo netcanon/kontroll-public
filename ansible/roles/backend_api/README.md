@@ -27,6 +27,25 @@ only in FortiOS's per-export re-encrypted secret blobs).
 Pure data, secret-free — the token is **named** (`auth.token_var`) and resolved from
 the host's SOPS-backed vars at runtime, never inlined.
 
+### Which variable actually holds the token (read this before adding a class)
+**Two names are accepted, in order:** the recipe's declared `auth.token_var`, then the
+per-host convention `<inventory_hostname with - replaced by _>_api_token`.
+
+That is not belt-and-braces — it is a correction. `backends/api/backend.yml` used to claim
+the planner resolved the recipe's `token_var` into the drop-in, and nothing ever did:
+`service/onboard.py` puts only `network_os` into `backend_params`, so its
+`params.get("token_var")` is always `None` and every onboarded api host gets the
+convention name instead. `paths.py` even defines `RECIPES_DIR` that no Python reads. The
+result was a role looking up `fortios_api_token` while the drop-in defined
+`fortigate_100e_api_token` — **so the edge-firewall check could never authenticate**, and
+because the resolve task is `no_log`, the undefined-variable fatal arrived *censored* and
+`ping.yml`'s rescue reported a healthy firewall as a bare `UNREACHABLE`.
+
+Both names are now tried, an unresolvable or **empty** token is refused up front naming
+both candidates, and the liveness result is actually evaluated (it previously used
+`failed_when: false` and was never read again, so the check could not fail at all).
+Pinned by [`tests/unit/test_backend_api_check_teeth.py`](../../../tests/unit/test_backend_api_check_teeth.py).
+
 ```yaml
 name: fortios
 port: 443
