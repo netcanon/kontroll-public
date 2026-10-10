@@ -33,7 +33,7 @@ INDEX = os.path.join(ROOT, "gui", "templates", "index.html")
 # record (collection/version/origin/depth/meta.description/…); the rest are the non-record channels that carry
 # third-party bytes today or will as this arc lands (a reconcile refusal names an attacker-chosen collection).
 # EXTEND THIS LIST when a new externally-authored field reaches the page.
-FORBIDDEN = ("rec.", "data.error", ".description", ".reason", ".detail")
+FORBIDDEN = ("rec.", "data.error", ".description", ".reason", ".detail", "h.name", ".ansible_host")
 
 # testid -> the values it paints. Each must be built with ET(, never E(.
 MUST_USE_ET = {

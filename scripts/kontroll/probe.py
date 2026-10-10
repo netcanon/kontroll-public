@@ -11,6 +11,8 @@ import logging
 import os
 import subprocess
 
+from kontroll import paths
+
 from kontroll.paths import PLUGIN_TYPES
 
 log = logging.getLogger("kontroll.probe")
@@ -60,7 +62,7 @@ def shallow_from_local(coll, version, base_path):
     needs the deep per-module doc parse — so a `module_option` rule reads as unknown-at-depth (-> 'maybe'),
     never a wrong yes/no. This is the fast path the redesigned /search uses by default; deep_probe resolves
     the deferred cells on demand. `base_path` is the ansible_collections dir that holds the collection."""
-    ns, name = coll.split(".", 1)
+    ns, name = paths.collection_fqcn(coll).split(".", 1)      # SEC-3: never an unvalidated name into a join
     cdir = os.path.join(base_path, ns, name)
     f = _facts(coll, version, "local", "shallow")
     try:
@@ -122,7 +124,7 @@ def units_in_collection(coll, base_path):
     resolved against the enumerated installed set) — this walks `base_path/ns/name`, so handing it an
     unvalidated/`..` value would read an attacker-chosen dir. service.units.service_units is that validating
     caller; do not call this with a raw request param."""
-    ns, name = coll.split(".", 1)
+    ns, name = paths.collection_fqcn(coll).split(".", 1)      # SEC-3: never an unvalidated name into a join
     cdir = os.path.join(base_path, ns, name)
     return {"collection_playbook": _playbook_names(os.path.join(cdir, "playbooks")),
             "role": _role_names(os.path.join(cdir, "roles"))}

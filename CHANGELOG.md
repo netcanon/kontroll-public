@@ -11,6 +11,20 @@ NetConfig project.
 
 ## [Unreleased]
 
+### fix(service): every request field that becomes a path or an inventory key is a closed charset, and repository writes are confined (2026-10-09)
+
+The onboard planner validated only the collection's installed-ness; `key`, `group`, `host`, `host_name` and
+`secrets` were bare strings joined into `modules/<key>/`, `onboarded-<key>.yml` and
+`ansible/secrets/<domain>.sops.yml` and rendered into YAML, and the Fleet index painted host names through
+`innerHTML` (the 2026-10-08 review, finding 1; CodeQL's 45 `py/path-injection` alerts are this one class of
+join). New `kontroll.paths` validators — `component()`, `collection_fqcn()`, `hostname()` — run at the service
+seam (`build_onboard_plan`, before anything is read, probed or written) and again at every join (`module_file`,
+the drop-in inventory path, the secret-domain path, the actuation unit path, the probe's collection-dir walk);
+`paths.confined()` resolves every drop-in write under `write_root()` and refuses anything that climbs out. The
+API answers **422**, the GUI **400**, without echoing the value. The Fleet index paints host names and
+addresses as text. New SECURITY.md **C22**; `tests/unit/test_request_boundary.py` plus a parametrised API pin
+that git is never touched on a refused request.
+
 ### fix(promote): the pin-conflict gate runs trusted code over the proposal's data, never the proposal's code (2026-10-09)
 
 FIX-M9 extracted `proposed/<run_id>` and executed ITS `scripts/gen-requirements.py` — unreviewed code from the very
@@ -64,6 +78,7 @@ play now reads the operator override through a private name; `-e prometheus_url=
 whose value names itself, with a planted-shape proof that the detector fires, so the next one fails in CI rather
 than on a box. (`set_fact` self-defaults are deliberately out of scope: they template against the pre-task
 context, which is what makes them work.)
+
 
 ### fix(gitio): the promote is a compare-and-swap, never a check-then-set (2026-10-09)
 

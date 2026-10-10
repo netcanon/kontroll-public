@@ -184,7 +184,7 @@ def apply_actuation_plan(plan):
     tree; the route owns run_id + the push). REGISTERED in `WRITE_VERBS` (tests/unit/_readonly_pins.py) so
     `assert_read_only` + the #134 completeness gate stay exhaustive — a read view that calls this trips the pin."""
     rel = plan["vars_rel"]
-    abspath = os.path.join(paths.write_root(), rel)
+    abspath = paths.confined(rel)                          # never outside write_root() (finding 1)
     content = plan["vars_content"]
     changed = True
     if os.path.exists(abspath):
@@ -272,7 +272,7 @@ def _unit_rel(key):
     """The repo-RELATIVE path of unit `key`'s DESCRIPTOR file — the instance-overlay write target
     (`instance/actuation/<key>/unit.yml` when the overlay is active). `overlay_target` so the write path and the
     git-add/staged path AGREE (the C10 staging invariant, paths.py). PURE."""
-    return paths.overlay_target("actuation/%s/unit.yml" % key)
+    return paths.overlay_target("actuation/%s/unit.yml" % paths.component(key, "unit key"))
 
 
 def _render_unit_file(doc):
@@ -380,7 +380,7 @@ def apply_create_unit(plan):
     refuses an EXISTING key, so this only ever creates a new descriptor (never silently overwrites a configured
     unit)."""
     rel = plan["unit_rel"]
-    abspath = os.path.join(paths.write_root(), rel)
+    abspath = paths.confined(rel)                          # never outside write_root() (finding 1)
     content = plan["unit_content"]
     changed = True
     if os.path.exists(abspath):

@@ -88,7 +88,7 @@ def _write_new(rel_path, content, banner, overwrite=False):
     """Write a NEW drop-in file. Idempotent: identical content -> noop; a different existing file raises
     WriteConflict (never clobber operator edits) UNLESS `overwrite=True` — the GUI's explicit 'Overwrite' escape
     hatch, the operator's deliberate choice to replace the existing file."""
-    path = os.path.join(paths.write_root(), rel_path)
+    path = paths.confined(rel_path)                        # never outside write_root() (finding 1)
     body = banner + content
     if os.path.exists(path):
         with open(path, encoding="utf-8") as fh:
@@ -140,7 +140,7 @@ def write_inventory_host(rel_path, group, hosts, banner, overwrite=False):
     is a no-op (returns False). The key-level overwrite is now visible through `owned_merge`'s collisions (G3) —
     the host-var reconfigure surface (service/hostvars) consumes them; onboard's additive add ignores them."""
     import yaml
-    path = os.path.join(paths.write_root(), rel_path)
+    path = paths.confined(rel_path)                        # never outside write_root() (finding 1)
     doc = {group: {"hosts": dict(hosts)}}                     # the default (a fresh drop-in, or an overwrite-replace)
     if os.path.exists(path):
         with open(path, encoding="utf-8") as fh:
@@ -166,7 +166,7 @@ def sops_set(domain, key, value):
     """Encrypt a single credential into a SOPS domain file, in place (on a host
     holding a valid age key). The value is namespaced per host so onboarded hosts
     never collide on a shared cred. Returns True on success."""
-    path = paths.resolve("ansible/secrets/%s.sops.yml" % domain)
+    path = paths.resolve("ansible/secrets/%s.sops.yml" % paths.component(domain, "secret domain"))
     if not os.path.exists(path):
         print("  ! secrets domain %s.sops.yml missing — create it first (sops)" % domain)
         return False
@@ -177,7 +177,7 @@ def sops_set(domain, key, value):
 
 
 def _domain_path(domain):
-    return paths.resolve("ansible/secrets/%s.sops.yml" % domain)
+    return paths.resolve("ansible/secrets/%s.sops.yml" % paths.component(domain, "secret domain"))
 
 
 def sops_decrypt_domain(domain):
@@ -206,7 +206,7 @@ def sops_write_domain(domain, mapping):
     # WRITE/CREATE target: overlay_target (dir-active) so a NEW domain lands in the ACTIVE overlay, and the
     # --filename-override MATCHES it so sops applies the right .sops.yaml creation_rule (recipients). _domain_path
     # (resolve, file-existence) is for the decrypt READ; the write must agree with the staged git-add path.
-    rel = paths.overlay_target("ansible/secrets/%s.sops.yml" % domain)
+    rel = paths.overlay_target("ansible/secrets/%s.sops.yml" % paths.component(domain, "secret domain"))
     path = os.path.join(paths.write_root(), rel)
     import yaml
     plaintext = yaml.safe_dump(mapping, sort_keys=True, allow_unicode=True).encode()

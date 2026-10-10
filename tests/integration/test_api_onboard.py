@@ -181,3 +181,19 @@ def test_onboard_partial_auth_set_is_a_422_not_a_500(onb, monkeypatch):
     r = onb.client.post("/onboard", headers=AUTH, json=_body(collection="community.proxmox", key="proxmox"))
     assert r.status_code == 422
     assert "incomplete credential set" in r.json()["detail"]
+
+
+@pytest.mark.parametrize("field,value", [
+    ("key", "../../etc"), ("key", "edge/os"), ("key", "Edge"), ("group", "edge router"), ("group", "x;y"),
+    ("host", "192.0.2.50; rm -rf /"), ("host", "a..b"), ("host_name", "../h"), ("secrets", "../network"),
+    ("collection", "../acme.edgeos"), ("collection", "acme/edgeos"),
+])
+def test_onboard_refuses_a_path_shaped_field_before_any_write(onb, field, value):
+    """THE REQUEST BOUNDARY (2026-10-08 review, finding 1). A `key`/`group`/`host`/`host_name`/`secrets`/`collection`
+    carrying a separator, a `..`, a space or a metacharacter is refused 422 by the planner's closed-charset validators
+    BEFORE the probe runs or anything is written — git is never touched. Guards the bare-string era, when only the
+    collection's installed-ness was checked and `key` went straight into `modules/<key>/`."""
+    r = onb.client.post("/onboard", headers=AUTH, json=_body(**{field: value}))
+    assert r.status_code == 422, (field, value, r.status_code, r.text)
+    assert field in r.json()["detail"] or field.replace("_", " ") in r.json()["detail"] or "collection" in r.json()["detail"]
+    assert onb.calls == [], "a refused request must never reach git"

@@ -13,7 +13,9 @@ immutable code + data registries are read from the baked ROOT, while every write
 targets the thin propose clone (docs/reviews/2026-06-29-phase-b-baked-code/99-synthesis.md §0).
 Lifted from the old galaxy.py module-level constants, now in one place every module imports.
 """
+import ipaddress
 import os
+import re
 
 # scripts/kontroll/paths.py -> scripts/kontroll -> scripts -> repo root (three dirnames).
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -157,6 +159,69 @@ def overlay_target(rel):
     return rel.replace(os.sep, "/")
 
 
+# --- Request-boundary validators (2026-10-08 review, finding 1; CodeQL py/path-injection) --------------------------
+# Every request field that becomes a PATH COMPONENT (a device-class key, an actuation unit key, a secret domain, an
+# inventory group) or an INVENTORY KEY (a host name, an address) passes one of these at the service seam, and every
+# repo-relative write target passes confined(). A closed charset, not a denylist: a value that passes cannot carry a
+# separator, a `..`, a NUL, a newline or a YAML/shell metacharacter, so the joins need no per-site check — and
+# CodeQL's "this path depends on a user-provided value" is answered once, here. Each raises ValueError naming the
+# FIELD (the value only as a short repr): the API maps it to 422 and the GUI to 400, both before any write.
+_COMPONENT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_FQCN_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}\.[a-z][a-z0-9_]{0,63}$")
+_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+_HOSTNAME_RE = re.compile(r"^%s(?:\.%s)*\.?$" % (_LABEL, _LABEL))
+
+
+def _short(value):
+    r = repr(value)
+    return r if len(r) <= 40 else r[:37] + "..."
+
+
+def component(value, what="name"):
+    """ONE path component from a request field — a device-class key, a unit key, a secret domain, an inventory
+    group: lowercase letters, digits, `_` and `-`; 1–64 chars; starting with a letter or digit. Returns the value."""
+    if not isinstance(value, str) or not _COMPONENT_RE.match(value):
+        raise ValueError("%s %s is not a valid name: 1-64 chars of [a-z0-9_-], starting with a letter or digit"
+                         % (what, _short(value)))
+    return value
+
+
+def collection_fqcn(value, what="collection"):
+    """An Ansible collection name, exactly `namespace.name` in Galaxy's charset (lowercase, digits, `_`) — the form
+    every `ansible_collections/<ns>/<name>` join and every `ansible-doc` / `ansible-galaxy` argv word expects."""
+    if not isinstance(value, str) or not _FQCN_RE.match(value):
+        raise ValueError("%s %s is not a collection name (expected namespace.name, lowercase)" % (what, _short(value)))
+    return value
+
+
+def hostname(value, what="host"):
+    """A device address or inventory host name: an IPv4/IPv6 literal, or an RFC-1123 hostname (labels of letters,
+    digits and hyphens joined by single dots, at most 253 chars). Content rather than a path, but it becomes an
+    inventory KEY and is rendered into YAML, so the closed charset keeps `..`, separators and metacharacters out."""
+    if isinstance(value, str) and value:
+        try:
+            ipaddress.ip_address(value)
+            return value
+        except ValueError:
+            pass
+        if len(value) <= 253 and _HOSTNAME_RE.match(value):
+            return value
+    raise ValueError("%s %s is not an address or RFC-1123 hostname" % (what, _short(value)))
+
+
+def confined(rel_path):
+    """The ABSOLUTE write target for a repo-relative path, or ValueError if it would land outside write_root(): an
+    absolute path, a `..` that climbs out, a NUL, or a symlink that points out. The last check before every drop-in
+    write (gitio._write_new / write_inventory_host, the actuation descriptor + values writers)."""
+    if not isinstance(rel_path, str) or not rel_path or os.path.isabs(rel_path) or "\x00" in rel_path:
+        raise ValueError("refusing to write outside the repository: %s" % _short(rel_path))
+    root = os.path.realpath(write_root())
+    full = os.path.realpath(os.path.join(root, rel_path))
+    if full != root and not full.startswith(root + os.sep):
+        raise ValueError("refusing to write outside the repository: %s" % _short(rel_path))
+    return full
+
+
 # --- The modules registry overlay (Phase-B Fork B, synthesis §2) -------------------------------------------------
 # `modules/` is the ONE registry that grows with operator action (onboarding a new device-class) and is EDITED in
 # place (reconfigure of a shipped class's identity/telemetry/logging/backup blocks). So unlike the other read-only
@@ -174,6 +239,7 @@ def module_file(key):
     the baked ROOT, so an operator-onboarded/reconfigured class in the propose clone is read in preference to a
     pristine SHIPPED class baked at ROOT. The runtime-reader analogue of resolve() for the modules registry. With
     write_root()==ROOT this == os.path.join(ROOT, "modules", key, "module.yml") (identity)."""
+    component(key, "device-class key")                       # the request boundary: no separator ever reaches the join
     clone = os.path.join(write_root(), "modules", key, "module.yml")
     if os.path.exists(clone):
         return clone
@@ -188,7 +254,11 @@ def module_keys():
     keys = set()
     for base in (os.path.join(ROOT, "modules"), os.path.join(write_root(), "modules")):
         if os.path.isdir(base):
-            keys.update(os.listdir(base))
+            for name in os.listdir(base):
+                # a class is a DIRECTORY whose name is a valid key — README.md, _core.yml and a stray file are not
+                # classes, and module_file() now refuses a non-key, so the enumerator must not hand it one (C22)
+                if os.path.isdir(os.path.join(base, name)) and _COMPONENT_RE.match(name):
+                    keys.add(name)
     return sorted(keys)
 
 
