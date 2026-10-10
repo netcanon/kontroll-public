@@ -1,5 +1,5 @@
 """Text pins on the CI workflows the public split changed (publish target, the zizmor SARIF seat, Dependabot
-strategy, third-party action pins).
+strategy, third-party action pins) and on the gate wiring (the `homelab*` push trigger, the Windows shim).
 
 WHY — a workflow file has no unit test of its own, so a behaviour the 2026-10-09 review fixed can quietly come back
 in a later edit: the publish target hard-coded to one org again, the SARIF seat scanning `.github/` (every alert URI
@@ -93,3 +93,45 @@ def test_third_party_actions_are_sha_pinned():
             if not re.search(r"@[0-9a-f]{40}\s+#\s*v\d", line):
                 bad.append("%s:%d %s" % (fn, n, ref))
     assert bad == [], "third-party actions must be SHA-pinned with a version comment: %s" % bad
+
+
+# --- the gate wiring (2026-10-08 review, finding 18 / N18) ---------------------------------------------------
+
+GATING_WORKFLOWS = ("ci.yml", "pii-guard.yml", "security.yml", "zizmor.yml")
+
+
+def _triggers(fn):
+    doc = yaml.safe_load(_read(os.path.join(".github", "workflows", fn)))
+    return doc.get("on") or doc.get(True)   # PyYAML reads the bare key `on` as the boolean True
+
+
+def test_gating_workflows_run_on_pushes_to_main_and_the_homelab_tine():
+    """Every gating workflow runs on a push to `main` AND to any `homelab*` branch (plus pull requests). The
+    permissive `homelab` tine is a long-lived branch that is never merged to `main`; for months its only CI came
+    from a never-merge pull request against `main`, which on a repository without branch protection is one mis-click
+    from landing it (2026-10-08 review, finding 18 / N18). The push trigger gates the tine with no PR at all; a public
+    repository has no `homelab*` branch, so the entry is inert there. Guards the trigger being tidied back to main."""
+    for fn in GATING_WORKFLOWS:
+        trig = _triggers(fn)
+        branches = (trig.get("push") or {}).get("branches") or []
+        assert "main" in branches and "homelab*" in branches, "%s push.branches = %r" % (fn, branches)
+        assert "pull_request" in trig, fn
+
+
+def test_publish_workflow_never_runs_on_a_branch_push():
+    """publish-images.yml pushes to the package namespace; it runs on `v*` tags and manual dispatch ONLY — never on a
+    branch push, so gating the tine on push can never publish an image from it. Guards a `branches:` entry creeping
+    into the one workflow with `packages: write`."""
+    push = _triggers("publish-images.yml").get("push") or {}
+    assert "branches" not in push and push.get("tags") == ["v*"], push
+
+
+def test_validate_ps1_is_a_shim_over_validate_sh():
+    """tests/validate.ps1 must delegate to tests/validate.sh (through Git for Windows' bash) and define no gate step
+    of its own. The hand-maintained Windows runner had drifted to 12 of the gate's 30+ steps — none of the
+    `gen-*.py --check` staleness gates, no identifier-leak gate — so a Windows contributor could pass locally and
+    fail CI (2026-10-08 review, finding 18). It must also propagate the gate's exit code, or a red gate shows green."""
+    ps1 = _read("tests/validate.ps1")
+    assert "tests/validate.sh" in ps1
+    assert not re.search(r'^\s*Step\s+"', ps1, re.M), "validate.ps1 must not define gate steps of its own"
+    assert "$LASTEXITCODE" in ps1, "the gate's exit code must be propagated"

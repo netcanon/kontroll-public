@@ -28,7 +28,7 @@ test-doc + data-testid + test-after-change discipline is
 
 ```powershell
 # Windows workstation (runs whatever tools are installed; skips the rest)
-pwsh tests/validate.ps1
+pwsh tests/validate.ps1                 # Windows: a shim over validate.sh (Git for Windows' bash) — the same gate
 ```
 ```bash
 # Linux control VM / CI (use --strict so missing tools fail the run)

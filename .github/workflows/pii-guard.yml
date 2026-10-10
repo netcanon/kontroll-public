@@ -11,7 +11,7 @@ name: PII guard
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, 'homelab*']
 
 # Read-only: this job only inspects the checked-out tree.
 permissions:
