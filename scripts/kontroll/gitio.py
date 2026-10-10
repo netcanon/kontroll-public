@@ -57,6 +57,13 @@ def _run(cmd, cwd=None, quiet_args=0):
     return subprocess.run(cmd, cwd=cwd or paths.write_root()).returncode
 
 
+def _out(cmd, cwd=None):
+    """The READ twin of _run: capture one value (a ref's object id) for promote_ref's compare-and-swap. Reads
+    only — every write still goes through _run, the one seam the tests monkeypatch and the read-only pins watch."""
+    p = subprocess.run(cmd, cwd=cwd or paths.write_root(), capture_output=True, text=True)
+    return p.returncode, p.stdout.strip()
+
+
 def offsite_remote_exists():
     """True iff this repo has an `origin` remote pointing OFFSITE — a real backup target, NOT a local `file://`
     path / the on-box canonical. The onboarding GUI gates the 'also push origin (offsite backup)' checkbox on
@@ -359,10 +366,21 @@ def promote_ref(run_id, cwd=None):
     approval task) against the canonical — the network service can only CREATE proposals, never run this. Goes
     through _run (the one monkeypatched seam), so the FF-gate is testable offline."""
     ref = "refs/heads/proposed/%s" % run_id
+    # COMPARE-AND-SWAP, not check-then-set. Read the object id `main` has NOW, run the fast-forward check against
+    # it, then hand that id to `update-ref` as the old-value operand: git refuses the update if `main` moved in
+    # between ("is at X but expected Y"). Without it, two promotes racing (the Semaphore task and a CLI run, or
+    # two CLI runs) let the second one overwrite the first with a ref that is no longer a fast-forward of what it
+    # replaces — a promote lost silently while both report success (2026-10-08 review, finding 9).
+    rc, main_was = _out(["git", "rev-parse", "--verify", "--quiet", "refs/heads/main"], cwd=cwd)
+    if rc != 0 or not main_was:
+        print("  ! refuse: cannot read refs/heads/main (no canonical main to fast-forward) — nothing promoted")
+        return False
     if _run(["git", "merge-base", "--is-ancestor", "refs/heads/main", ref], cwd=cwd) != 0:
         print("  ! refuse: proposed/%s is not a fast-forward of main (re-propose against current main)" % run_id)
         return False
-    if _run(["git", "update-ref", "refs/heads/main", ref], cwd=cwd) != 0:
+    if _run(["git", "update-ref", "refs/heads/main", ref, main_was], cwd=cwd) != 0:
+        print("  ! refuse: main moved while promoting proposed/%s (another promote landed first) — "
+              "re-run to re-check it against the new main" % run_id)
         return False
     if _run(["git", "update-ref", "-d", ref], cwd=cwd) != 0:   # best-effort: main is already advanced
         print("  ~ note: promoted main, but could not delete proposed/%s (stale ref left behind)" % run_id)
