@@ -42,13 +42,13 @@ def _drop_rel(key):
     SAME file `_find_host` read via `paths.resolve` (= ROOT + overlay_rel) — a host-var EDIT reads, writes, and
     stages ONE file. (Onboard's `overlay_target` is for NEW files; this surface only edits an existing drop-in, so
     read==write==staged — the propose-read and the apply-write can't diverge onto two inventory files.)"""
-    return paths.overlay_rel("ansible/inventory/onboarded-%s.yml" % key)
+    return paths.overlay_rel("ansible/inventory/onboarded-%s.yml" % paths.component(key, "device-class key"))
 
 
 def _find_host(key, host):
     """`(text, group, host_vars)` for `host` in class `key`'s drop-in, or `(text|None, None, None)` if the file
     is missing / not banner-owned / the host is absent. PURE read via paths.resolve (overlay-aware)."""
-    path = paths.resolve("ansible/inventory/onboarded-%s.yml" % key)
+    path = paths.resolve("ansible/inventory/onboarded-%s.yml" % paths.component(key, "device-class key"))
     if not os.path.exists(path):
         return None, None, None
     try:

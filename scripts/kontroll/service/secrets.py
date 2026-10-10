@@ -36,7 +36,7 @@ _SAFE_EXEC = re.compile(r"\A[A-Za-z0-9 ._/-]+\Z")      # a grafana-cli subcomman
 def _existing_keys(domain):
     """Top-level NON-`sops` keys already present in instance/secrets/<domain>.sops.yml (NAMES only — the file
     is encrypted, the values are ciphertext; we never decrypt here). Empty set if the domain file is absent."""
-    path = paths.resolve("ansible/secrets/%s.sops.yml" % domain)
+    path = paths.resolve("ansible/secrets/%s.sops.yml" % paths.component(domain, "secret domain"))
     if not os.path.exists(path):
         return set()
     try:
@@ -100,7 +100,7 @@ def build_secret_plan(domain, values, regenerate=None):
             source = "skipped"
         view.append({"key": key, "label": f.get("label", key), "source": source})
     return {"error": None, "domain": domain, "to_set": to_set, "view": view,
-            "path": paths.overlay_target("ansible/secrets/%s.sops.yml" % domain)}
+            "path": paths.overlay_target("ansible/secrets/%s.sops.yml" % paths.component(domain, "secret domain"))}
 
 
 def apply_secret_plan(plan):

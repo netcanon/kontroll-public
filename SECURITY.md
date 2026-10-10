@@ -1287,6 +1287,29 @@ off once `instance/` exists), the PII-guard workflow's path assertion (no tracke
 a tree whose `.gitignore` excludes the overlay). Design-of-record and the full sweep:
 `docs/reviews/2026-10-08-public-split-pii-sweep/`; operator runbook `docs/public-split.md`.
 
+### C22 — Request fields are closed charsets; repository writes are confined  ✔ implemented (2026-10-09)
+
+**Threat:** the onboard/reconfigure/actuation requests carry fields that become PATH COMPONENTS
+(`modules/<key>/module.yml`, `onboarded-<key>.yml`, `ansible/secrets/<domain>.sops.yml`,
+`actuation/<key>/unit.yml`) or INVENTORY KEYS (a host name, an address) — and until 2026-10-09 the planner
+validated only the collection's installed-ness. `key`, `group`, `host`, `host_name` and `secrets` were bare
+strings joined into paths and rendered into YAML (2026-10-08 review, finding 1; CodeQL `py/path-injection`,
+45 alerts on the same class of join).
+**Implements:** `kontroll.paths.component()` (a device-class key, unit key, secret domain or inventory group:
+`[a-z0-9][a-z0-9_-]{0,63}`), `paths.collection_fqcn()` (exactly `namespace.name`), `paths.hostname()` (an
+IP literal or an RFC-1123 hostname) — called at the service seam (`build_onboard_plan`, before anything is
+read, probed or written) AND at every join (`paths.module_file`, the inventory drop-in path, the secret-domain
+path, the unit path, the probe's `ansible_collections/<ns>/<name>` walk), so a value that passed the seam is
+re-checked where it is used and a new caller cannot forget. Every repository write goes through
+`paths.confined()`, which resolves the target under `write_root()` and refuses an absolute path, a `..` that
+climbs out, a NUL or a symlink that points out. The API maps the `ValueError` to **422**, the GUI to **400**,
+both before any write and without echoing the value. The Fleet index paints host names and addresses with
+`ET()` (text), the C19 rule applied to inventory bytes.
+**Proves:** `tests/unit/test_request_boundary.py` (every validator's accept/reject table including `..`,
+separators, NUL, newline, a 65th char and a 254-char hostname; `confined()` against `../`, absolute and
+climbing paths; the planner refusing before the probe is reached), the API parametrised 422 pin in
+`tests/integration/test_api_onboard.py` (git never touched), the paint gate's `h.name`/`.ansible_host` tokens.
+
 ---
 ## Accepted risks / known limitations
 

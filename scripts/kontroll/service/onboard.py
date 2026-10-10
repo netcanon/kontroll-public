@@ -72,6 +72,20 @@ def build_onboard_plan(collection, key, group, host, host_name=None, secrets="ne
     (the generic union — a backend that declares no shape), or "deep" (F1 TIER-B — the EXACT fields from the
     connecting module's argument_spec, when `deep` and the collection is installed). Values flow through
     creds_to_set in memory only."""
+    # REQUEST BOUNDARY (2026-10-08 review, finding 1). Every field that becomes a path component, an inventory key
+    # or an argv word is a closed charset BEFORE anything is read, probed or written — the API maps the ValueError
+    # to 422 and the GUI to 400, both pre-write. The planner used to validate only `collection`'s installed-ness;
+    # `key`, `group`, `host`, `host_name` and `secrets` were bare strings joined into modules/<key>/,
+    # onboarded-<key>.yml and ansible/secrets/<domain>.sops.yml.
+    paths.collection_fqcn(collection)
+    paths.component(key, "device-class key")
+    paths.component(group, "inventory group")
+    paths.hostname(host, "host")
+    if host_name is not None:
+        paths.hostname(host_name, "host_name")
+    paths.component(secrets, "secrets domain")
+    if backend is not None:
+        paths.component(backend, "backend")
     backends = backends if backends is not None else catalog.load_backends()
     vectors = vectors if vectors is not None else catalog.load_vectors()
     f = probe.deep_probe(collection)
