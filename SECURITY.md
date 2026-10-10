@@ -868,7 +868,10 @@ gate (`vector validate` over the config.d tree where the CLI is present).
 **Hardened (the promotion blocker):** Vector runs **NON-ROOT** (`user: "10002:10002"`, a uid distinct from Loki's
 10001 — `test_vector_uid_distinct_from_loki`) and holds **NO raw Docker socket** — its `docker_logs` source talks to
 a `docker-socket-proxy` (GET/HEAD-only, `POST=0`) that alone mounts `/var/run/docker.sock`, so a Vector RCE cannot
-`POST /containers/create` = host root. The proxy's container root fs is intentionally **`read_only:false`** — the
+`POST /containers/create` = host root. The proxy sits on its **own `internal` network** (`kontroll-socket`) with
+Vector as its only peer: `GET /containers/<id>/json` returns a container's `Config.Env`, so on the shared stack
+network any container could have read every peer's secrets through it (2026-10-08 review, finding 4;
+`test_compose_logging.py`). The proxy's container root fs is intentionally **`read_only:false`** — the
 pinned `tecnativa/docker-socket-proxy:0.3.0` renders its shipped `haproxy.cfg.template` into `haproxy.cfg` in its
 own root fs at start, so `read_only:true` crash-loops it on every deploy (a committed-config bug an uncommitted
 workaround masked until the VM-148 clean-redeploy detonated it); the real controls — the `POST=0` GET/HEAD filter,

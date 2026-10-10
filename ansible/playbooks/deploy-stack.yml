@@ -875,6 +875,17 @@
         name: kontroll
         state: present
 
+    - name: Ensure the socket-proxy's private network exists (internal — Vector is its only peer)
+      # docker-socket-proxy answers `GET /containers/<id>/json`, which returns Config.Env: every secret the stack
+      # passes a container by environment. On the shared network any container could have asked (2026-10-08 review,
+      # finding 4). The proxy lives on this network alone and Vector joins it as the sole consumer; `internal`
+      # because nothing on it needs egress. Created unconditionally (cheap, idempotent) so an `up` that names Vector
+      # never fails on a missing external network.
+      community.docker.docker_network:
+        name: kontroll-socket
+        internal: true
+        state: present
+
     - name: Provision the API host artifacts (read-only deploy — RO content clone + self-signed TLS)
       when: "'api' in stack_services"
       block:

@@ -120,8 +120,12 @@ services:
     # would add another mgmt-bound publish here the same way.
     networks:
       - kontroll
+      - kontroll-socket    # the docker-socket-proxy's private network — Vector is its ONLY peer (finding 4)
 
 networks:
   kontroll:
     external: true
     name: kontroll
+  kontroll-socket:
+    external: true
+    name: kontroll-socket
