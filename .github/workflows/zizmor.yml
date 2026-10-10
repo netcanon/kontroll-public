@@ -26,7 +26,7 @@ on:
       - '.github/dependabot.yml'
       - '.github/zizmor.yml'
   push:
-    branches: [main]
+    branches: [main, 'homelab*']
     paths:
       - '.github/workflows/**'
       - '.github/dependabot.yml'

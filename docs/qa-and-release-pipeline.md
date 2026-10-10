@@ -138,7 +138,13 @@ instance repository (docs/public-split.md). Every job's `runs-on` is
 public repo — a public repository must never run on a self-hosted runner, a fork PR would execute
 on it), the org's self-hosted runners where the private instance repo sets the variable.
 
-### `ci.yml` — on `[pull_request, push:{branches:[main]}]`, concurrency cancel-in-progress
+The four gating workflows run on every push to `main` **and to any `homelab*` branch**: the private
+instance repository's permissive tine is a long-lived branch that is never merged to `main`, so it is
+gated on push rather than through a pull request (a PR against `main` on a repository without branch
+protection is one mis-click from a merge). A public repository has no such branch; the entry is inert.
+`publish-images.yml` runs on `v*` tags and dispatch only — never on a branch push.
+
+### `ci.yml` — on `[pull_request, push:{branches:[main, homelab*]}]`, concurrency cancel-in-progress
 - **validate**: `tests/validate.sh --strict` — the SAME gate as local + the VM, with every tool it
   can run installed in the job (sha256-pinned sops, gitleaks, promtool, vector; pinned yamllint /
   ansible-core / ansible-lint), so a missing tool is a failure, never a silent skip. Covers yamllint,
@@ -154,15 +160,15 @@ on it), the org's self-hosted runners where the private instance repo sets the v
   the minimal stack, curl the API/GUI health, one onboard dry-run) — the layer the fault ledger
   says would have caught most live faults.
 
-### `pii-guard.yml` — on `[pull_request, push:{branches:[main]}]`
+### `pii-guard.yml` — on `[pull_request, push:{branches:[main, homelab*]}]`
 - `tests/_leak_guard.py --tree` (structural + instance-token layers; the private list arrives as the
   repository secret `KONTROLL_LEAK_TOKENS`) + the "no tracked `instance/` in a public tree" path
   assertion. Always GitHub-hosted. The required check *No leaked personal identifiers* (SECURITY.md C21).
 
-### `security.yml` — on `[pull_request, push, schedule: weekly]`
+### `security.yml` — on `[pull_request, push:{branches:[main, homelab*]}, schedule: weekly]`
 - gitleaks (full history, 8.30.x) · pip-audit (gui · api · tests deps). ⬜ bandit · trivy (images).
 
-### `zizmor.yml` — workflow-security lint, advisory (log-only; plus a SARIF upload to code scanning where the repository variable `KONTROLL_CODE_SCANNING=true`).
+### `zizmor.yml` — on `[pull_request, push:{branches:[main, homelab*]}]` for `.github/` paths + weekly; workflow-security lint, advisory (log-only; plus a SARIF upload to code scanning where the repository variable `KONTROLL_CODE_SCANNING=true`).
 
 ### `publish-images.yml` — on `[push: tags 'v*']` + `workflow_dispatch` (see §6)
 

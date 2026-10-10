@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# L1 (lint) + L2 (syntax/config-validate) gate for kontroll — bash mirror of
-# validate.ps1 for the Linux control VM / CI. Runs each validator whose tool is
+# L1 (lint) + L2 (syntax/config-validate) gate for kontroll — THE gate, one file: CI runs
+# it with --strict, the control VM runs it, and Windows runs it through tests/validate.ps1
+# (a shim over this file via Git for Windows' bash). Runs each validator whose tool is
 # present; any present tool that fails fails the run (fail-closed). With --strict
 # (CI), a missing tool is also a failure.
 set -uo pipefail
@@ -158,7 +159,7 @@ if [ -n "$PY" ]; then step gen-secret-env 0 "$PY" scripts/gen-secret-env.py --ch
 # marked block inside instance.example/dashboards/homepage/services.yaml. Example-driven (F3): --check validates
 # the PUBLIC example span (TEST-NET only, which ships); the live instance/ span is regenerated at deploy. The
 # pytest twin (tests/unit/test_gen_homepage.py) additionally proves the span agrees with the GUI editor + is
-# secret/topology-free, and covers Windows (validate.ps1 runs no gen-* steps).
+# secret/topology-free, and covers a host whose gate SKIPs the tool-dependent steps.
 if [ -n "$PY" ]; then step gen-homepage 0 "$PY" scripts/gen-homepage.py --check; fi
 
 # every actuation/<key>/unit.yml app-store unit (R2) is VALID: known schema, closed kind enum, key==dir, EXACT '=='

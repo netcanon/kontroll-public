@@ -11,6 +11,18 @@ NetConfig project.
 
 ## [Unreleased]
 
+### chore(ci,tests): the permissive tine is gated on push, and Windows runs the one gate (2026-10-09)
+
+Two drifts the 2026-10-08 full review found (its finding 18 and ruling N18). The `homelab*` branches now trigger
+the four gating workflows (`ci`, `pii-guard`, `security`, `zizmor`) on push, exactly like `main`: the private
+instance repository's permissive tine had only ever been gated through a never-merge pull request against
+`main`, one mis-click from landing it on a repository with no branch protection. The entry is inert on a public
+repository, which has no such branch, and `publish-images.yml` still runs on `v*` tags only. And
+`tests/validate.ps1` is now a shim over `tests/validate.sh` through Git for Windows' bash: the Windows runner had
+drifted to 12 of the gate's 30+ steps (no `gen-*.py --check` staleness gate, no identifier-leak gate), so a
+contributor could pass locally and fail CI. Measured on a Windows workstation the shim runs 29 steps and SKIPs 7
+for Linux-only tools; `--strict` keeps its CI meaning. Both pinned in `tests/unit/test_ci_workflows.py`.
+
 ### chore(docker): `images.lock.yml` re-pinned to the public owner's packages (follow-up F10) (2026-10-09)
 
 The lock pinned `ghcr.io/netcanon-dev/kontroll-*` at `v0.1.1` — private packages whose baked tree predates the
