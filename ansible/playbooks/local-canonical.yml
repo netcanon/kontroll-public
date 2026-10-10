@@ -216,27 +216,36 @@
     # Where the canonical stands relative to the worktree. The mirror is a FAST-FORWARD-ONLY push, and the two can
     # legitimately diverge the moment propose-then-promote is in use: a promote advances canonical `main` with a
     # commit the operator's worktree has never seen. Ask first, so the failure below can say something true.
-    - name: Fetch the canonical's current main (read-only)  # noqa: command-instead-of-module
-      # Remote-tracking refs do not exist until something fetches them, so without this the check below would
-      # always see a missing ref and never fire. Read-only: fetch writes only refs/remotes/, never the worktree.
+    - name: Read the canonical's current main — WITHOUT writing to the worktree  # noqa: command-instead-of-module
+      # `ls-remote`, deliberately NOT `fetch`. This play runs as ROOT inside the installer container, and a fetch
+      # writes `.git/FETCH_HEAD` into the OPERATOR's worktree — root-owned. The operator's own next `git fetch`
+      # then dies with "cannot open '.git/FETCH_HEAD': Permission denied", i.e. the remedy this task's own error
+      # message tells them to run. (Live-caught 2026-07-28: the first cut of this check did exactly that, and the
+      # printed remedy failed when followed verbatim.) ls-remote writes nothing anywhere.
       ansible.builtin.command:
-        cmd: "git fetch local main"
+        cmd: "git ls-remote local refs/heads/main"
         chdir: "{{ worktree }}"
-      register: _canon_fetch
+      register: _canon_ref
       changed_when: false
       failed_when: false
 
+    - name: Note the canonical's main sha (empty on a first run — no main there yet)
+      ansible.builtin.set_fact:
+        canonical_main: "{{ (_canon_ref.stdout | default('')).split()[0] | default('', true) }}"
+
     - name: Check whether the canonical has commits the worktree does not  # noqa: command-instead-of-module
-      # rc 0 = canonical main is an ancestor of HEAD (a clean fast-forward, or identical) — mirror away.
-      # rc 1 = it is NOT: the canonical holds commits this worktree lacks.
-      # rc 128 = FETCH_HEAD is absent, i.e. a first run against a canonical with no main yet — also fine to push.
+      # rc 0 = that sha is an ancestor of HEAD: a clean fast-forward (or identical) — mirror away.
+      # ANY non-zero = it is not provably an ancestor, and BOTH failure modes mean the same thing here: rc 1 is a
+      # real divergence, and rc 128 ("Not a valid object name") is the promote case — the canonical's commit was
+      # never fetched, so its objects are absent from the worktree entirely. Fail closed on both: this gates a push
+      # that would otherwise discard promoted work.
       ansible.builtin.command:
-        cmd: "git merge-base --is-ancestor FETCH_HEAD HEAD"
+        cmd: "git merge-base --is-ancestor {{ canonical_main }} HEAD"
         chdir: "{{ worktree }}"
       register: _canon_behind
       changed_when: false
       failed_when: false
-      when: _canon_fetch.rc == 0
+      when: canonical_main | length > 0
 
     - name: Refuse to mirror over promoted work, and say so  # noqa: command-instead-of-module
       # rc 1 = canonical main is NOT an ancestor of HEAD, i.e. it holds commits this worktree lacks. The push would
@@ -245,14 +254,20 @@
       # rather than "your promoted proposals live only here". Live-caught 2026-07-28: after promoting an onboard
       # bundle by hand, the next deploy died on this task with no indication that promoted state was the cause.
       # NEVER force: the canonical is where promotes land, and --force would silently delete them.
+      # REBASE, not `merge --ff-only`: the two histories genuinely DIVERGE, they do not merely lag. This
+      # play commits an "instance state" commit of its own on each run, so the moment a promote lands in the
+      # canonical the worktree also has a commit the canonical lacks — neither is an ancestor of the other and
+      # a fast-forward is impossible. `rebase` is correct in BOTH cases: with no local commits to replay it
+      # simply fast-forwards. (Live-caught 2026-07-28: the first message said `--ff-only`, and following it
+      # verbatim gave "fatal: Not possible to fast-forward, aborting" — an actionable message that was not.)
       ansible.builtin.fail:
         msg: >-
           local-canonical: REFUSING to mirror — the canonical ({{ bare }}) has commit(s) your worktree
           ({{ worktree }}) does not, so this push would discard them. That is normal once propose-then-promote is
           in use: a promote advances canonical `main` directly. Bring the worktree forward first —
-          `git -C {{ worktree }} fetch local && git -C {{ worktree }} merge --ff-only local/main` — then re-run.
+          `git -C {{ worktree }} fetch local && git -C {{ worktree }} rebase local/main` — then re-run.
           Nothing was pushed and the canonical is untouched.
-      when: (_canon_behind.rc | default(0)) == 1
+      when: canonical_main | length > 0 and (_canon_behind.rc | default(0)) != 0
 
     - name: Mirror the working tree's commit into the canonical  # noqa: command-instead-of-module
       ansible.builtin.command:
