@@ -1413,3 +1413,20 @@ def test_audit_flattens_injected_newlines_and_tabs(monkeypatch):
     msg = records[0]
     assert msg.count("\t") == 3, "exactly 3 TSV separators — no injected tab column: %r" % msg
     assert "\n" not in msg and "\r" not in msg, "no injected audit line: %r" % msg
+
+
+def test_gui_onboard_boundary_refusal_is_a_422_with_a_field_code(client):
+    """A request the C22 boundary refuses answers 422 with the readable message AND a machine-readable `code`
+    derived from the refused FIELD (`collection` → `invalid_collection`, the device-class key →
+    `invalid_device_class_key`), so the browser can render per-refusal next-steps copy instead of a bare error.
+    The value itself never reaches the code (it can be the payload). Guards the GUI relay dropping the code — the
+    permissive edition's install-offer copy keys on `invalid_collection`."""
+    r = client.post("/api/onboard", json={"collection": "Bad Name", "key": "k", "group": "g", "host": "192.0.2.9"},
+                    headers=_auth())
+    assert r.status_code == 422
+    body = r.get_json()
+    assert body["code"] == "invalid_collection" and "namespace.name" in body["error"]
+    r = client.post("/api/onboard", json={"collection": "acme.edgeos", "key": "../etc", "group": "g",
+                                          "host": "192.0.2.9"}, headers=_auth())
+    assert r.status_code == 422 and r.get_json()["code"] == "invalid_device_class_key"
+    assert "../etc" not in r.get_json()["code"]

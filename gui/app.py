@@ -23,6 +23,7 @@ import functools
 import hmac
 import logging
 import os
+import re
 import sys
 import time
 import uuid
@@ -519,8 +520,14 @@ def api_onboard():
     except ValueError as e:
         # A catchable planner guard fired pre-write (MF-S2 domain-confinement, or a partially-filled required
         # auth_set — more reachable via F1 TIER-B). A clean 422 client error, never a 500 (mirrors the API route).
-        _audit("onboard-refuse", "reason=request-boundary field=%s" % getattr(e, "field", "input"))
-        return jsonify({"error": str(e)}), 422
+        # The `code` is what lets the browser render per-refusal next-steps copy instead of a bare error (the
+        # permissive edition keys its install-offer copy on `invalid_collection`). A request-boundary refusal derives
+        # it from the refused FIELD — `collection` → invalid_collection, `device-class key` → invalid_device_class_key —
+        # never from the value, which is also kept out of the audit line.
+        field = getattr(e, "field", None)
+        code = ("invalid_%s" % re.sub(r"[^a-z0-9]+", "_", field.lower()).strip("_")) if field else "invalid_request"
+        _audit("onboard-refuse", "reason=request-boundary field=%s" % (field or "input"))
+        return jsonify({"error": str(e), "code": code}), 422
     if plan["error"] == "not_installed":
         return jsonify({"error": "install the collection first: %s" % d["collection"]}), 404
     if plan["error"] == "no_backend":
