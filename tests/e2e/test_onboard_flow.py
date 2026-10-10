@@ -35,6 +35,25 @@ def test_search_renders_a_result_card(page):
         "data-state", "yes")
 
 
+def test_a_hostile_collection_description_renders_as_text_not_markup(page):
+    """A collection whose Galaxy `description` is `<img src=x onerror=…>` renders as LITERAL TEXT: no element is
+    created and no handler fires. This is the only proof that runs the real DOM — the source gate
+    (tests/unit/test_card_paint_gate.py) pins the code shape, but only a browser can show the payload is inert.
+
+    Guards the SEC-A1 hole closed on 2026-07-27 (SECURITY.md C19): `card()` painted the Galaxy-authored description
+    through `E()`/`innerHTML`, so anyone who published a collection tagged to match a plausible device search got
+    script execution in the operator's authenticated session on SEARCH ALONE — before any onboard or consent
+    dialog could gate it, with the session able to reach every POST route the GUI exposes."""
+    page.goto("/")
+    page.get_by_test_id("search-input").fill("xsspaint")
+    page.get_by_test_id("search-btn").click()
+    # the payload survives as TEXT (auto-waiting expect, never .count())
+    expect(page.get_by_test_id("result-meta").first).to_have_text('<img src=x onerror="window.__kontroll_xss=1">')
+    # …and produced no element, so no handler could have run
+    expect(page.locator('[data-testid="card"] img')).to_have_count(0)
+    assert page.evaluate("window.__kontroll_xss === undefined"), "the payload EXECUTED — the card is a live XSS sink"
+
+
 def test_onboard_dryrun_renders_the_plan(page):
     """A dry-run must PLAN but never write: opening the form, filling the required fields, and
     submitting with `apply` UNCHECKED renders the plan in the output pane. Guards the

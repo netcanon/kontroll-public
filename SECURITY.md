@@ -1188,6 +1188,40 @@ flood cap bounds rows; hostile fields are dropped/normalized; `read_inbox` is `a
 executes, the "Onboard this" pre-fill lands the discovered host in `field-host` with `apply` unchecked).
 Design-of-record: `docs/reviews/2026-07-03-discovery-inbox-scope/99-synthesis.md`. Accepted-risk row **R-DISC-1**.
 
+### C19 — The GUI renders foreign bytes as TEXT, never markup  ✓ implemented (source-gated)
+
+The GUI paints values it did not author: **device** bytes (capture filenames and line bodies — C14; lease/ARP rows
+— C18) and, less obviously, **third-party publisher** bytes. `scripts/kontroll/probe.py` copies a collection's
+`description` verbatim out of the public Ansible Galaxy API (`shallow_from_galaxy`), and `service_search` returns
+it to the browser; the same is true of the collection name, version and origin on every galaxy-origin card.
+
+The rule is now mechanical, not case-by-case: **no value kontroll did not author reaches `innerHTML`.**
+`index.html` has two DOM helpers — `E()` assigns `innerHTML` (for kontroll's own literal markup) and `ET()` assigns
+`textContent`. Every record field, every API error string, and every refusal reason is painted with `ET()`; where a
+value used to be interpolated into a markup literal, the markup became child elements instead.
+
+This closes a live hole. Until 2026-07-27 the search card painted the Galaxy-authored `description`, `collection`,
+`version` and `origin` through `E()`. Publishing a collection whose `galaxy.yml` description is
+`<img src=x onerror=…>`, tagged to match a plausible device search, gave script execution in the operator's
+authenticated session **the moment they searched** — no click, no onboard — with that session able to reach every
+`POST` route the GUI exposes. Eleven further sinks (the backup-viewer error/unavailable paths, the settings error
+line, the secret-domain and keygen-role pickers, the services description) were found by the covering gate and
+closed in the same commit. The doctrine had existed since C14 and had simply never been applied to non-device
+foreign bytes.
+
+Defence in depth: an `after_request` hook sets `Content-Security-Policy: object-src 'none'; base-uri 'none';
+frame-ancestors 'none'` plus `X-Content-Type-Options: nosniff` and `Referrer-Policy: same-origin`. **`script-src`
+is deliberately absent** — `index.html` carries one large inline `<script>`, so `script-src 'self'` would break the
+page; relocating that script is a named follow-up and is *not* a substitute for the paint. The paint is the
+control; CSP is the second layer.
+
+Covering check: [tests/unit/test_card_paint_gate.py](../tests/unit/test_card_paint_gate.py) — a quote- and
+comment-aware source scan that extracts the `innerHTML` argument of **every** `E()` call site and fails if it
+carries a `rec.*` field, an API error, or a refusal/dependency string; it proves it can fail (a planted sink is
+caught), pins the four record-painting testids to `ET(`, and pins the CSP directives. Extend its `FORBIDDEN` list
+when a new externally-authored field reaches the page.
+
+
 ### C21 — The shippable tree carries no identifier of a real deployment  ✔ implemented (2026-10-08, the public split)
 
 **Threat:** the tool is developed against a real homelab; an address, hostname, domain, MAC, key
@@ -1223,7 +1257,6 @@ a tree whose `.gitignore` excludes the overlay). Design-of-record and the full s
 `docs/reviews/2026-10-08-public-split-pii-sweep/`; operator runbook `docs/public-split.md`.
 
 ---
-
 ## Accepted risks / known limitations
 
 | Item | Risk | Accepted? | Rationale |

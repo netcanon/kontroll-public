@@ -35,11 +35,11 @@ Both emission forms count: static `data-testid="…"` and JS-built `el.dataset.t
 | `data-testid` | Element | Discriminator |
 |---|---|---|
 | `card` | the result card root | `data-collection="<ns.coll>"` to target a specific card |
-| `result-title` | the `<h3>` (collection + version/origin/depth) | |
-| `result-meta` | the description/note line | |
+| `result-title` | the `<h3>` — collection name as text, with version/origin/depth as a child `<span class="meta">` | painted with `ET()`; the version suffix is a CHILD element, not interpolated markup (C19) |
+| `result-meta` | the description/note line | painted with `ET()` — the description is **Galaxy-authored** (C19) |
 | `result-badges` | the badges container | |
 | `capability-badge` | a per-capability badge | `data-cap="actuate\|backup\|bespoke\|telemetry\|logging"` + `data-state="yes\|no\|maybe"`; `telemetry`/`backup`/`logging` are clickable (open the shared dialog) |
-| `suggested-backend-badge` | the "→ <backend>" badge | |
+| `suggested-backend-badge` | the "→ <backend>" badge | painted with `ET()` — locally derived, but no `rec.*` value reaches `innerHTML` (C19) |
 | `onboard-toggle` | the "Onboard this" button — reveals the form; label flips to "Collapse" when open and is **`disabled` while the form holds input** (collapse gated on a pristine form: a peek is dismissable, but entered text / ticked boxes are never silently dropped) | |
 
 ## Onboard form (per card, revealed by `onboard-toggle`)

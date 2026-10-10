@@ -47,6 +47,12 @@ def _fake_local_shallow(keywords, limit):
     f = _probe._facts(coll, "5.0.0", "local", "shallow")
     f["plugins"] = {"cliconf": ["ios"]}
     f["modules"] = ["ios_command"]
+    # A 'xsspaint' query returns a record whose DESCRIPTION carries a script payload — the exact byte a third party
+    # controls (probe.shallow_from_galaxy copies `description` verbatim out of the public Galaxy API). It exists so
+    # a REAL browser can prove the C19 paint rule holds; the source gate (test_card_paint_gate.py) can only prove
+    # the code shape. Keep the payload's `window.__kontroll_xss` marker in sync with the asserting e2e.
+    if any("xsspaint" in k.lower() for k in keywords):
+        f["description"] = '<img src=x onerror="window.__kontroll_xss=1">'
     return [f]
 
 

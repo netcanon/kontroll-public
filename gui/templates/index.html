@@ -119,17 +119,27 @@ async function search() {
   try { data = await (await fetch('/api/search?q='+encodeURIComponent(q)+deep)).json(); }
   catch(e){ box.innerHTML=''; box.appendChild(E('div','warn','search error','search-error')); return; }
   box.innerHTML='';
-  if (data.error){ box.appendChild(E('div','warn', data.error, 'search-api-error')); return; }
+  // ET, not E: api_search's error is "search failed: %s" % e — an exception string that can carry bytes from the
+  // remote Galaxy response, so it is third-party data on the same footing as a record field.
+  if (data.error){ box.appendChild(ET('div','warn', data.error, 'search-api-error')); return; }
   if (!data.length){ box.appendChild(E('div','spin','no results','no-results')); return; }
   data.forEach(rec => box.appendChild(card(rec)));
 }
 
 function card(rec) {
   const c = E('div','card'); c.dataset.testid='card'; c.dataset.collection=rec.collection;
-  c.appendChild(E('h3', null, rec.collection + ' <span class="meta">v'+(rec.version||'?')+
-    ' · '+rec.origin+'/'+rec.depth+(rec.meta && rec.meta.certified?' · certified':'')+'</span>', 'result-title'));
+  // EVERY record field here is THIRD-PARTY-AUTHORED: probe.shallow_from_galaxy copies `description` (and the
+  // collection/version strings) verbatim out of the public Galaxy API, so a card paints bytes chosen by whoever
+  // published the collection. They get the same ET/textContent treatment as device bytes — with E()'s innerHTML a
+  // collection whose description is `<img src=x onerror=…>` runs script in the operator's authenticated session on
+  // SEARCH ALONE, before any onboard/consent dialog can gate it. The title's meta suffix becomes a CHILD element
+  // rather than an interpolated `<span>`, because the interpolation is the sink.
+  const h = ET('h3', null, rec.collection, 'result-title');
+  h.appendChild(ET('span', 'meta', ' v'+(rec.version||'?')+' · '+rec.origin+'/'+rec.depth+
+    (rec.meta && rec.meta.certified ? ' · certified' : '')));
+  c.appendChild(h);
   if (rec.meta && (rec.meta.note || rec.meta.description))
-    c.appendChild(E('div','meta', rec.meta.note || rec.meta.description, 'result-meta'));
+    c.appendChild(ET('div','meta', rec.meta.note || rec.meta.description, 'result-meta'));
   const b = E('div','badges', null, 'result-badges');
   Object.keys(rec.capabilities||{}).forEach(k => {
     const cap = rec.capabilities[k]; const st = cap.state;
@@ -143,7 +153,9 @@ function card(rec) {
     }
     b.appendChild(bd);
   });
-  if (rec.suggested_backend) b.appendChild(E('span','badge backend','→ '+rec.suggested_backend, 'suggested-backend-badge'));
+  // Locally derived (predicate.classify over the backends dir), not Galaxy-authored — but it is still a `rec.` field,
+  // and the rule this arc establishes is mechanical, not case-by-case: no record value reaches innerHTML. Ever.
+  if (rec.suggested_backend) b.appendChild(ET('span','badge backend','→ '+rec.suggested_backend, 'suggested-backend-badge'));
   // ⚙ Automations — the app-store unit badge (sibling of the capability/backend badges): opens openUnitDialog to
   // create a version-pinned, runnable actuation unit from this collection. `collection` is data, never a per-unit
   // testid (the capability/secret-dialog doctrine). The dialog degrades honestly if the collection ships no units.
@@ -1094,7 +1106,7 @@ function serviceRow(s) {
     ? s.name + ' <span class="meta"><a href="'+s.url+'" target="_blank" rel="noopener noreferrer">'+s.url+' ↗</a></span>'
     : s.name + ' <span class="meta">(url not resolvable on this deploy)</span>';
   row.appendChild(E('h3', null, title, null));
-  if (s.description) row.appendChild(E('div', 'meta', s.description, null));
+  if (s.description) row.appendChild(ET('div', 'meta', s.description, null));
   return row;
 }
 // --- the Pending panel (#129, gap 3 / C10): a READ-ONLY list of proposals STAGED (proposed/<run_id>) and awaiting
@@ -1314,9 +1326,9 @@ async function openBackupPanel(host) {
   try { data = await (await fetch('/api/backups' + (host ? '?host=' + encodeURIComponent(host) : ''))).json(); }
   catch(e){ body.innerHTML = ''; body.appendChild(E('div', 'warn', 'request failed', 'backup-error')); return; }
   body.innerHTML = '';
-  if (data.error){ body.appendChild(E('div', 'warn', data.error, 'backup-error')); return; }
+  if (data.error){ body.appendChild(ET('div', 'warn', data.error, 'backup-error')); return; }
   if (!data.available){
-    body.appendChild(E('div', 'meta', (data.reason || 'captures store not mounted') +
+    body.appendChild(ET('div', 'meta', (data.reason || 'captures store not mounted') +
       ' — the backup viewer needs the read-only captures mount (see docs/SETUP.md).', 'backup-unavailable'));
     return;
   }
@@ -1349,7 +1361,7 @@ async function loadRevisions(file, idx) {
   try { data = await (await fetch('/api/backups/' + encodeURIComponent(file) + '/revisions')).json(); }
   catch(e){ idx.innerHTML = ''; idx.appendChild(E('div', 'warn', 'revisions request failed', 'backup-error')); return; }
   idx.innerHTML = '';
-  if (data.error){ idx.appendChild(E('div', 'warn', data.error, 'backup-error')); return; }
+  if (data.error){ idx.appendChild(ET('div', 'warn', data.error, 'backup-error')); return; }
   const revs = data.revisions || [];
   if (!revs.length){ idx.appendChild(E('div', 'meta', data.note || 'no history for this device yet', 'backup-empty')); return; }
   const base = E('select', null, null, 'backup-base'), comp = E('select', null, null, 'backup-compare');
@@ -1374,8 +1386,8 @@ async function viewBackup(file, rev, out) {
   try { data = await (await fetch('/api/backups/' + encodeURIComponent(file) + '/view?rev=' + encodeURIComponent(rev))).json(); }
   catch(e){ out.innerHTML = ''; out.appendChild(E('div', 'warn', 'view request failed', 'backup-error')); return; }
   out.innerHTML = '';
-  if (data.error){ out.appendChild(E('div', 'warn', data.error, 'backup-error')); return; }
-  if (!data.available){ out.appendChild(E('div', 'meta', data.reason || 'unavailable', 'backup-unavailable')); return; }
+  if (data.error){ out.appendChild(ET('div', 'warn', data.error, 'backup-error')); return; }
+  if (!data.available){ out.appendChild(ET('div', 'meta', data.reason || 'unavailable', 'backup-unavailable')); return; }
   out.appendChild(ET('div', 'meta', file + ' · ' + (rev || '').slice(0, 7), 'backup-view-head'));   // file via textContent
   const pre = E('pre', null, null, 'backup-view');
   (data.lines || []).forEach((ln, i) => {
@@ -1395,8 +1407,8 @@ async function diffBackup(file, base, compare, out) {
         encodeURIComponent(base) + '&compare=' + encodeURIComponent(compare))).json(); }
   catch(e){ out.innerHTML = ''; out.appendChild(E('div', 'warn', 'diff request failed', 'backup-error')); return; }
   out.innerHTML = '';
-  if (data.error){ out.appendChild(E('div', 'warn', data.error, 'backup-error')); return; }
-  if (!data.available){ out.appendChild(E('div', 'meta', data.reason || 'unavailable', 'backup-unavailable')); return; }
+  if (data.error){ out.appendChild(ET('div', 'warn', data.error, 'backup-error')); return; }
+  if (!data.available){ out.appendChild(ET('div', 'meta', data.reason || 'unavailable', 'backup-unavailable')); return; }
   renderDiff(out, data);
 }
 // renderDiff — paint the server's structured hunks (no client diff library; server diffs + redacts, the client
@@ -1449,7 +1461,7 @@ async function openSettingsPanel() {
 function settingsGroup(key, title, rowsFn, data) {
   const g = E('div', 'card', null, 'settings-group'); g.dataset.group = key;
   g.appendChild(E('h3', null, title));
-  if (!data || data.error) { g.appendChild(E('div', 'warn', (data && data.error) || 'unavailable', 'settings-'+key+'-error')); return g; }
+  if (!data || data.error) { g.appendChild(ET('div', 'warn', (data && data.error) || 'unavailable', 'settings-'+key+'-error')); return g; }
   rowsFn(g, data);
   return g;
 }
@@ -1664,7 +1676,10 @@ async function openSecretsPicker() {
   const body = dlg.querySelector('.capbody'); body.innerHTML='';
   if (!domains.length){ body.innerHTML='<div class="meta">no secret forms registered</div>'; return; }
   domains.forEach(d => {
-    const row = E('button', null, '<b>'+d.label+'</b><br><span class="meta">'+d.description+'</span>', 'secret-domain');
+    const row = E('button', null, null, 'secret-domain');
+    row.appendChild(ET('b', null, d.label));
+    row.appendChild(E('br'));
+    row.appendChild(ET('span', 'meta', d.description));
     row.dataset.domain = d.domain;
     row.onclick = () => { ov.remove(); openSecretDialog(d.domain); };
     body.appendChild(row);
@@ -1756,7 +1771,10 @@ async function openKeygenPicker() {
   const body = dlg.querySelector('.capbody'); body.innerHTML='';
   if (!roles.length){ body.innerHTML='<div class="meta">no key roles registered</div>'; return; }
   roles.forEach(r => {
-    const row = E('button', null, '<b>'+r.label+'</b><br><span class="meta">'+r.description+'</span>', 'keygen-role');
+    const row = E('button', null, null, 'keygen-role');
+    row.appendChild(ET('b', null, r.label));
+    row.appendChild(E('br'));
+    row.appendChild(ET('span', 'meta', r.description));
     row.dataset.role = r.role;
     row.onclick = () => { ov.remove(); openKeygenDialog(r.role); };
     body.appendChild(row);
