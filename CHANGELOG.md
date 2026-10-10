@@ -11,6 +11,16 @@ NetConfig project.
 
 ## [Unreleased]
 
+### fix(docker): the socket proxy moves to its own internal network; Vector is its only peer (2026-10-09)
+
+`docker-socket-proxy` is GET/HEAD-only, but `GET /containers/<id>/json` returns a container's `Config.Env` — every
+secret the stack passes by environment, `SEMAPHORE_ACCESS_KEY_ENCRYPTION` among them — and it sat on the shared
+`kontroll` network that every service joins, so any container could have asked (the 2026-10-08 review, finding
+4). The proxy now joins only a new `kontroll-socket` network, created `internal` by deploy-stack; Vector joins it
+as the sole consumer and still reaches the proxy by service name. `tests/unit/test_compose_logging.py` pins the
+proxy's networks, Vector's membership, that no other fragment joins the private network, and the internal
+creation. SECURITY.md C12.
+
 ### fix(docker): Homepage gets its own env file and never reads the stack `.env` again (2026-10-09)
 
 `homepage.yaml` `env_file`d the whole stack `.env`: the Semaphore DB password and access-key encryption secret,

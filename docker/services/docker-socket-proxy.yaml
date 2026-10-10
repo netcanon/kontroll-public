@@ -1,14 +1,21 @@
 # docker-socket-proxy — the FILTERED, read-only Docker API that Vector's docker_logs source talks to, so the
 # raw root-equivalent /var/run/docker.sock is NEVER mounted into Vector (the C12 promotion-blocker fix). Only THIS
 # proxy holds the socket; it exposes a GET/HEAD-only HAProxy filter (POST=0 ⇒ the whole API is read-only, cannot
-# create/exec/kill a container) on the internal kontroll network. Brought up as a dependency of Vector (vector.yaml
-# depends_on), only when 'vector' is deployed — provision-only-what's-declared.
+# create/exec/kill a container) on its OWN internal network, `kontroll-socket`, which Vector alone joins. Brought up
+# as a dependency of Vector (vector.yaml depends_on), only when 'vector' is deployed — provision-only-what's-declared.
+#
+# Why its own network and not the shared `kontroll` one: even read-only, `GET /containers/<id>/json` returns a
+# container's Config.Env — every secret the stack passes a container by environment (SEMAPHORE_ACCESS_KEY_ENCRYPTION
+# decrypts the store holding the runner's age key). On the shared network any of the stack's containers could have
+# asked (2026-10-08 review, finding 4). Now only Vector can reach the proxy at all; tests/unit/test_compose_logging.py
+# pins that no other fragment joins `kontroll-socket`.
 #
 # Access chain used:   holds /var/run/docker.sock (:ro) and exposes a GET/HEAD-only Docker API (CONTAINERS reads
-#                      only) on the kontroll net; Vector targets http://docker-socket-proxy:2375, never the raw socket.
+#                      only) on `kontroll-socket`; Vector targets http://docker-socket-proxy:2375, never the raw socket.
 # May break:           nothing — a read-only API filter; if the proxy is down, docker_logs blanks (others fine).
 # Fallback required:   no.
-# Blast radius:        control node only — NO host port (kontroll-net only, C3); POST=0 ⇒ cannot create containers.
+# Blast radius:        control node only — NO host port (C3), NOT on the shared stack network (only Vector can reach
+#                      it); POST=0 ⇒ cannot create containers.
 services:
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy:0.3.0   # pinned tag (consistent with the rest of the stack; the one
@@ -43,11 +50,13 @@ services:
       - /run                   # HAProxy's runtime socket/pid
     security_opt:
       - no-new-privileges:true
-    # NO `ports:` — reachable only on the kontroll network (C3). Vector reaches it by service name.
+    # NO `ports:` (C3) and NOT on the shared `kontroll` network: only `kontroll-socket`, which Vector alone joins —
+    # it reaches the proxy by service name over that network. `internal: true` at creation (deploy-stack): nothing
+    # on it needs egress.
     networks:
-      - kontroll
+      - kontroll-socket
 
 networks:
-  kontroll:
+  kontroll-socket:
     external: true
-    name: kontroll
+    name: kontroll-socket

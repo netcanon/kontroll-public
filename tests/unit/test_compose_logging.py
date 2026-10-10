@@ -211,3 +211,40 @@ def test_loki_sink_labels_are_the_canonical_non_secret_set():
     assert sink["type"] == "loki"
     keys = set(sink["labels"].keys())
     assert keys <= _CANONICAL_LABELS, "non-canonical/secret-risk label key(s): %s" % (keys - _CANONICAL_LABELS)
+
+
+def test_socket_proxy_lives_on_its_own_network_with_vector_as_sole_peer():
+    """Even GET/HEAD-only, the proxy's `GET /containers/<id>/json` returns a container's Config.Env — every secret
+    the stack passes by environment. So the proxy must NOT be on the shared `kontroll` network where every service
+    could reach it (2026-10-08 review, finding 4): it joins ONLY `kontroll-socket`, Vector joins it as the single
+    consumer, no other fragment does, compose.yaml declares it, and deploy-stack creates it `internal` (no egress).
+    Guards a fragment 'tidying' the proxy back onto the shared network, or a new service joining the private one."""
+    proxy = _load("docker/services/docker-socket-proxy.yaml")["services"]["docker-socket-proxy"]
+    assert proxy.get("networks") == ["kontroll-socket"], "the proxy joins ONLY its private network: %r" % proxy.get("networks")
+    vector = _load("docker/services/vector.yaml")["services"]["vector"]
+    assert "kontroll-socket" in (vector.get("networks") or []), "Vector must join the proxy's network to reach it"
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    joiners = []
+    for path in sorted(glob.glob(os.path.join(root, "docker", "services", "*.yaml"))):
+        for name, svc in (_load(os.path.relpath(path, root)).get("services") or {}).items():
+            if "kontroll-socket" in (svc.get("networks") or []):
+                joiners.append(name)
+    assert sorted(joiners) == ["docker-socket-proxy", "vector"], "only the proxy and Vector may join kontroll-socket: %r" % joiners
+    compose = _load("docker/compose.yaml")
+    assert (compose.get("networks") or {}).get("kontroll-socket", {}).get("external") is True
+
+    def _walk(tasks):
+        for t in tasks or []:
+            if isinstance(t, dict):
+                yield t
+                for k in ("block", "rescue", "always"):
+                    yield from _walk(t.get(k))
+    created = {}
+    for play in _load("ansible/playbooks/deploy-stack.yml"):
+        for section in ("pre_tasks", "tasks", "post_tasks"):
+            for t in _walk(play.get(section)):
+                net = t.get("community.docker.docker_network")
+                if isinstance(net, dict):
+                    created[net.get("name")] = net
+    assert created.get("kontroll-socket", {}).get("internal") is True, \
+        "deploy-stack must create kontroll-socket as an internal network: %r" % created

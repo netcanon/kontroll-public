@@ -30,3 +30,6 @@ networks:
   kontroll:
     external: true
     name: kontroll
+  kontroll-socket:          # the docker-socket-proxy's private network (internal; Vector is its only peer)
+    external: true
+    name: kontroll-socket
