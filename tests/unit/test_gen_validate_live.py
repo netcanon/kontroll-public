@@ -377,3 +377,27 @@ def test_no_grant_role_literal_in_the_checks():
     A' role-map check lands)."""
     src = open(os.path.join(ROOT, "scripts", "gen-validate-live.py"), encoding="utf-8").read()
     assert "PVEAuditor" not in src
+
+
+def test_every_tls_context_pins_the_protocol_floor_to_1_2():
+    """Both shapes the fetchers build — the verifying default context (optionally against a pinned CA) and the
+    unverified one the self-signed classes need — carry `minimum_version = TLSv1_2`. It is the default on every
+    supported Python; stating it means an interpreter build or an OPENSSL_CONF cannot lower it, and nobody has to
+    know the default to know the floor (CodeQL py/insecure-protocol on `create_default_context`)."""
+    import ssl
+    for kw in ({}, {"verify": False}, {"ca_file": None, "verify": True}):
+        ctx = M.LiveFetchers._tls_context(**kw)
+        assert ctx.minimum_version == ssl.TLSVersion.TLSv1_2, kw
+    assert M.LiveFetchers._tls_context(verify=True).verify_mode == ssl.CERT_REQUIRED
+    assert M.LiveFetchers._tls_context(verify=False).verify_mode == ssl.CERT_NONE
+
+
+def test_no_fetcher_builds_a_tls_context_outside_the_one_constructor():
+    """Source pin: `ssl.create_default_context(` and `_create_unverified_context(` occur exactly once each in the
+    script, both inside `_tls_context`. A new fetcher that builds its own context would skip the floor — the pin
+    makes that a test failure rather than a review catch."""
+    src = open(os.path.join(ROOT, "scripts", "gen-validate-live.py"), encoding="utf-8").read()
+    assert src.count("ssl.create_default_context(") == 1 and src.count("_create_unverified_context(") == 1
+    body = src.split("def _tls_context(", 1)[1].split("\n    def ", 1)[0]
+    assert "ssl.create_default_context(" in body and "_create_unverified_context(" in body
+    assert "minimum_version = ssl.TLSVersion.TLSv1_2" in body

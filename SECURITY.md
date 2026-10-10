@@ -910,6 +910,10 @@ Reaching the lab is the point, so the trust posture is bounded by construction:
   the `snmp_observability` SNMPv3 USM user — no new secret, no new SOPS domain. The token is only an `${ENV}` ref
   resolved at the fetcher boundary; the audit line + the on-screen verdict carry the secret-domain **NAME** only,
   never the value (C2/C12 by NAME — pinned by `test_gen_validate_live.py`).
+- **The TLS 1.2 floor, stated.** Every outbound TLS context the seam builds goes through one constructor
+  (`LiveFetchers._tls_context`) that pins `minimum_version = TLSv1_2` explicitly — the default on every supported
+  Python, written down so an interpreter build or an `OPENSSL_CONF` cannot lower it (CodeQL `py/insecure-protocol`;
+  `test_gen_validate_live.py` pins that no other line builds a context).
 - **A closed read-only transport allow-list.** The reaching primitives are a TLS handshake, an HTTP **GET**, and an
   SNMP **GETNEXT** — there is no write/POST/SET primitive, so a check **cannot** actuate a device. Machine-enforced
   by a `tests/validate.sh` `validate-live-readonly` grep-gate (a write verb cannot be declared) — the

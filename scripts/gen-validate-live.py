@@ -83,12 +83,24 @@ class LiveFetchers:
     judgement logic is hermetic; this class is the sole code that must run on the control VM."""
     timeout = 8
 
+    @staticmethod
+    def _tls_context(ca_file=None, verify=True):
+        """The ONE TLS context constructor for every outbound read: the verifying default context (or the unverified
+        one the self-signed classes need — reachability, not trust), with the protocol floor pinned to TLS 1.2
+        EXPLICITLY. That is the default on every supported Python, written down so an interpreter build or an
+        OPENSSL_CONF cannot lower it, and so a reader (or CodeQL, py/insecure-protocol) does not have to know the
+        default to know the floor. Every fetcher goes through here — test_gen_validate_live.py pins that no other
+        line in this file builds a context."""
+        ctx = ssl.create_default_context(cafile=ca_file) if verify else ssl._create_unverified_context()
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        return ctx
+
     def tls_verifies(self, host, port, ca_file=None):
         """True iff host:port presents a cert chain that VERIFIES against `ca_file` (or the system trust store when
         None). Returns False on a certificate-verification failure (self-signed / wrong CA — a JUDGEMENT, not an
         outage). RAISES OSError on a transport failure (down / refused / timeout) -> the caller maps to UNREACHABLE.
         Read-only: a ClientHello + chain read; no request body is ever sent."""
-        ctx = ssl.create_default_context(cafile=ca_file)
+        ctx = self._tls_context(ca_file=ca_file)
         try:
             with socket.create_connection((host, port), self.timeout) as sock:
                 with ctx.wrap_socket(sock, server_hostname=host):
@@ -101,7 +113,7 @@ class LiveFetchers:
         self-signed class default — we are confirming reachability/scope, not trusting the cert here); a pinned
         `ca_file` verifies against it. An HTTP error CODE (403/404) is a RESPONSE -> returned as status. A transport
         failure RAISES URLError/OSError -> UNREACHABLE. Method is hard-wired GET — no body, no other verb."""
-        ctx = ssl.create_default_context(cafile=ca_file) if verify else ssl._create_unverified_context()
+        ctx = self._tls_context(ca_file=ca_file, verify=verify)
         req = urllib.request.Request(url, headers=headers or {}, method="GET")
         try:
             with urllib.request.urlopen(req, timeout=self.timeout, context=ctx) as resp:
