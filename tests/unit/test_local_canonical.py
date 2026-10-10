@@ -93,3 +93,24 @@ def test_group_and_membership_precede_the_operator_push():
     push = _idx(_is_push)
     assert grp is not None and usr is not None and push is not None, "missing group/user/push task"
     assert grp < push and usr < push, "the gid-1001 group + operator membership must be provisioned before the push"
+
+
+def test_the_canonical_mirror_refuses_to_discard_promoted_work():
+    """The mirror is a fast-forward-only push, and worktree/canonical diverge the moment propose-then-promote is
+    used — a promote advances canonical `main` with a commit the worktree never had. The push then fails with
+    git's generic "Updates were rejected... fetch first", which on a control plane reads like a transient git
+    problem rather than "your promoted proposals live only in the canonical" (live-caught 2026-07-28: a deploy
+    died here right after a hand-promote, with no indication why).
+
+    Pins the actionable refusal AND, more importantly, that the remedy is never `--force`: force-pushing here
+    would silently delete every promoted proposal the canonical holds."""
+    with open(PLAYBOOK, encoding="utf-8") as fh:
+        src = fh.read()
+    assert "merge-base --is-ancestor FETCH_HEAD HEAD" in src, "the divergence check must exist"
+    assert "REFUSING to mirror" in src and "would discard them" in src
+    assert "--ff-only" in src, "the remedy must be a fast-forward merge, spelled out for the operator"
+    pushes = [str(_mod(t, "ansible.builtin.command", "command").get("cmd", "")) for t in _tasks()
+              if _mod(t, "ansible.builtin.command", "command") and "git push" in
+              str(_mod(t, "ansible.builtin.command", "command").get("cmd", ""))]
+    assert pushes, "the mirror push task must exist"
+    assert all("--force" not in cmd and " -f " not in cmd for cmd in pushes),         "the mirror must never force-push the canonical: %r" % pushes

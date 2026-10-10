@@ -40,7 +40,26 @@ case "$verb" in
     # Scaffold instance/ from instance.example/ + mint the control age key with show-once bootstrap secrets. Writes
     # instance/ THROUGH the /repo bind and the key THROUGH the host age-dir bind to SOPS_AGE_KEY_FILE
     # (/root/.config/sops/age/keys.txt → host ~/.config/sops/age/keys.txt). No docker socket needed.
-    exec python3 "$REPO/scripts/kontroll-init.py" --fresh "$@"
+    #
+    # NOT `exec`: we run as root in here, so everything written through those binds lands on the HOST owned by
+    # root — and `instance/` is the operator's own config, the very files the next step tells them to edit. On a
+    # fresh VM that meant `$EDITOR instance/fleet.yml` failed with permission denied until they worked out it
+    # needed sudo (live-caught, 2026-07-28). MF-1 already injects the invoking operator's identity for exactly
+    # this class of problem; it just never covered the fresh-init artifacts. Same numeric-uid discipline as
+    # local-canonical.yml: the host operator has no /etc/passwd entry in here, so a NAME cannot resolve.
+    python3 "$REPO/scripts/kontroll-init.py" --fresh "$@"
+    rc=$?
+    if [ -n "${KONTROLL_OPERATOR_UID:-}" ]; then
+      gid="${KONTROLL_OPERATOR_GID:-$KONTROLL_OPERATOR_UID}"
+      # Best-effort: a chown failure must not fail a scaffold that otherwise succeeded — the operator can still
+      # fix ownership by hand, and losing the exit code would hide whether the scaffold itself worked.
+      [ -e "$REPO/instance" ] && chown -R "$KONTROLL_OPERATOR_UID:$gid" "$REPO/instance" || true
+      key="${SOPS_AGE_KEY_FILE:-/root/.config/sops/age/keys.txt}"
+      [ -e "$key" ] && chown "$KONTROLL_OPERATOR_UID:$gid" "$key" || true
+      # The key DIRECTORY too: minted 0700 root-owned, it blocks the operator from listing or adding keys later.
+      [ -d "$(dirname "$key")" ] && chown "$KONTROLL_OPERATOR_UID:$gid" "$(dirname "$key")" || true
+    fi
+    exit $rc
     ;;
   configure-semaphore)
     # Wire a RUNNING Semaphore (localhost:3001 via network_mode: host) — run AFTER init. Self-decrypts the admin

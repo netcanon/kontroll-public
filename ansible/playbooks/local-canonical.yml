@@ -186,6 +186,47 @@
       register: _state_commit
       changed_when: "'committed' in _state_commit.stdout"
 
+    # Where the canonical stands relative to the worktree. The mirror is a FAST-FORWARD-ONLY push, and the two can
+    # legitimately diverge the moment propose-then-promote is in use: a promote advances canonical `main` with a
+    # commit the operator's worktree has never seen. Ask first, so the failure below can say something true.
+    - name: Fetch the canonical's current main (read-only)  # noqa: command-instead-of-module
+      # Remote-tracking refs do not exist until something fetches them, so without this the check below would
+      # always see a missing ref and never fire. Read-only: fetch writes only refs/remotes/, never the worktree.
+      ansible.builtin.command:
+        cmd: "git fetch local main"
+        chdir: "{{ worktree }}"
+      register: _canon_fetch
+      changed_when: false
+      failed_when: false
+
+    - name: Check whether the canonical has commits the worktree does not  # noqa: command-instead-of-module
+      # rc 0 = canonical main is an ancestor of HEAD (a clean fast-forward, or identical) — mirror away.
+      # rc 1 = it is NOT: the canonical holds commits this worktree lacks.
+      # rc 128 = FETCH_HEAD is absent, i.e. a first run against a canonical with no main yet — also fine to push.
+      ansible.builtin.command:
+        cmd: "git merge-base --is-ancestor FETCH_HEAD HEAD"
+        chdir: "{{ worktree }}"
+      register: _canon_behind
+      changed_when: false
+      failed_when: false
+      when: _canon_fetch.rc == 0
+
+    - name: Refuse to mirror over promoted work, and say so  # noqa: command-instead-of-module
+      # rc 1 = canonical main is NOT an ancestor of HEAD, i.e. it holds commits this worktree lacks. The push would
+      # be rejected anyway — this exists so the operator reads an actionable sentence instead of git's generic
+      # "Updates were rejected... fetch first" hint, which on a control plane sounds like a transient git problem
+      # rather than "your promoted proposals live only here". Live-caught 2026-07-28: after promoting an onboard
+      # bundle by hand, the next deploy died on this task with no indication that promoted state was the cause.
+      # NEVER force: the canonical is where promotes land, and --force would silently delete them.
+      ansible.builtin.fail:
+        msg: >-
+          local-canonical: REFUSING to mirror — the canonical ({{ bare }}) has commit(s) your worktree
+          ({{ worktree }}) does not, so this push would discard them. That is normal once propose-then-promote is
+          in use: a promote advances canonical `main` directly. Bring the worktree forward first —
+          `git -C {{ worktree }} fetch local && git -C {{ worktree }} merge --ff-only local/main` — then re-run.
+          Nothing was pushed and the canonical is untouched.
+      when: (_canon_behind.rc | default(0)) == 1
+
     - name: Mirror the working tree's commit into the canonical  # noqa: command-instead-of-module
       ansible.builtin.command:
         cmd: "git push local HEAD:refs/heads/main"
