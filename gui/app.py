@@ -519,6 +519,7 @@ def api_onboard():
     except ValueError as e:
         # A catchable planner guard fired pre-write (MF-S2 domain-confinement, or a partially-filled required
         # auth_set — more reachable via F1 TIER-B). A clean 422 client error, never a 500 (mirrors the API route).
+        _audit("onboard-refuse", "reason=request-boundary field=%s" % getattr(e, "field", "input"))
         return jsonify({"error": str(e)}), 422
     if plan["error"] == "not_installed":
         return jsonify({"error": "install the collection first: %s" % d["collection"]}), 404

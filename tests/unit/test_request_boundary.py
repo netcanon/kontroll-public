@@ -146,3 +146,22 @@ def test_probe_dir_walks_refuse_an_unvalidated_collection_name(tmp_path):
                lambda: probe.shallow_from_local("acme/edgeos", None, str(tmp_path))):
         with pytest.raises(ValueError):
             fn()
+
+
+def test_a_refusal_names_its_field_and_is_still_a_value_error():
+    """Every validator raises `paths.RequestBoundaryError`: a ValueError (so the API's and GUI's existing handlers
+    keep mapping it to 422/400 before any write) that also carries `.field`, which is what the audit line records —
+    the FIELD, never the refused value. Guards a validator regressing to a bare ValueError (no field to audit) or
+    to some other exception class (a 500 instead of a refusal)."""
+    with pytest.raises(paths.RequestBoundaryError) as e:
+        paths.component("../x", "device-class key")
+    assert isinstance(e.value, ValueError) and e.value.field == "device-class key"
+    with pytest.raises(paths.RequestBoundaryError) as e:
+        paths.hostname("a b", "host")
+    assert e.value.field == "host"
+    with pytest.raises(paths.RequestBoundaryError) as e:
+        paths.collection_fqcn("acme/edgeos")
+    assert e.value.field == "collection"
+    with pytest.raises(paths.RequestBoundaryError) as e:
+        paths.confined("../out")
+    assert e.value.field == "path"

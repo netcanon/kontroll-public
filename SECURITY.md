@@ -1307,8 +1307,10 @@ path, the unit path, the probe's `ansible_collections/<ns>/<name>` walk), so a v
 re-checked where it is used and a new caller cannot forget. Every repository write goes through
 `paths.confined()`, which resolves the target under `write_root()` and refuses an absolute path, a `..` that
 climbs out, a NUL or a symlink that points out. The API maps the `ValueError` to **422**, the GUI to **400**,
-both before any write and without echoing the value. The Fleet index paints host names and addresses with
-`ET()` (text), the C19 rule applied to inventory bytes.
+both before any write and without echoing the value, and both **audit the refusal by field name**
+(`onboard-refuse reason=request-boundary field=<name>`) — never the refused value, which can itself be the
+payload. The Fleet index paints host names and addresses with `ET()` (text), the C19 rule applied to inventory
+bytes.
 **Proves:** `tests/unit/test_request_boundary.py` (every validator's accept/reject table including `..`,
 separators, NUL, newline, a 65th char and a 254-char hostname; `confined()` against `../`, absolute and
 climbing paths; the planner refusing before the probe is reached), the API parametrised 422 pin in

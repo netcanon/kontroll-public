@@ -197,3 +197,6 @@ def test_onboard_refuses_a_path_shaped_field_before_any_write(onb, field, value)
     assert r.status_code == 422, (field, value, r.status_code, r.text)
     assert field in r.json()["detail"] or field.replace("_", " ") in r.json()["detail"] or "collection" in r.json()["detail"]
     assert onb.calls == [], "a refused request must never reach git"
+    audit = open(onb.audit_log, encoding="utf-8").read()
+    assert "onboard-refuse" in audit and "reason=request-boundary" in audit, "a refusal must leave an audit trace"
+    assert value not in audit, "the audit line names the FIELD, never the refused value"
