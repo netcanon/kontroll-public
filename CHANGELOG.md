@@ -11,6 +11,17 @@ NetConfig project.
 
 ## [Unreleased]
 
+### fix(docker): Homepage gets its own env file and never reads the stack `.env` again (2026-10-09)
+
+`homepage.yaml` `env_file`d the whole stack `.env`: the Semaphore DB password and access-key encryption secret,
+the Grafana admin password, the GUI password, the API token and every exporter credential, handed to an
+unauthenticated portal that needs none of them (the 2026-10-08 review, finding 5). deploy-stack now renders
+`docker/.env.homepage` with exactly the `homepage_var_*` keys of the `dashboards` SOPS domain (upper-cased to the
+`HOMEPAGE_VAR_*` names a tile's `{{HOMEPAGE_VAR_X}}` expects) and the fragment reads that file alone. Adding a
+widget token is one key in the domain. `docker/.env.example` points there instead of listing the tokens;
+`tests/unit/test_homepage_env_isolation.py` pins that no fragment `env_file`s the stack env, that the render task
+emits only widget keys under `no_log`, and that the new file is git-ignored.
+
 ### fix(ansible): the reload play no longer defines a variable in terms of itself (2026-10-09)
 
 `reload-observability.yml` declared the play var `prometheus_url: "{{ prometheus_url | default(…) }}"`, a

@@ -27,8 +27,9 @@ Grafana is **deployed** (Phase 5, `${KONTROLL_MGMT_IP}:3002`).
   fetched by `fetch-dashboards.py` like any other. See [derived/README.md](derived/README.md).
 
 ## Adding an X (the "add an X" test)
-- Homepage tile → add to `instance/dashboards/homepage/services.yaml`; widget tokens come from the
-  `dashboards` SOPS domain via `HOMEPAGE_VAR_*` env.
+- Homepage tile → add to `instance/dashboards/homepage/services.yaml`; widget tokens are `homepage_var_<name>`
+  keys of the `dashboards` SOPS domain, rendered by deploy-stack into `docker/.env.homepage` (Homepage's OWN env —
+  it never sees the stack `.env`) as `HOMEPAGE_VAR_<NAME>`.
 - Grafana dashboard → declare its Grafana.com id in the device's `module.yml`
   (`dashboards:`) + run `scripts/fetch-dashboards.py` (or drop a hand-authored JSON).
 - Derived floor board → add a `derive_dashboard:` selector to the telemetry method

@@ -109,7 +109,10 @@ The **homepage `:3000` all-interfaces bind is the documented NPM-fronted excepti
 Homepage is an *unauthenticated, read-only, no-actuation* tile board carrying no
 secret in its served config — the rationale + the "keep `:3000` on the mgmt VLAN"
 caveat live in [instance.example/dashboards/homepage/README.md](../instance.example/dashboards/homepage/README.md).
-The boundary is enforced at the NPM/firewall layer, never the container bind. No new
+The boundary is enforced at the NPM/firewall layer, never the container bind. The container receives **its own
+env file** (`docker/.env.homepage`: the `homepage_var_*` keys of the `dashboards` domain, nothing else) — never the
+stack `.env`, which carries every other secret and which it `env_file`d wholesale until 2026-10-09 (the 2026-10-08
+review, finding 5; `tests/unit/test_homepage_env_isolation.py`). No new
 control row — no trust boundary moves and the served YAML stays secret-free.
 
 ### C4 — Blast-radius / access-chain gating on changes  ◑ partial
